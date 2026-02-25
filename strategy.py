@@ -442,8 +442,15 @@ class BarLoggerStrategy(Strategy):
             )
 
     def _flush_history_for(self, sym: str) -> None:
-        """历史数据加载完成后，批写 Redis，然后订阅实时 K 线"""
-        # 防止重复执行
+        """
+        在 on_start() 设置的 Timer 触发后执行（默认 15s）：
+        1. 将 _hist_m1 内存缓冲批量写入 Redis（bars:1m:{sym}）
+        2. 补刷最后一个未完成的 M5 bucket，写入 Redis（bars:5m:{sym}）
+        3. 订阅实时 K 线（subscribe_bars），后续 on_bar() 开始接收实时数据
+        
+        重要：此方法只执行一次（_hist_flushed 防止重复）。
+        """
+        # 防止重复执行（Timer 可能被意外触发两次）
         if self._hist_flushed.get(sym):
             self.log.debug(f"[FLUSH] {sym}: 已刷写过，跳过")
             return
@@ -458,19 +465,14 @@ class BarLoggerStrategy(Strategy):
         else:
             self.log.info(f"[FLUSH] {sym}: 开始批写 Redis，缓冲 M1={len(bars)} 根")
 
-            # 补刷最后一个未完成的 M5 bucket
-            last_m5 = self._m5_bucket[sym].flush_current()
-            if last_m5:
-                self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket  C={last_m5['close']:.2f}")
-                self._process_m5_bar(sym, last_m5, publish=False)
-
             if not self._redis:
                 self.log.warning(f"[FLUSH] {sym}: ⚠ Redis 不可用，跳过写入")
             else:
+                # ── 步骤1：写入 M1 历史 K 线 ──────────────────────────────
                 try:
                     last = bars[-1]
                     key  = f"bars:1m:{sym}"
-                    written = bars[-MAX_BARS:]
+                    written = bars[-MAX_BARS:]    # 最多保留 MAX_BARS 根
                     self._redis.set(key, json.dumps(written))
                     self.log.info(
                         f"[FLUSH] {sym}: ✓ bars:1m 写入完成  "
@@ -482,9 +484,11 @@ class BarLoggerStrategy(Strategy):
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:1m Redis 写入失败: {e}")
 
-                # M5 历史数据一次性覆盖写入（清除昨日旧数据）
+                # ── 步骤2：补刷最后一个未完成的 M5 bucket ─────────────────
+                # 注意：flush_current() 不清空 _bars，只是返回当前 bucket 的聚合结果。
+                # 只调用一次，计算指标后追加到 m5_bars，然后整体覆盖写入 Redis。
+                # （历史阶段 _hist_m5 是内存列表，不走 _process_m5_bar() 避免重复写 Redis）
                 m5_bars = self._hist_m5.get(sym, [])
-                # 补刷最后一个未完成的 M5 bucket
                 last_m5 = self._m5_bucket[sym].flush_current()
                 if last_m5:
                     o5, h5, lo5, c5 = last_m5["open"], last_m5["high"], last_m5["low"], last_m5["close"]
@@ -499,6 +503,8 @@ class BarLoggerStrategy(Strategy):
                         "st_lower": st_lo5,
                     })
                     self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket  C={c5:.2f}")
+
+                # ── 步骤3：整体覆盖写入 M5 历史 K 线 ──────────────────────
                 try:
                     self._redis.set(f"bars:5m:{sym}", json.dumps(m5_bars[-MAX_BARS:]))
                     self.log.info(
@@ -508,7 +514,10 @@ class BarLoggerStrategy(Strategy):
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:5m Redis 写入失败: {e}")
 
-        # 历史数据处理完成，现在订阅实时 K 线
+        # ── 步骤4：订阅实时 K 线 ────────────────────────────────────────
+        # 历史数据已写入 Redis，现在开始接收实时 bar（on_bar() 将被触发）
+        # 注意：subscribe_bars() 必须在历史 flush 完成后调用，否则实时 bar
+        # 可能在历史写入前到达，导致数据顺序混乱。
         bar_type = self._bar_types.get(sym)
         if bar_type:
             self.subscribe_bars(bar_type)
@@ -518,8 +527,17 @@ class BarLoggerStrategy(Strategy):
         else:
             self.log.error(f"[FLUSH] {sym}: ✗ bar_type 未记录，无法订阅实时")
 
-    # ── 实时 K 线收盘（P1）────────────────────────────────────────────
+    # ── 实时 K 线收盘（P1）────────────────────────────────────
     def on_bar(self, bar: Bar) -> None:
+        """
+        实时 1分钟 K 线收盘回调（subscribe_bars 订阅后触发）。
+        居然流程：
+          1. 取消当前未完成 tick bar（该分钟已完结）
+          2. 计算 M1 ST/EMA 指标
+          3. 尝试 M5 聚合（满 5 分钟输出一根 M5 bar）
+          4. 将 M1 bar 写入 Redis（防重复时间戳）
+          5. PUBLISH kline:1m:{sym}（前端 WebSocket 世订阅）
+        """
         self._bar_count += 1
         sym = bar.bar_type.instrument_id.symbol.value
         o, h, lo, c = float(bar.open), float(bar.high), float(bar.low), float(bar.close)
@@ -527,7 +545,7 @@ class BarLoggerStrategy(Strategy):
         # ts_event 是 bar 开始时间（即 bar 所属分钟），直接使用，与 tick 的 et_min 对齐
         et = self._et_fake_utc(bar.ts_event)
 
-        # 过滤非今日实时 bar（防止 IBKR 追倒推送历史）
+        # ─ 过滤非今日实时 bar（防止 IBKR 追倒推送历史）────────────
         if self._today_et_date:
             ts_utc = bar.ts_event // 1_000_000_000
             bar_et_dt = datetime.fromtimestamp(ts_utc, tz=ZoneInfo("UTC")).astimezone(
@@ -540,7 +558,7 @@ class BarLoggerStrategy(Strategy):
                 )
                 return
 
-        # M1 指标计算（极端情况：历史未到就收到实时 bar，临时初始化）
+        # ─ M1 指标计算（极端情况：历史未到就收到实时 bar，临时初始化）────
         if sym not in self._st_m1:
             self.log.warning(
                 f"[BAR] {sym}: ⚠ 实时 bar 到达时历史尚未预热，临时初始化 ST/EMA 状态机"
@@ -553,20 +571,20 @@ class BarLoggerStrategy(Strategy):
 
         bar_dict = {
             "symbol":   sym,    # 前端二次校验，防止数据串台
-            "time":     et,
+            "time":     et,     # ET fake-UTC 秒级时间戳（bar 开始时刻）
             "open":     round(o, 4),
             "high":     round(h, 4),
             "low":      round(lo, 4),
             "close":    round(c, 4),
             "volume":   v,
-            "ema21":    ema21,
-            "st_value": st_val,
-            "st_dir":   st_dir,
+            "ema21":    ema21,   # None 表示 EMA 尚未预热完成
+            "st_value": st_val,  # 0.0 表示 ATR 尚未预热
+            "st_dir":   st_dir,  # 1=多头 -1=空头
             "st_upper": st_up,
             "st_lower": st_lo,
         }
 
-        # 实时 K 线日志（修正三元表达式 bug）
+        # 实时 K 线日志
         if ema21 is not None:
             self.log.info(
                 f"[BAR #{self._bar_count}] {sym}  "
@@ -582,10 +600,10 @@ class BarLoggerStrategy(Strategy):
                 f"EMA21=预热中"
             )
 
-        # 重置 tick bar（下一根 K 线开始前清空）
+        # ─ 清空 tick K 线（该分钟已收盘，下一根分钟事件到来时重新初始化）───
         self._cur_bar[sym] = None
 
-        # M5 聚合
+        # ─ M5 聚合（push 返回不为 None 表示一个 M5 bucket 已满）─────────
         if sym in self._m5_bucket:
             m5_out = self._m5_bucket[sym].push(bar_dict)
             if m5_out:
@@ -595,6 +613,7 @@ class BarLoggerStrategy(Strategy):
                 )
                 self._process_m5_bar(sym, m5_out, publish=True)
 
+        # ─ 写入 Redis + PUBLISH kline:1m:──────────────────────────────
         if not self._redis:
             self.log.warning(f"[BAR] {sym}: Redis 不可用，跳过写入")
             return
@@ -605,6 +624,7 @@ class BarLoggerStrategy(Strategy):
             raw  = self._redis.get(key)
             all_ = json.loads(raw) if raw else []
             # 防止历史/实时 bar 时间戳重叠：末尾相同时间戳则替换，否则追加
+            # （历史 flush 后立即订阅实时，IBKR 可能重复推送最后一根）
             if all_ and all_[-1]['time'] == bar_dict['time']:
                 self.log.debug(f"[BAR] {sym}: 替换重复时间戳 bar time={bar_dict['time']}")
                 all_[-1] = bar_dict
@@ -613,6 +633,7 @@ class BarLoggerStrategy(Strategy):
             if len(all_) > MAX_BARS:
                 all_ = all_[-MAX_BARS:]
             self._redis.set(key, json.dumps(all_))
+            # kline:1m: 事件通过 Redis PubSub 推送到 server.js，再由 WebSocket 广播到前端
             self._redis.publish(ch, json.dumps(bar_dict))
             self.log.debug(
                 f"[BAR] {sym}: ✓ Redis SET bars:1m ({len(all_)} 根) + PUBLISH {ch}"
@@ -671,22 +692,38 @@ class BarLoggerStrategy(Strategy):
         except Exception as e:
             self.log.error(f"[M5] {sym}: ✗ Redis 写入失败: {e}")
 
-    # ── QuoteTick 实时更新（P2）────────────────────────────────────────
+    # ── QuoteTick 实时更新（P2）────────────────────────────────────
     def on_quote_tick(self, tick: QuoteTick) -> None:
+        """
+        实时 Bid/Ask Tick 回调（訂阅 subscribe_quote_ticks 后触发）。
+        主要职责：展示当前分钟的实时 K 线跳动（运用中间价 mid 近似 OHLCV）。
+
+        数据流程：
+          1. 计算 bid/ask 中间价（mid）
+          2. 维护 _cur_bar：首次 tick 初始化，后续 tick 更新 H/L/C
+          3. PUBLISH bars:1m:tick:{sym} 到 Redis，由 server.js 广播到前端
+
+        注意：
+          - tick 的 time = et_min = et - et%60，与 on_bar() 的 et 对齐到同一分钟
+          - open 只在首次 tick 时设定，后续 tick 不更新 open（人为开盘价）
+          - on_bar() 收盘时设 _cur_bar[sym] = None，下一个 tick 会重新初始化
+        """
         sym = tick.instrument_id.symbol.value
+        # 使用 bid/ask 中间价作为证券实时价格近似
         mid = (float(tick.bid_price) + float(tick.ask_price)) / 2
 
         cur = self._cur_bar.get(sym)
         if cur is None:
-            # 首次 tick：初始化当前未完成 K 线
+            # ― 首次 tick：初始化当前未完成 K 线 ――――――――――――――――
             et     = self._et_fake_utc(tick.ts_event)
-            et_min = et - (et % 60)
+            et_min = et - (et % 60)   # 对齐到当前分钟起始（与 on_bar 时间戳一致）
             cur    = {"symbol": sym, "time": et_min, "open": mid, "high": mid, "low": mid, "close": mid}
             self._cur_bar[sym] = cur
             self.log.debug(
                 f"[TICK] {sym}: 新 tick bar 初始化  time={et_min}  mid={mid:.2f}"
             )
         else:
+            # ― 后续 tick：更新最高价/最低价/收盘价；open 不变 ――――――
             cur["high"]  = max(cur["high"], mid)
             cur["low"]   = min(cur["low"],  mid)
             cur["close"] = mid
@@ -694,6 +731,7 @@ class BarLoggerStrategy(Strategy):
         if not self._redis:
             return
         try:
+            # PUBLISH 实时 tick K 线到 Redis PubSub→server.js→WebSocket→前端
             self._redis.publish(f"bars:1m:tick:{sym}", json.dumps(cur))
         except Exception as e:
             self.log.warning(f"[TICK] {sym}: PUBLISH 失败: {e}")
