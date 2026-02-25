@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Trading Dashboard · 四宫格</title>
+    <script
+        src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #131722;
+            color: #d1d4dc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* 顶部导航 */
+        #topbar {
+            display: flex;
+            align-items: center;
+            padding: 5px 14px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+            flex-shrink: 0;
+            gap: 10px;
+            height: 38px;
+        }
+
+        #topbar-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        #topbar-date {
+            font-size: 11px;
+            color: #787b86;
+        }
+
+        .nav-link {
+            margin-left: auto;
+            color: #787b86;
+            font-size: 11px;
+            text-decoration: none;
+            padding: 2px 8px;
+            border: 1px solid #2a2e39;
+            border-radius: 3px;
+        }
+
+        .nav-link:hover {
+            border-color: #787b86;
+            color: #d1d4dc;
+        }
+
+        /* 四宫格 */
+        #quad-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 2px;
+            background: #0e1117;
+            overflow: hidden;
+        }
+
+        .panel {
+            position: relative;
+            background: #131722;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 面板头部（两行） */
+        .panel-head {
+            flex-shrink: 0;
+            background: rgba(19, 23, 34, .92);
+            border-bottom: 1px solid #1e222d;
+            padding: 4px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            z-index: 10;
+        }
+
+        /* 头部第一行：symbol + price + change + 仓位 */
+        .ph-row1 {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ph-symbol {
+            font-size: 13px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .ph-price {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .ph-chg {
+            font-size: 11px;
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+
+        .ph-interval {
+            font-size: 10px;
+            color: #4b5563;
+        }
+
+        /* 仓位信息（右侧紧凑） */
+        .ph-pos {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+        }
+
+        .ph-pos .lbl {
+            color: #787b86;
+            margin-right: 2px;
+        }
+
+        .ph-pos .val {
+            font-weight: 600;
+        }
+
+        /* 头部第二行：OHLC hover + 控制按钮 */
+        .ph-row2 {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            min-height: 16px;
+        }
+
+        .ph-ohlc {
+            display: none;
+            align-items: center;
+            font-size: 11px;
+            font-family: 'Roboto Mono', monospace, sans-serif;
+            gap: 0;
+        }
+
+        .ph-ohlc .ot {
+            color: #4b5563;
+            margin-right: 8px;
+            font-size: 10px;
+        }
+
+        .ph-ohlc .oi {
+            display: flex;
+            align-items: center;
+            margin-right: 7px;
+        }
+
+        .ph-ohlc .ol {
+            color: #787b86;
+            margin-right: 2px;
+            font-size: 10px;
+        }
+
+        .ph-ohlc .ov {
+            font-weight: 600;
+            font-size: 11px;
+            color: #d1d4dc;
+        }
+
+        /* 控制按钮（最右，紧凑） */
+        .ph-ctrl {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .mini-btn {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 3px;
+            border: none;
+            cursor: pointer;
+        }
+
+        .mini-open {
+            background: #26a69a;
+            color: #fff;
+        }
+
+        .mini-close {
+            background: #ef5350;
+            color: #fff;
+        }
+
+        .mini-open:hover {
+            background: #2bbbad;
+        }
+
+        .mini-close:hover {
+            background: #f44336;
+        }
+
+        /* ST toggle mini */
+        .mini-toggle {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 10px;
+            color: #787b86;
+            cursor: pointer;
+        }
+
+        .mini-toggle input {
+            width: 24px;
+            height: 13px;
+            cursor: pointer;
+            accent-color: #26a69a;
+        }
+
+        .up {
+            color: #26a69a;
+        }
+
+        .down {
+            color: #ef5350;
+        }
+
+        .up-bg {
+            background: rgba(38, 166, 154, .15);
+        }
+
+        .down-bg {
+            background: rgba(239, 83, 80, .15);
+        }
+
+        /* 图表容器 */
+        .chart-wrap {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .chart-el {
+            width: 100%;
+            height: 100%;
+        }
+
+        .loading {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #131722;
+            font-size: 13px;
+            color: #787b86;
+            z-index: 99;
+        }
+
+        /* 开仓弹窗（共用一个） */
+        .modal-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .6);
+            z-index: 999;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-backdrop.open {
+            display: flex;
+        }
+
+        .modal {
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 10px;
+            padding: 20px 24px;
+            min-width: 280px;
+        }
+
+        .modal h3 {
+            font-size: 14px;
+            color: #fff;
+            margin-bottom: 12px;
+        }
+
+        .modal label {
+            display: block;
+            font-size: 11px;
+            color: #787b86;
+            margin: 8px 0 3px;
+        }
+
+        .modal input {
+            width: 100%;
+            background: #131722;
+            border: 1px solid #2a2e39;
+            color: #d1d4dc;
+            border-radius: 4px;
+            padding: 5px 8px;
+            font-size: 12px;
+        }
+
+        .modal-btns {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+            justify-content: flex-end;
+        }
+
+        .modal-btns button {
+            padding: 5px 14px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        #mq-cancel {
+            background: #2a2e39;
+            color: #d1d4dc;
+        }
+
+        #mq-confirm {
+            background: #26a69a;
+            color: #fff;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- 导航条 -->
+    <div id="topbar">
+        <span id="topbar-title">📊 多标的看板</span>
+        <span id="topbar-date">2026-02-23 · ET</span>
+        <a href="/" class="nav-link">◀ 单图视图</a>
+    </div>
+
+    <!-- 开仓弹窗（全局共用） -->
+    <div class="modal-backdrop" id="mq-modal">
+        <div class="modal">
+            <h3 id="mq-title">开仓</h3>
+            <label>开仓价</label>
+            <input type="number" id="mq-entry" step="0.01">
+            <label>止损价</label>
+            <input type="number" id="mq-sl" step="0.01">
+            <label>数量（股）</label>
+            <input type="number" id="mq-qty" value="1" min="1">
+            <div class="modal-btns">
+                <button id="mq-cancel">取消</button>
+                <button id="mq-confirm">确认开仓</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 四宫格 -->
+    <div id="quad-grid"></div>
+
+    <script>
+        const SYMBOLS = ['QQQ', 'SPY', 'AAPL', 'TSLA'];
+        const grid = document.getElementById('quad-grid');
+        let activeSym = null;
+
+        // 弹窗逻辑
+        const modal = document.getElementById('mq-modal');
+        const mqTitle = document.getElementById('mq-title');
+        document.getElementById('mq-cancel').addEventListener('click', () => modal.classList.remove('open'));
+        modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+        document.getElementById('mq-confirm').addEventListener('click', async () => {
+            const entry = parseFloat(document.getElementById('mq-entry').value);
+            const sl = parseFloat(document.getElementById('mq-sl').value);
+            const qty = parseInt(document.getElementById('mq-qty').value, 10);
+            if (!activeSym || isNaN(entry) || isNaN(sl) || isNaN(qty)) { alert('请填写完整'); return; }
+            await fetch(`/api/position/${activeSym}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry_price: entry, stop_loss: sl, quantity: qty }),
+            });
+            modal.classList.remove('open');
+            alert(`${activeSym} 开仓成功`);
+        });
+
+        // 图表默认配置
+        function makeChart(el) {
+            return LightweightCharts.createChart(el, {
+                layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
+                grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                rightPriceScale: { borderColor: '#2a2e39' },
+                timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
+                width: el.parentElement.clientWidth,
+                height: el.parentElement.clientHeight,
+            });
+        }
+
+        // SuperTrend 分段
+        function drawST(chart, bars) {
+            let curDir = null, seg = [];
+            function flush() {
+                if (!seg.length) return;
+                chart.addLineSeries({
+                    color: curDir === 1 ? '#26a69a' : '#ef5350',
+                    lineWidth: 2,
+                    crosshairMarkerVisible: false,
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                }).setData(seg);
+            }
+            for (const b of bars) {
+                if (b.st_value == null) continue;
+                if (b.st_dir !== curDir) { flush(); curDir = b.st_dir; seg = []; }
+                seg.push({ time: b.time, value: b.st_value });
+            }
+            flush();
+        }
+
+        // 加载单个标的
+        async function loadSymbol(sym) {
+            // 创建面板 DOM
+            const panel = document.createElement('div');
+            panel.className = 'panel';
+            panel.id = `panel-${sym}`;
+            panel.innerHTML = `
+        <div class="panel-head">
+          <div class="ph-row1">
+            <span class="ph-symbol">${sym}</span>
+            <span class="ph-price up" id="pp-${sym}">—</span>
+            <span class="ph-chg up-bg up" id="pc-${sym}">—</span>
+            <span class="ph-interval">1m·ET</span>
+            <div class="ph-pos" id="pos-${sym}" style="display:none">
+              <span><span class="lbl">开仓</span><span class="val" id="pe-${sym}">—</span></span>
+              <span><span class="lbl">止损</span><span class="val down" id="ps-${sym}">—</span></span>
+              <span><span class="lbl">盈亏</span><span class="val" id="pn-${sym}">—</span></span>
+            </div>
+          </div>
+          <div class="ph-row2">
+            <div class="ph-ohlc" id="ohlc-${sym}">
+              <span class="ot" id="ot-${sym}"></span>
+              <span class="oi"><span class="ol">O</span><span class="ov" id="oo-${sym}"></span></span>
+              <span class="oi"><span class="ol">H</span><span class="ov" style="color:#26a69a" id="oh-${sym}"></span></span>
+              <span class="oi"><span class="ol">L</span><span class="ov" style="color:#ef5350" id="ol-${sym}"></span></span>
+              <span class="oi"><span class="ol">C</span><span class="ov" id="oc-${sym}"></span></span>
+            </div>
+            <div class="ph-ctrl">
+              <label class="mini-toggle">
+                <input type="checkbox" id="st-${sym}">
+                <span>ST跟踪</span>
+              </label>
+              <button class="mini-btn mini-open" id="bo-${sym}">开仓</button>
+              <button class="mini-btn mini-close" id="bc-${sym}">平仓</button>
+            </div>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div class="loading" id="ld-${sym}">⏳ ${sym} 加载中…</div>
+          <div class="chart-el" id="c-${sym}"></div>
+        </div>
+      `;
+            grid.appendChild(panel);
+
+            // 按钮事件
+            document.getElementById(`bo-${sym}`).addEventListener('click', () => {
+                activeSym = sym;
+                mqTitle.textContent = `${sym} 开仓`;
+                modal.classList.add('open');
+            });
+            document.getElementById(`bc-${sym}`).addEventListener('click', async () => {
+                if (!confirm(`确认平仓 ${sym}？`)) return;
+                await fetch(`/api/position/${sym}`, { method: 'DELETE' });
+                document.getElementById(`pos-${sym}`).style.display = 'none';
+                alert(`${sym} 平仓成功`);
+            });
+            document.getElementById(`st-${sym}`).addEventListener('change', async e => {
+                await fetch(`/api/settings/${sym}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ st_trail: e.target.checked }),
+                });
+            });
+
+            try {
+                const res = await fetch(`/api/data/${sym}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const { m1_bars, position } = await res.json();
+
+                // 更新价格头
+                const last = m1_bars[m1_bars.length - 1];
+                const first = m1_bars[0];
+                const chg = last.close - first.open;
+                const pct = (chg / first.open * 100).toFixed(2);
+                const cls = chg >= 0 ? 'up' : 'down';
+                document.getElementById(`pp-${sym}`).textContent = last.close.toFixed(2);
+                document.getElementById(`pp-${sym}`).className = `ph-price ${cls}`;
+                document.getElementById(`pc-${sym}`).textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)} (${pct}%)`;
+                document.getElementById(`pc-${sym}`).className = `ph-chg ${cls} ${chg >= 0 ? 'up-bg' : 'down-bg'}`;
+
+                // 仓位信息
+                if (position && position.entry_price) {
+                    const cur = last.close;
+                    const pnl = (cur - position.entry_price) * position.quantity;
+                    document.getElementById(`pe-${sym}`).textContent = position.entry_price.toFixed(2);
+                    document.getElementById(`ps-${sym}`).textContent = position.stop_loss.toFixed(2);
+                    const pnlEl = document.getElementById(`pn-${sym}`);
+                    pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`;
+                    pnlEl.className = `val ${pnl >= 0 ? 'up' : 'down'}`;
+                    document.getElementById(`pos-${sym}`).style.display = 'flex';
+                }
+
+                // 图表
+                const el = document.getElementById(`c-${sym}`);
+                const chart = makeChart(el);
+                const cs = chart.addCandlestickSeries({
+                    upColor: '#26a69a', downColor: '#ef5350',
+                    borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+                    wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+                });
+                cs.setData(m1_bars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
+                drawST(chart, m1_bars);
+
+                // OR 区间
+                const or15 = m1_bars.slice(0, 15);
+                const orH = Math.max(...or15.map(b => b.high));
+                const orL = Math.min(...or15.map(b => b.low));
+                cs.createPriceLine({
+                    price: orH, color: '#f59e0b', lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `OR H ${orH.toFixed(2)}`
+                });
+                cs.createPriceLine({
+                    price: orL, color: '#f59e0b', lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `OR L ${orL.toFixed(2)}`
+                });
+
+                // 仓位价格线
+                if (position && position.entry_price) {
+                    cs.createPriceLine({
+                        price: position.entry_price, color: '#2196f3', lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false
+                    });
+                    cs.createPriceLine({
+                        price: position.stop_loss, color: '#ef5350', lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false
+                    });
+                    if (position.entry_time) {
+                        cs.setMarkers([{
+                            time: position.entry_time, position: 'belowBar',
+                            color: '#2196f3', shape: 'arrowUp', text: `BUY @${position.entry_price}`, size: 1
+                        }]);
+                    }
+                }
+
+                // OHLC 十字线
+                const ohlcBox = document.getElementById(`ohlc-${sym}`);
+                const otEl = document.getElementById(`ot-${sym}`);
+                const ooEl = document.getElementById(`oo-${sym}`);
+                const ohEl = document.getElementById(`oh-${sym}`);
+                const olEl = document.getElementById(`ol-${sym}`);
+                const ocEl = document.getElementById(`oc-${sym}`);
+                chart.subscribeCrosshairMove(p => {
+                    if (!p || !p.time || !p.seriesData?.size) { ohlcBox.style.display = 'none'; return; }
+                    const bar = p.seriesData.get(cs);
+                    if (!bar) { ohlcBox.style.display = 'none'; return; }
+                    const d = new Date(p.time * 1000);
+                    const hh = String(d.getUTCHours()).padStart(2, '0');
+                    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+                    otEl.textContent = `${hh}:${mm} ET`;
+                    const bull = bar.close >= bar.open;
+                    ooEl.textContent = bar.open.toFixed(2); ooEl.style.color = bull ? '#26a69a' : '#ef5350';
+                    ohEl.textContent = bar.high.toFixed(2);
+                    olEl.textContent = bar.low.toFixed(2);
+                    ocEl.textContent = bar.close.toFixed(2); ocEl.style.color = bull ? '#26a69a' : '#ef5350';
+                    ohlcBox.style.display = 'flex';
+                });
+
+                chart.timeScale().fitContent();
+                document.getElementById(`ld-${sym}`).style.display = 'none';
+
+                // resize
+                new ResizeObserver(() => {
+                    chart.applyOptions({ width: el.parentElement.clientWidth, height: el.parentElement.clientHeight });
+                }).observe(el.parentElement);
+
+            } catch (e) {
+                document.getElementById(`ld-${sym}`).textContent = `❌ ${sym}: ${e.message}`;
+            }
+        }
+
+        // 并发加载所有标的
+        Promise.all(SYMBOLS.map(loadSymbol));
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.env
+.venv
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# 日志
+*.log
+/tmp/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 项目特定（敏感配置不入库）
+*.secret
+config/local.py

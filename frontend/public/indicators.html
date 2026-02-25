@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>指标积分排行 — Trading Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #131722;
+            color: #d1d4dc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            min-height: 100vh;
+        }
+
+        #nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 20px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+        }
+
+        #nav h1 {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav-links a {
+            font-size: 12px;
+            color: #787b86;
+            text-decoration: none;
+            padding: 3px 12px;
+            border-radius: 4px;
+            transition: background .15s;
+        }
+
+        .nav-links a:hover {
+            background: #2a2e39;
+            color: #d1d4dc;
+        }
+
+        .nav-links a.active {
+            background: rgba(41, 98, 255, .15);
+            color: #2962ff;
+        }
+
+        /* ── 三表并排布局 ── */
+        #main {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 16px;
+            padding: 24px 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* ── 单个积分卡片 ── */
+        .score-card {
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        /* 卡片标题 */
+        .card-header {
+            padding: 12px 16px 10px;
+            border-bottom: 1px solid #2a2e39;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .card-sub {
+            font-size: 11px;
+            color: #4b5563;
+            margin-top: 4px;
+        }
+
+        #update-time {
+            font-size: 11px;
+            color: #4b5563;
+            float: right;
+        }
+
+        /* ── 表格样式 ── */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead tr {
+            background: #13172299;
+        }
+
+        thead th {
+            padding: 8px 14px;
+            font-size: 10px;
+            font-weight: 600;
+            color: #4b5563;
+            text-align: left;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        thead th.right {
+            text-align: right;
+        }
+
+        tbody tr {
+            border-top: 1px solid #2a2e3944;
+            transition: filter .12s;
+        }
+
+        tbody tr:hover {
+            filter: brightness(1.15);
+        }
+
+        tbody tr.bull {
+            background: rgba(38, 166, 154, 0.08);
+        }
+
+        tbody tr.bear {
+            background: rgba(239, 83, 80, 0.08);
+        }
+
+        td {
+            padding: 13px 14px;
+            color: #d1d4dc;
+            font-size: 13px;
+            vertical-align: middle;
+        }
+
+        td.right {
+            text-align: right;
+        }
+
+        /* 排名 */
+        .rank {
+            font-size: 12px;
+            color: #4b5563;
+        }
+
+        /* 标的 */
+        .sym {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .sym a {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        /* 积分大字 */
+        .score {
+            font-size: 24px;
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+        }
+
+        /* 进度条 */
+        .bar-bg {
+            height: 5px;
+            border-radius: 3px;
+            background: #2a2e39;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+
+        .bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width .35s;
+        }
+
+        /* 方向徽标 */
+        .badge {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+
+        .badge-bull {
+            background: rgba(38, 166, 154, .2);
+            color: #26a69a;
+        }
+
+        .badge-bear {
+            background: rgba(239, 83, 80, .2);
+            color: #ef5350;
+        }
+
+        /* 加载 / 错误 */
+        .empty {
+            text-align: center;
+            padding: 30px;
+            color: #4b5563;
+            font-size: 13px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 13px;
+            height: 13px;
+            border: 2px solid #2a2e39;
+            border-top-color: #787b86;
+            border-radius: 50%;
+            animation: spin .7s linear infinite;
+            vertical-align: middle;
+            margin-right: 5px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="nav">
+        <h1>📈 Trading Dashboard</h1>
+        <div class="nav-links">
+            <a href="/">单图</a>
+            <a href="/multi.html">⊞ 四图</a>
+            <a href="/indicators.html" class="active">📊 积分</a>
+        </div>
+    </div>
+
+    <div id="main">
+        <!-- M1 ST 积分 -->
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#26a69a"></span>
+                    M1 SuperTrend 积分
+                    <span id="update-time" style="margin-left:auto;font-size:10px;color:#4b5563">—</span>
+                </div>
+                <div class="card-sub">1分钟 ST 做多 +1/棒 · 做空 -1/棒</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">积分</th>
+                        <th>方向</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-m1">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- M5 ST 积分 -->
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#60a5fa"></span>
+                    M5 SuperTrend 积分
+                </div>
+                <div class="card-sub">5分钟 ST 做多 +1/棒 · 做空 -1/棒</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">积分</th>
+                        <th>方向</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-m5">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- EMA 积分 -->
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#f59e0b"></span>
+                    EMA 偏离积分
+                </div>
+                <div class="card-sub">(M5 收盘 − EMA21) ÷ ATR₁₀ · 正 = 价格在上方</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">积分</th>
+                        <th>位置</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-ema">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const REFRESH_MS = 10_000;
+
+        function badge(dir) {
+            if (dir === 1) return '<span class="badge badge-bull">▲ 多</span>';
+            if (dir === -1) return '<span class="badge badge-bear">▼ 空</span>';
+            return '<span style="color:#4b5563">—</span>';
+        }
+
+        function posLabel(emaScore) {
+            if (emaScore == null) return '<span style="color:#4b5563">—</span>';
+            return emaScore >= 0
+                ? '<span class="badge badge-bull">↑ 上方</span>'
+                : '<span class="badge badge-bear">↓ 下方</span>';
+        }
+
+        function buildRow(rank, sym, score, dir, color, maxAbs, isBull) {
+            const cls = isBull ? 'bull' : 'bear';
+            const pct = Math.min(100, maxAbs > 0 ? (Math.abs(score) / maxAbs) * 100 : 0).toFixed(1);
+            const fillCls = isBull ? '' : '';
+            const fillColor = color;
+            const sign = score > 0 ? '+' : '';
+            return `
+        <tr class="${cls}">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${color}">${sign}${score}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+            </div>
+          </td>
+          <td>${badge(dir)}</td>
+        </tr>
+      `;
+        }
+
+        function buildEmaRow(rank, sym, ema, color, maxAbs) {
+            const isBull = (ema ?? 0) >= 0;
+            const cls = isBull ? 'bull' : 'bear';
+            const pct = Math.min(100, maxAbs > 0 ? (Math.abs(ema ?? 0) / maxAbs) * 100 : 0).toFixed(1);
+            const val = ema != null ? (ema > 0 ? '+' : '') + ema.toFixed(2) : '—';
+            return `
+        <tr class="${cls}">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${color}">${val}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+            </div>
+          </td>
+          <td>${posLabel(ema)}</td>
+        </tr>
+      `;
+        }
+
+        async function loadData() {
+            try {
+                const res = await fetch('/api/indicators');
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json().then(rows => rows.filter(r => !r.error));
+
+                // 各表单独排序
+                const byM1 = [...data].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
+                const byM5 = [...data].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
+                const byEma = [...data].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
+
+                const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
+                const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
+                const maxEma = Math.max(0.01, ...byEma.map(r => Math.abs(r.ema_score ?? 0)));
+
+                document.getElementById('tbody-m1').innerHTML = byM1.map((r, i) =>
+                    buildRow(i + 1, r.symbol, r.st_score_m1 ?? 0, r.st_dir_m1,
+                        r.st_dir_m1 === 1 ? '#26a69a' : '#ef5350', maxM1, r.st_dir_m1 === 1)
+                ).join('');
+
+                document.getElementById('tbody-m5').innerHTML = byM5.map((r, i) =>
+                    buildRow(i + 1, r.symbol, r.st_score_m5 ?? 0, r.st_dir_m5,
+                        r.st_dir_m5 === 1 ? '#4ade80' : '#f87171', maxM5, r.st_dir_m5 === 1)
+                ).join('');
+
+                document.getElementById('tbody-ema').innerHTML = byEma.map((r, i) =>
+                    buildEmaRow(i + 1, r.symbol, r.ema_score,
+                        (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)
+                ).join('');
+
+                const now = new Date();
+                document.getElementById('update-time').textContent =
+                    `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+            } catch (e) {
+                ['tbody-m1', 'tbody-m5', 'tbody-ema'].forEach(id => {
+                    document.getElementById(id).innerHTML =
+                        `<tr><td colspan="4" class="empty">❌ ${e.message}</td></tr>`;
+                });
+            }
+        }
+
+        function connectWS() {
+            const ws = new WebSocket('ws://localhost:3000');
+            ws.onmessage = ({ data }) => {
+                const { channel } = JSON.parse(data);
+                if (channel.startsWith('kline:1m:') && !channel.includes('tick')) loadData();
+            };
+            ws.onclose = () => setTimeout(connectWS, 3000);
+        }
+
+        loadData();
+        setInterval(loadData, REFRESH_MS);
+        connectWS();
+    </script>
+</body>
+
+</html>

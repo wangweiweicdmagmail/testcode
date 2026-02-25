@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Dashboard</title>
+  <script
+    src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #131722;
+      color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── 顶部工具栏：左右两列，右侧分两行 ── */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      padding: 6px 16px;
+      background: #1e222d;
+      border-bottom: 1px solid #2a2e39;
+      flex-shrink: 0;
+      min-height: 58px;
+    }
+
+    /* 左列：symbol + price + OHLC 悬浮 */
+    #tb-left {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    #tb-left-row1 {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #tb-left-row2 {
+      display: flex;
+      align-items: center;
+      min-height: 18px;
+    }
+
+    #symbol-label {
+      font-size: 20px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+
+    #price-label {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    #price-change {
+      font-size: 13px;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .up {
+      color: #26a69a;
+    }
+
+    .down {
+      color: #ef5350;
+    }
+
+    .up-bg {
+      background: rgba(38, 166, 154, .15);
+    }
+
+    .down-bg {
+      background: rgba(239, 83, 80, .15);
+    }
+
+    /* 十字线 OHLC（TradingView 风格）放 left-row2 */
+    #crosshair-info {
+      display: none;
+      align-items: center;
+      gap: 0;
+      font-size: 12px;
+      font-family: 'Roboto Mono', monospace, sans-serif;
+    }
+
+    .ohlc-item {
+      display: flex;
+      align-items: center;
+      margin-right: 10px;
+    }
+
+    .ohlc-label {
+      color: #787b86;
+      margin-right: 3px;
+      font-size: 11px;
+    }
+
+    .ohlc-val {
+      font-weight: 600;
+      font-size: 12px;
+      color: #d1d4dc;
+    }
+
+    .ohlc-time {
+      color: #4b5563;
+      font-size: 11px;
+      margin-right: 12px;
+    }
+
+    /* 右列：两行 */
+    #tb-right {
+      margin-left: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 5px;
+    }
+
+    /* 右列第一行：仓位信息 */
+    #position-panel {
+      display: none;
+      background: rgba(30, 34, 45, .6);
+      border: 1px solid #2a2e39;
+      border-radius: 5px;
+      padding: 4px 12px;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    #position-panel .row {
+      display: flex;
+      gap: 18px;
+    }
+
+    #position-panel .item label {
+      color: #787b86;
+      margin-right: 4px;
+    }
+
+    #position-panel .item span {
+      font-weight: 600;
+    }
+
+    /* 右列第二行：操作按钮 */
+    #trade-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* 图表区 */
+    #chart-container {
+      flex: 1;
+      position: relative;
+    }
+
+    #chart {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* 图例 */
+    #legend {
+      position: absolute;
+      top: 8px;
+      left: 12px;
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 3px;
+      border-radius: 2px;
+    }
+
+    /* 加载提示 */
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #131722;
+      font-size: 16px;
+      color: #787b86;
+      z-index: 100;
+    }
+
+    /* 仓位操作按钮区 */
+    #trade-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: auto;
+    }
+
+    .btn {
+      padding: 5px 14px;
+      border-radius: 5px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+
+    .btn:hover {
+      opacity: .82;
+    }
+
+    .btn-open {
+      background: #26a69a;
+      color: #fff;
+    }
+
+    .btn-close {
+      background: #ef5350;
+      color: #fff;
+    }
+
+    /* ST 跟踪止盈 toggle */
+    .toggle-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #787b86;
+    }
+
+    .toggle {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+    }
+
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: #2a2e39;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background .2s;
+    }
+
+    .slider:before {
+      content: '';
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 3px;
+      top: 3px;
+      background: #d1d4dc;
+      border-radius: 50%;
+      transition: transform .2s;
+    }
+
+    .toggle input:checked+.slider {
+      background: #26a69a;
+    }
+
+    .toggle input:checked+.slider:before {
+      transform: translateX(16px);
+    }
+
+    /* 弹窗 */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .55);
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal {
+      background: #1e222d;
+      border: 1px solid #2a2e39;
+      border-radius: 10px;
+      padding: 24px 28px;
+      min-width: 300px;
+    }
+
+    .modal h3 {
+      margin-bottom: 16px;
+      font-size: 15px;
+      color: #fff;
+    }
+
+    .modal label {
+      display: block;
+      font-size: 12px;
+      color: #787b86;
+      margin-bottom: 4px;
+      margin-top: 12px;
+    }
+
+    .modal input {
+      width: 100%;
+      background: #131722;
+      border: 1px solid #2a2e39;
+      color: #d1d4dc;
+      border-radius: 5px;
+      padding: 6px 10px;
+      font-size: 13px;
+    }
+
+    .modal-btns {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+      justify-content: flex-end;
+    }
+
+    .modal-btns button {
+      padding: 6px 18px;
+      border-radius: 5px;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    #modal-cancel {
+      background: #2a2e39;
+      color: #d1d4dc;
+    }
+
+    #modal-confirm {
+      background: #26a69a;
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="toolbar">
+    <!-- 左列：symbol + price + OHLC 悬浮 -->
+    <div id="tb-left">
+      <div id="tb-left-row1">
+        <a href="/multi.html" style="font-size:11px;color:#787b86;text-decoration:none;
+                  padding:2px 8px;border:1px solid #2a2e39;border-radius:4px;
+                  margin-right:4px;white-space:nowrap;" title="四图总览">⊞ 四图</a>
+        <a href="/indicators.html" style="font-size:11px;color:#787b86;text-decoration:none;
+                  padding:2px 8px;border:1px solid #2a2e39;border-radius:4px;
+                  margin-right:6px;white-space:nowrap;" title="ST积分排行">📊 积分</a>
+        <span id="symbol-label">QQQ</span>
+        <span id="price-label" class="up">—</span>
+        <span id="price-change" class="up-bg up">—</span>
+      </div>
+      <div id="tb-left-row2">
+        <!-- 十字线 OHLC（TradingView 风格） -->
+        <div id="crosshair-info">
+          <span class="ohlc-time" id="ci-time"></span>
+          <span class="ohlc-item"><span class="ohlc-label">O</span><span class="ohlc-val" id="ci-o"></span></span>
+          <span class="ohlc-item"><span class="ohlc-label">H</span><span class="ohlc-val" style="color:#26a69a"
+              id="ci-h"></span></span>
+          <span class="ohlc-item"><span class="ohlc-label">L</span><span class="ohlc-val" style="color:#ef5350"
+              id="ci-l"></span></span>
+          <span class="ohlc-item"><span class="ohlc-label">C</span><span class="ohlc-val" id="ci-c"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右列：两行 -->
+    <div id="tb-right">
+      <!-- 第一行：仓位信息 -->
+      <div id="position-panel">
+        <div class="row">
+          <div class="item"><label>开仓价</label><span id="p-entry">—</span></div>
+          <div class="item"><label>止损价</label><span id="p-sl" style="color:#ef5350">—</span></div>
+          <div class="item"><label>数量</label><span id="p-qty">—</span></div>
+          <div class="item">
+            <label>盈亏</label>
+            <span id="p-pnl">—</span>
+            <span id="p-pnl-pct" style="font-size:11px;margin-left:4px">—</span>
+          </div>
+        </div>
+      </div>
+      <!-- 第二行：操作按钮 -->
+      <div id="trade-actions">
+        <!-- 标的切换下拉 -->
+        <select id="symbol-select"
+          style="background:#131722;color:#d1d4dc;border:1px solid #2a2e39;border-radius:4px;padding:3px 8px;font-size:13px;cursor:pointer;">
+          <option value="QQQ">QQQ</option>
+          <option value="AAPL">AAPL</option>
+          <option value="NVDA">NVDA</option>
+          <option value="TSLA">TSLA</option>
+        </select>
+        <div style="width:1px;height:22px;background:#2a2e39"></div>
+        <div class="toggle-wrap">
+          <label class="toggle">
+            <input type="checkbox" id="st-trail-toggle">
+            <span class="slider"></span>
+          </label>
+          <span id="st-trail-label">ST跟踪止盈</span>
+        </div>
+        <div style="width:1px;height:22px;background:#2a2e39"></div>
+        <button class="btn btn-open" id="btn-open">开仓</button>
+        <button class="btn btn-close" id="btn-close">平仓</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-container">
+    <div id="loading">⏳ 加载数据中…</div>
+    <div id="chart"></div>
+    <div id="legend">
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#26a69a"></div>
+        <span style="color:#26a69a">SuperTrend↑</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#ef5350"></div>
+        <span style="color:#ef5350">SuperTrend↓</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 开仓弹窗（必须在 script 之前，否则 JS 获取不到元素） -->
+  <div class="modal-backdrop" id="open-modal">
+    <div class="modal">
+      <h3>开仓</h3>
+      <label>开仓价</label>
+      <input type="number" id="m-entry" step="0.01" placeholder="如 600.28">
+      <label>止损价</label>
+      <input type="number" id="m-sl" step="0.01" placeholder="如 599.28">
+      <label>数量（股）</label>
+      <input type="number" id="m-qty" value="1" min="1">
+      <div class="modal-btns">
+        <button id="modal-cancel">取消</button>
+        <button id="modal-confirm">确认开仓</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ─── 配置：从 URL ?symbol=XXX 读取标的，默认 QQQ ────────────────────
+    const urlParams = new URLSearchParams(window.location.search);
+    let SYMBOL = (urlParams.get('symbol') || 'QQQ').toUpperCase();
+
+    // ─── 图表初始化 ─────────────────────────────────────────
+    const chartEl = document.getElementById("chart");
+    const chart = LightweightCharts.createChart(chartEl, {
+      layout: {
+        background: { color: "#131722" },
+        textColor: "#d1d4dc",
+      },
+      grid: {
+        vertLines: { color: "#1e222d" },
+        horzLines: { color: "#1e222d" },
+      },
+      crosshair: {
+        mode: LightweightCharts.CrosshairMode.Normal,
+      },
+      rightPriceScale: {
+        borderColor: "#2a2e39",
+      },
+      timeScale: {
+        borderColor: "#2a2e39",
+        timeVisible: true,
+        secondsVisible: false,
+        fixLeftEdge: true,
+      },
+    });
+
+    // K线系列
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#26a69a",
+      downColor: "#ef5350",
+      borderUpColor: "#26a69a",
+      borderDownColor: "#ef5350",
+      wickUpColor: "#26a69a",
+      wickDownColor: "#ef5350",
+    });
+
+    // SuperTrend 按方向段创建独立 LineSeries
+    let stSeriesList = [];
+    let stLastDir = null;
+    let stLastSeries = null;  // 当前活跃 segment 的 series 引用
+
+    // 自适应图表大小
+    new ResizeObserver(() => {
+      const rect = chartEl.getBoundingClientRect();
+      chart.applyOptions({ width: rect.width, height: rect.height });
+    }).observe(chartEl);
+
+    // ─── 开盘区间 Opening Range（RTH 开盘后前15分钟 09:30–09:44 ET）─────
+    function addOpeningRange(bars) {
+      // 09:30 ET = fake-UTC 时间戳 09*3600 + 30*60 = 34200
+      // 找到第一根 >= 09:30 的 RTH K 线
+      const RTH_START = 9 * 3600 + 30 * 60;  // 34200 秒
+      const rthIdx = bars.findIndex(b => (b.time % 86400) >= RTH_START);
+      if (rthIdx < 0) return;  // 无 RTH 数据
+      const or = bars.slice(rthIdx, rthIdx + 15);  // 09:30–09:44 ET
+      if (or.length === 0) return;
+      const orHigh = Math.max(...or.map(b => b.high));
+      const orLow = Math.min(...or.map(b => b.low));
+
+      // OR High（橙色虚线）
+      candleSeries.createPriceLine({
+        price: orHigh,
+        color: '#f59e0b',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `OR High  ${orHigh.toFixed(2)}`,
+      });
+      // OR Low（橙色虚线）
+      candleSeries.createPriceLine({
+        price: orLow,
+        color: '#f59e0b',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `OR Low  ${orLow.toFixed(2)}`,
+      });
+    }
+
+    // ─── 仓位线 ─────────────────────────────────────────────
+    function addPositionLines(position) {
+      if (!position) return;
+
+      // 开仓价（蓝色虚线）
+      candleSeries.createPriceLine({
+        price: position.entry_price,
+        color: "#2196f3",
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `开仓 ${position.entry_price}`,
+      });
+
+      // 止损价（红色虚线）
+      candleSeries.createPriceLine({
+        price: position.stop_loss,
+        color: "#ef5350",
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `止损 ${position.stop_loss}`,
+      });
+
+      // 开仓 Marker
+      candleSeries.setMarkers([{
+        time: position.entry_time,
+        position: "belowBar",
+        color: "#2196f3",
+        shape: "arrowUp",
+        text: `BUY @${position.entry_price}`,
+        size: 1,
+      }]);
+
+      // 更新仓位面板
+      const pnlEl = document.getElementById("p-pnl");
+      const pnlPct = document.getElementById("p-pnl-pct");
+      document.getElementById("p-entry").textContent = position.entry_price;
+      document.getElementById("p-sl").textContent = position.stop_loss;
+      document.getElementById("p-qty").textContent = `${position.quantity} 股`;
+      pnlEl.textContent = `${position.pnl >= 0 ? "+" : ""}${position.pnl}`;
+      pnlPct.textContent = `(${position.pnl_pct >= 0 ? "+" : ""}${position.pnl_pct}%)`;
+      pnlEl.className = position.pnl >= 0 ? "up" : "down";
+      pnlPct.className = position.pnl >= 0 ? "up" : "down";
+      document.getElementById("position-panel").style.display = "block";
+    }
+
+    // ─── 价格更新工具栏 ──────────────────────────────────────
+    function updateToolbar(bars) {
+      if (!bars || bars.length < 2) return;
+      const last = bars[bars.length - 1];
+      const first = bars[0];
+      const change = last.close - first.open;
+      const changePct = (change / first.open * 100).toFixed(2);
+      const priceEl = document.getElementById("price-label");
+      const changeEl = document.getElementById("price-change");
+      priceEl.textContent = last.close.toFixed(2);
+      changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${changePct}%)`;
+      const cls = change >= 0 ? "up" : "down";
+      const clsBg = change >= 0 ? "up-bg" : "down-bg";
+      priceEl.className = cls;
+      changeEl.className = `${cls} ${clsBg}`;
+    }
+
+    // SuperTrend 按方向段创建独立 LineSeries，切换点自然断开
+    function createSegmentedST(bars) {
+      // 清除旧 series
+      stSeriesList.forEach(s => chart.removeSeries(s));
+      stSeriesList = [];
+      stLastDir = null;
+
+      let currentDir = null;
+      let segData = [];
+
+      function flushSegment() {
+        if (segData.length === 0) return;
+        const color = currentDir === 1 ? '#26a69a' : '#ef5350';
+        const s = chart.addLineSeries({
+          color,
+          lineWidth: 2,
+          crosshairMarkerVisible: false,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
+        s.setData(segData);
+        stSeriesList.push(s);
+      }
+
+      for (const bar of bars) {
+        if (bar.st_value === null || bar.st_dir === null) continue;
+        if (bar.st_dir !== currentDir) {
+          flushSegment();
+          currentDir = bar.st_dir;
+          segData = [];
+        }
+        segData.push({ time: bar.time, value: bar.st_value });
+      }
+      flushSegment();  // 最后一段
+      stLastDir = currentDir;
+    }
+
+    // ─── 加载数据 ────────────────────────────────────────────
+    async function loadData() {
+      try {
+        const res = await fetch(`/api/data/${SYMBOL}`);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error);
+        }
+        const { symbol, m1_bars, position } = await res.json();
+
+        document.getElementById("symbol-label").textContent = symbol;
+        document.getElementById("loading").style.display = "none";
+
+        // K线
+        const ohlcData = m1_bars.map(b => ({
+          time: b.time, open: b.open, high: b.high, low: b.low, close: b.close
+        }));
+        candleSeries.setData(ohlcData);
+
+        // SuperTrend 按段断开
+        createSegmentedST(m1_bars);
+
+        // 开盘区间（前15分钟 OR High / OR Low）
+        addOpeningRange(m1_bars);
+
+        // 仓位线
+        addPositionLines(position);
+
+        // 工具栏价格
+        updateToolbar(m1_bars);
+
+        // 跳到最新数据
+        chart.timeScale().scrollToRealTime();
+
+      } catch (e) {
+        document.getElementById("loading").textContent = `❌ ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    // ─── 十字线 OHLC 悬浮信息（TradingView 风格）──────────────
+    const ciBox = document.getElementById('crosshair-info');
+    const ciTime = document.getElementById('ci-time');
+    const ciO = document.getElementById('ci-o');
+    const ciH = document.getElementById('ci-h');
+    const ciL = document.getElementById('ci-l');
+    const ciC = document.getElementById('ci-c');
+
+    chart.subscribeCrosshairMove(param => {
+      if (!param || !param.time || !param.seriesData || !param.seriesData.size) {
+        ciBox.style.display = 'none';
+        return;
+      }
+      const bar = param.seriesData.get(candleSeries);
+      if (!bar) { ciBox.style.display = 'none'; return; }
+
+      // fake-UTC 存储：直接读 getUTCHours 即为 ET 本地时间
+      const d = new Date(param.time * 1000);
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      ciTime.textContent = `${hh}:${mm} ET`;
+
+      const fmt = v => v.toFixed(2);
+      const bull = bar.close >= bar.open;
+      ciO.textContent = fmt(bar.open);
+      ciH.textContent = fmt(bar.high);
+      ciL.textContent = fmt(bar.low);
+      ciC.textContent = fmt(bar.close);
+      ciC.style.color = bull ? '#26a69a' : '#ef5350';
+      ciO.style.color = bull ? '#26a69a' : '#ef5350';
+
+      ciBox.style.display = 'flex';
+    });
+
+    // ─── WebSocket 实时更新 ──────────────────────────────────
+    let lastTickTime = 0;  // 记录最近一次 tick 的时间戳，防止 kline:1m: 时间回退
+    function connectWS() {
+      const ws = new WebSocket(`ws://localhost:3000`);
+      ws.onmessage = ({ data }) => {
+        try {
+          const { channel, data: payload } = JSON.parse(data);
+
+          // ── Symbol 过滤：只处理当前标的的消息，其他 symbol 的 tick/kline 直接丢弃 ──
+          // server 会广播所有 4 个 symbol 的消息，不过滤会导致时间戳混乱
+          if (!channel.endsWith(`:${SYMBOL}`)) return;
+
+          // K 线 tick 实时推送（更新当前未完成 K 线）
+          if (channel.startsWith("bars:1m:tick:")) {
+            lastTickTime = payload.time;
+            candleSeries.update({
+              time: payload.time, open: payload.open,
+              high: payload.high, low: payload.low, close: payload.close,
+            });
+            return;
+          }
+
+          // K 线收盘（kline:1m:）——竞态防护：tick 已推进下一分钟则跳过 candleSeries.update
+          if (channel.startsWith("kline:1m:")) {
+            if (payload.time >= lastTickTime) {
+              candleSeries.update({
+                time: payload.time, open: payload.open,
+                high: payload.high, low: payload.low, close: payload.close,
+              });
+            }
+            const priceEl = document.getElementById("price-label");
+            if (priceEl) priceEl.textContent = payload.close.toFixed(2);
+            if (payload.st_value != null && payload.st_value !== 0) {
+              if (payload.st_dir !== stLastDir || stLastSeries === null) {
+                const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
+                stLastSeries = chart.addLineSeries({
+                  color, lineWidth: 2,
+                  crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                });
+                stSeriesList.push(stLastSeries);
+                stLastDir = payload.st_dir;
+              }
+              stLastSeries.update({ time: payload.time, value: payload.st_value });
+            }
+          }
+        } catch (err) {
+          console.error('[WS处理错误]', err.message, err);
+        }
+      };
+      ws.onclose = () => setTimeout(connectWS, 3000);
+    }
+
+    // ─── 仓位操作按钮逻辑 ───────────────────────
+    const openModal = document.getElementById('open-modal');
+
+    // 开仓按钮
+    document.getElementById('btn-open').addEventListener('click', () => {
+      openModal.classList.add('open');
+    });
+
+    // 取消
+    document.getElementById('modal-cancel').addEventListener('click', () => {
+      openModal.classList.remove('open');
+    });
+    openModal.addEventListener('click', e => {
+      if (e.target === openModal) openModal.classList.remove('open');
+    });
+
+    // 确认开仓
+    document.getElementById('modal-confirm').addEventListener('click', async () => {
+      const entry = parseFloat(document.getElementById('m-entry').value);
+      const sl = parseFloat(document.getElementById('m-sl').value);
+      const qty = parseInt(document.getElementById('m-qty').value, 10);
+      if (isNaN(entry) || isNaN(sl) || isNaN(qty)) {
+        alert('请先填写开仓价、止损价和数量');
+        return;
+      }
+      await fetch(`/api/position/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entry_price: entry,
+          stop_loss: sl,
+          quantity: qty,
+          // 不传 entry_time，让 server.js 服务端统一转换为 ET fake-UTC
+        }),
+      });
+      openModal.classList.remove('open');
+      location.reload();
+    });
+
+    // 平仓按钮
+    document.getElementById('btn-close').addEventListener('click', async () => {
+      if (!confirm('确认平仓？')) return;
+      await fetch(`/api/position/${SYMBOL}`, { method: 'DELETE' });
+      location.reload();
+    });
+
+    // ST 跟踪止盈 toggle
+    let stTrailEnabled = false;
+    document.getElementById('st-trail-toggle').addEventListener('change', async e => {
+      stTrailEnabled = e.target.checked;
+      await fetch(`/api/settings/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ st_trail: stTrailEnabled }),
+      });
+      const lbl = document.getElementById('st-trail-label');
+      lbl.style.color = stTrailEnabled ? '#26a69a' : '#787b86';
+    });
+
+    // ─── 标的切换 ────────────────────────────────────────────
+    const symbolSelect = document.getElementById('symbol-select');
+    symbolSelect.value = SYMBOL;
+    symbolSelect.addEventListener('change', () => {
+      window.location.href = `/?symbol=${symbolSelect.value}`;
+    });
+
+    // 启动
+    loadData();
+    connectWS();
+  </script>
+</body>
+
+</html>

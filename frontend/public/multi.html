@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi Chart Dashboard</title>
+    <script
+        src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #131722;
+            color: #d1d4dc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ── 顶部导航栏 ── */
+        #nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 5px 14px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+            flex-shrink: 0;
+        }
+
+        #nav h1 {
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav-links a {
+            font-size: 12px;
+            color: #787b86;
+            text-decoration: none;
+            padding: 3px 10px;
+            border-radius: 4px;
+            transition: background .15s;
+        }
+
+        .nav-links a:hover {
+            background: #2a2e39;
+            color: #d1d4dc;
+        }
+
+        .nav-links a.active {
+            background: rgba(41, 98, 255, .15);
+            color: #2962ff;
+        }
+
+        /* ── 2×2 网格 ── */
+        #grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 1px;
+            background: #2a2e39;
+            overflow: hidden;
+        }
+
+        /* ── 单元格 ── */
+        .cell {
+            background: #131722;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* ── 单元格头部（与 index.html #toolbar 对齐） ── */
+        .c-toolbar {
+            display: flex;
+            align-items: center;
+            padding: 4px 10px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+            flex-shrink: 0;
+            min-height: 52px;
+            gap: 0;
+        }
+
+        /* 左列 */
+        .c-left {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .c-left-r1 {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .c-left-r2 {
+            display: flex;
+            align-items: center;
+            min-height: 16px;
+        }
+
+        .c-symbol {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .c-price {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .c-change {
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 3px;
+        }
+
+        /* 十字线 OHLC */
+        .c-crosshair {
+            display: none;
+            align-items: center;
+            gap: 0;
+            font-size: 11px;
+            font-family: 'Roboto Mono', monospace, sans-serif;
+        }
+
+        .c-ci-item {
+            display: flex;
+            align-items: center;
+            margin-right: 8px;
+        }
+
+        .c-ci-label {
+            color: #787b86;
+            margin-right: 2px;
+            font-size: 10px;
+        }
+
+        .c-ci-val {
+            font-weight: 600;
+            font-size: 11px;
+            color: #d1d4dc;
+        }
+
+        .c-ci-time {
+            color: #4b5563;
+            font-size: 10px;
+            margin-right: 10px;
+        }
+
+        /* 右列 */
+        .c-right {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+        }
+
+        /* 仓位面板 */
+        .c-pos-panel {
+            display: none;
+            background: rgba(30, 34, 45, .6);
+            border: 1px solid #2a2e39;
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .c-pos-row {
+            display: flex;
+            gap: 12px;
+        }
+
+        .c-pos-item label {
+            color: #787b86;
+            margin-right: 3px;
+        }
+
+        .c-pos-item span {
+            font-weight: 600;
+        }
+
+        /* 操作按钮区 */
+        .c-actions {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+        }
+
+        /* 标的切换下拉 */
+        .c-sym-sel {
+            background: #131722;
+            color: #d1d4dc;
+            border: 1px solid #2a2e39;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        /* ST 跟踪止盈 toggle */
+        .c-toggle-wrap {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            color: #787b86;
+        }
+
+        .c-toggle {
+            position: relative;
+            display: inline-block;
+            width: 30px;
+            height: 17px;
+        }
+
+        .c-toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .c-slider {
+            position: absolute;
+            inset: 0;
+            background: #2a2e39;
+            border-radius: 17px;
+            cursor: pointer;
+            transition: background .2s;
+        }
+
+        .c-slider:before {
+            content: '';
+            position: absolute;
+            width: 11px;
+            height: 11px;
+            left: 3px;
+            top: 3px;
+            background: #d1d4dc;
+            border-radius: 50%;
+            transition: transform .2s;
+        }
+
+        .c-toggle input:checked+.c-slider {
+            background: #26a69a;
+        }
+
+        .c-toggle input:checked+.c-slider:before {
+            transform: translateX(13px);
+        }
+
+        /* 按钮 */
+        .c-btn {
+            padding: 3px 10px;
+            border-radius: 4px;
+            border: none;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity .15s;
+        }
+
+        .c-btn:hover {
+            opacity: .82;
+        }
+
+        .c-btn-open {
+            background: #26a69a;
+            color: #fff;
+        }
+
+        .c-btn-close {
+            background: #ef5350;
+            color: #fff;
+        }
+
+        /* ── 图表区 ── */
+        .c-chart-wrap {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .c-chart {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 图例 */
+        .c-legend {
+            position: absolute;
+            top: 6px;
+            left: 8px;
+            display: flex;
+            gap: 10px;
+            font-size: 10px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .c-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .c-legend-dot {
+            width: 8px;
+            height: 2px;
+            border-radius: 1px;
+        }
+
+        /* 加载遮罩 */
+        .c-loading {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #131722;
+            font-size: 13px;
+            color: #787b86;
+            z-index: 100;
+        }
+
+        /* 颜色工具类 */
+        .up {
+            color: #26a69a;
+        }
+
+        .down {
+            color: #ef5350;
+        }
+
+        .up-bg {
+            background: rgba(38, 166, 154, .15);
+        }
+
+        .down-bg {
+            background: rgba(239, 83, 80, .15);
+        }
+
+        /* ── 全局开仓弹窗（共享一个） ── */
+        .modal-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .55);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-backdrop.open {
+            display: flex;
+        }
+
+        .modal {
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 10px;
+            padding: 22px 26px;
+            min-width: 280px;
+        }
+
+        .modal h3 {
+            margin-bottom: 14px;
+            font-size: 14px;
+            color: #fff;
+        }
+
+        .modal label {
+            display: block;
+            font-size: 11px;
+            color: #787b86;
+            margin-bottom: 3px;
+            margin-top: 10px;
+        }
+
+        .modal input {
+            width: 100%;
+            background: #131722;
+            border: 1px solid #2a2e39;
+            color: #d1d4dc;
+            border-radius: 4px;
+            padding: 5px 9px;
+            font-size: 12px;
+        }
+
+        .modal-btns {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+            justify-content: flex-end;
+        }
+
+        .modal-btns button {
+            padding: 5px 16px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        #m-cancel {
+            background: #2a2e39;
+            color: #d1d4dc;
+        }
+
+        #m-confirm {
+            background: #26a69a;
+            color: #fff;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航 -->
+    <div id="nav">
+        <h1>📈 Trading Dashboard</h1>
+        <div class="nav-links">
+            <a href="/">单图模式</a>
+            <a href="/multi.html" class="active">⊞ 四图总览</a>
+        </div>
+    </div>
+
+    <!-- 2×2 网格（由 JS 动态生成） -->
+    <div id="grid"></div>
+
+    <!-- 全局开仓弹窗 -->
+    <div class="modal-backdrop" id="open-modal">
+        <div class="modal">
+            <h3 id="m-title">开仓</h3>
+            <label>开仓价</label>
+            <input type="number" id="m-entry" step="0.01" placeholder="如 600.28">
+            <label>止损价</label>
+            <input type="number" id="m-sl" step="0.01" placeholder="如 599.28">
+            <label>数量（股）</label>
+            <input type="number" id="m-qty" value="1" min="1">
+            <div class="modal-btns">
+                <button id="m-cancel">取消</button>
+                <button id="m-confirm">确认开仓</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ── 默认四个标的 ────────────────────────────────────────
+        const DEFAULT_SYMBOLS = ['QQQ', 'AAPL', 'NVDA', 'TSLA'];
+
+        // 每个格子的状态存储
+        const state = {};   // state[symbol] = { chart, candleSeries, stSeriesList, stLastDir, stLastSeries, symbol }
+
+        // 全局弹窗当前操作的标的
+        let modalSymbol = null;
+
+        // ── 生成单元格 HTML ─────────────────────────────────────
+        function createCell(symbol) {
+            const id = symbol;
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.id = `cell-${id}`;
+            cell.innerHTML = `
+        <!-- 工具栏 -->
+        <div class="c-toolbar">
+          <!-- 左列 -->
+          <div class="c-left">
+            <div class="c-left-r1">
+              <span class="c-symbol">${symbol}</span>
+              <span class="c-price up" id="price-${id}">—</span>
+              <span class="c-change up-bg up" id="change-${id}">—</span>
+            </div>
+            <div class="c-left-r2">
+              <!-- 十字线 OHLC -->
+              <div class="c-crosshair" id="ci-${id}">
+                <span class="c-ci-time"  id="ci-time-${id}"></span>
+                <span class="c-ci-item"><span class="c-ci-label">O</span><span class="c-ci-val" id="ci-o-${id}"></span></span>
+                <span class="c-ci-item"><span class="c-ci-label">H</span><span class="c-ci-val" style="color:#26a69a" id="ci-h-${id}"></span></span>
+                <span class="c-ci-item"><span class="c-ci-label">L</span><span class="c-ci-val" style="color:#ef5350" id="ci-l-${id}"></span></span>
+                <span class="c-ci-item"><span class="c-ci-label">C</span><span class="c-ci-val" id="ci-c-${id}"></span></span>
+              </div>
+            </div>
+          </div>
+          <!-- 右列 -->
+          <div class="c-right">
+            <!-- 仓位面板 -->
+            <div class="c-pos-panel" id="pos-panel-${id}">
+              <div class="c-pos-row">
+                <div class="c-pos-item"><label>开仓价</label><span id="p-entry-${id}">—</span></div>
+                <div class="c-pos-item"><label>止损</label><span id="p-sl-${id}" style="color:#ef5350">—</span></div>
+                <div class="c-pos-item"><label>数量</label><span id="p-qty-${id}">—</span></div>
+                <div class="c-pos-item">
+                  <label>盈亏</label>
+                  <span id="p-pnl-${id}">—</span>
+                  <span id="p-pnl-pct-${id}" style="font-size:10px;margin-left:3px">—</span>
+                </div>
+              </div>
+            </div>
+            <!-- 操作按钮 -->
+            <div class="c-actions">
+              <div class="c-toggle-wrap">
+                <label class="c-toggle">
+                  <input type="checkbox" id="st-toggle-${id}">
+                  <span class="c-slider"></span>
+                </label>
+                <span id="st-label-${id}">ST止盈</span>
+              </div>
+              <div style="width:1px;height:18px;background:#2a2e39"></div>
+              <button class="c-btn c-btn-open"  id="btn-open-${id}">开仓</button>
+              <button class="c-btn c-btn-close" id="btn-close-${id}">平仓</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 图表区 -->
+        <div class="c-chart-wrap">
+          <div class="c-loading" id="loading-${id}">⏳ 加载中…</div>
+          <div class="c-chart"  id="chart-${id}"></div>
+          <!-- 图例 -->
+          <div class="c-legend">
+            <div class="c-legend-item">
+              <div class="c-legend-dot" style="background:#26a69a"></div>
+              <span style="color:#26a69a">ST↑</span>
+            </div>
+            <div class="c-legend-item">
+              <div class="c-legend-dot" style="background:#ef5350"></div>
+              <span style="color:#ef5350">ST↓</span>
+            </div>
+          </div>
+        </div>
+      `;
+            document.getElementById('grid').appendChild(cell);
+        }
+
+        // ── 初始化图表 ──────────────────────────────────────────
+        function initChart(symbol) {
+            const chartEl = document.getElementById(`chart-${symbol}`);
+            const chart = LightweightCharts.createChart(chartEl, {
+                layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
+                grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                rightPriceScale: { borderColor: '#2a2e39' },
+                timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false, fixLeftEdge: true },
+            });
+
+            const candleSeries = chart.addCandlestickSeries({
+                upColor: '#26a69a', downColor: '#ef5350',
+                borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+                wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+            });
+
+            // 自适应大小
+            new ResizeObserver(() => {
+                const r = chartEl.getBoundingClientRect();
+                chart.applyOptions({ width: r.width, height: r.height });
+            }).observe(chartEl);
+
+            // 十字线 OHLC
+            const ciBox = document.getElementById(`ci-${symbol}`);
+            chart.subscribeCrosshairMove(param => {
+                if (!param || !param.time || !param.seriesData?.size) {
+                    ciBox.style.display = 'none'; return;
+                }
+                const bar = param.seriesData.get(candleSeries);
+                if (!bar) { ciBox.style.display = 'none'; return; }
+                const d = new Date(param.time * 1000);
+                const hh = String(d.getUTCHours()).padStart(2, '0');
+                const mm = String(d.getUTCMinutes()).padStart(2, '0');
+                document.getElementById(`ci-time-${symbol}`).textContent = `${hh}:${mm}`;
+                const fmt = v => v.toFixed(2);
+                const bull = bar.close >= bar.open;
+                const ciO = document.getElementById(`ci-o-${symbol}`);
+                const ciC = document.getElementById(`ci-c-${symbol}`);
+                ciO.textContent = fmt(bar.open);
+                document.getElementById(`ci-h-${symbol}`).textContent = fmt(bar.high);
+                document.getElementById(`ci-l-${symbol}`).textContent = fmt(bar.low);
+                ciC.textContent = fmt(bar.close);
+                ciO.style.color = ciC.style.color = bull ? '#26a69a' : '#ef5350';
+                ciBox.style.display = 'flex';
+            });
+
+            state[symbol] = {
+                symbol, chart, candleSeries,
+                stSeriesList: [], stLastDir: null, stLastSeries: null,
+            };
+        }
+
+        // ── SuperTrend 分段绘制 ─────────────────────────────────
+        function createSegmentedST(symbol, bars) {
+            const s = state[symbol];
+            s.stSeriesList.forEach(ser => s.chart.removeSeries(ser));
+            s.stSeriesList = []; s.stLastDir = null; s.stLastSeries = null;
+            let currentDir = null, segData = [];
+
+            function flush() {
+                if (!segData.length) return;
+                const color = currentDir === 1 ? '#26a69a' : '#ef5350';
+                const ser = s.chart.addLineSeries({
+                    color, lineWidth: 2,
+                    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                });
+                ser.setData(segData);
+                s.stSeriesList.push(ser);
+                s.stLastSeries = ser;
+                s.stLastDir = currentDir;
+            }
+
+            for (const bar of bars) {
+                if (bar.st_value == null || bar.st_dir == null) continue;
+                if (bar.st_dir !== currentDir) { flush(); currentDir = bar.st_dir; segData = []; }
+                segData.push({ time: bar.time, value: bar.st_value });
+            }
+            flush();
+        }
+
+        // ── 开盘区间 OR High/Low ────────────────────────────────
+        function addOpeningRange(symbol, bars) {
+            const { candleSeries } = state[symbol];
+            const or = bars.slice(0, 15);
+            if (!or.length) return;
+            const orH = Math.max(...or.map(b => b.high));
+            const orL = Math.min(...or.map(b => b.low));
+            [{ price: orH, title: `OR High ${orH.toFixed(2)}` },
+            { price: orL, title: `OR Low  ${orL.toFixed(2)}` }].forEach(({ price, title }) => {
+                candleSeries.createPriceLine({
+                    price, color: '#f59e0b', lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true, title,
+                });
+            });
+        }
+
+        // ── 仓位线 ──────────────────────────────────────────────
+        function addPositionLines(symbol, position) {
+            if (!position) return;
+            const { candleSeries } = state[symbol];
+
+            candleSeries.createPriceLine({
+                price: position.entry_price, color: '#2196f3', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true, title: `开仓 ${position.entry_price}`,
+            });
+            candleSeries.createPriceLine({
+                price: position.stop_loss, color: '#ef5350', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true, title: `止损 ${position.stop_loss}`,
+            });
+            candleSeries.setMarkers([{
+                time: position.entry_time, position: 'belowBar',
+                color: '#2196f3', shape: 'arrowUp',
+                text: `BUY @${position.entry_price}`, size: 1,
+            }]);
+
+            // 更新仓位面板
+            const pnlEl = document.getElementById(`p-pnl-${symbol}`);
+            const pnlPctEl = document.getElementById(`p-pnl-pct-${symbol}`);
+            document.getElementById(`p-entry-${symbol}`).textContent = position.entry_price;
+            document.getElementById(`p-sl-${symbol}`).textContent = position.stop_loss;
+            document.getElementById(`p-qty-${symbol}`).textContent = `${position.quantity}股`;
+            pnlEl.textContent = `${position.pnl >= 0 ? '+' : ''}${position.pnl}`;
+            pnlPctEl.textContent = `(${position.pnl_pct >= 0 ? '+' : ''}${position.pnl_pct}%)`;
+            pnlEl.className = position.pnl >= 0 ? 'up' : 'down';
+            pnlPctEl.className = position.pnl >= 0 ? 'up' : 'down';
+            document.getElementById(`pos-panel-${symbol}`).style.display = 'block';
+        }
+
+        // ── 工具栏价格更新 ──────────────────────────────────────
+        function updateHeader(symbol, bars) {
+            if (!bars || bars.length < 2) return;
+            const last = bars[bars.length - 1];
+            const change = last.close - bars[0].open;
+            const pct = (change / bars[0].open * 100).toFixed(2);
+            const priceEl = document.getElementById(`price-${symbol}`);
+            const changeEl = document.getElementById(`change-${symbol}`);
+            priceEl.textContent = last.close.toFixed(2);
+            changeEl.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)} (${pct}%)`;
+            const c = change >= 0 ? 'up' : 'down';
+            priceEl.className = `c-price ${c}`;
+            changeEl.className = `c-change ${c} ${c}-bg`;
+        }
+
+        // ── 加载单个标的数据 ────────────────────────────────────
+        async function loadSymbol(symbol) {
+            try {
+                const res = await fetch(`/api/data/${symbol}`);
+                if (!res.ok) throw new Error((await res.json()).error);
+                const { m1_bars, position } = await res.json();
+
+                document.getElementById(`loading-${symbol}`).style.display = 'none';
+
+                // K 线
+                state[symbol].candleSeries.setData(m1_bars.map(b => ({
+                    time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
+                })));
+
+                createSegmentedST(symbol, m1_bars);
+                addOpeningRange(symbol, m1_bars);
+                addPositionLines(symbol, position);
+                updateHeader(symbol, m1_bars);
+
+                state[symbol].chart.timeScale().scrollToRealTime();
+            } catch (e) {
+                const el = document.getElementById(`loading-${symbol}`);
+                if (el) el.textContent = `❌ ${e.message}`;
+            }
+        }
+
+        // ── 事件绑定（开仓/平仓/ST toggle） ────────────────────
+        function bindEvents(symbol) {
+            // 开仓按钮 → 打开弹窗
+            document.getElementById(`btn-open-${symbol}`).addEventListener('click', () => {
+                modalSymbol = symbol;
+                document.getElementById('m-title').textContent = `开仓 — ${symbol}`;
+                document.getElementById('open-modal').classList.add('open');
+            });
+
+            // 平仓
+            document.getElementById(`btn-close-${symbol}`).addEventListener('click', async () => {
+                if (!confirm(`确认平仓 ${symbol}？`)) return;
+                await fetch(`/api/position/${symbol}`, { method: 'DELETE' });
+                location.reload();
+            });
+
+            // ST 跟踪止盈
+            document.getElementById(`st-toggle-${symbol}`).addEventListener('change', async e => {
+                const on = e.target.checked;
+                await fetch(`/api/settings/${symbol}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ st_trail: on }),
+                });
+                const lbl = document.getElementById(`st-label-${symbol}`);
+                lbl.style.color = on ? '#26a69a' : '#787b86';
+            });
+        }
+
+        // ── 全局弹窗逻辑 ────────────────────────────────────────
+        const openModal = document.getElementById('open-modal');
+        document.getElementById('m-cancel').addEventListener('click', () => openModal.classList.remove('open'));
+        openModal.addEventListener('click', e => { if (e.target === openModal) openModal.classList.remove('open'); });
+        document.getElementById('m-confirm').addEventListener('click', async () => {
+            if (!modalSymbol) return;
+            const entry = parseFloat(document.getElementById('m-entry').value);
+            const sl = parseFloat(document.getElementById('m-sl').value);
+            const qty = parseInt(document.getElementById('m-qty').value, 10);
+            if (isNaN(entry) || isNaN(sl) || isNaN(qty)) {
+                alert('请填写开仓价、止损价和数量'); return;
+            }
+            await fetch(`/api/position/${modalSymbol}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry_price: entry, stop_loss: sl, quantity: qty }),
+            });
+            openModal.classList.remove('open');
+            location.reload();
+        });
+
+        // ── WebSocket 实时更新 ──────────────────────────────────
+        function connectWS() {
+            const ws = new WebSocket('ws://localhost:3000');
+            ws.onmessage = ({ data }) => {
+                try {
+                    const { channel, data: payload } = JSON.parse(data);
+
+                    // ── 第一步：从 channel 末段提取 symbol ────────────────
+                    const sym = DEFAULT_SYMBOLS.find(s => channel.endsWith(`:${s}`));
+                    if (!sym || !state[sym]) return;
+
+                    // ── 第二步：payload.symbol 二次校验（防止数据串台）─────
+                    if (payload.symbol && payload.symbol !== sym) {
+                        console.error(`[WS串台拦截] channel=${channel} 对应 ${sym}，但 payload.symbol=${payload.symbol}，已丢弃`);
+                        return;
+                    }
+
+                    const s = state[sym];
+
+                    // tick 实时推送：记录最新 tick 时间
+                    if (channel.startsWith('bars:1m:tick:')) {
+                        s.lastTickTime = payload.time;
+                        s.candleSeries.update({
+                            time: payload.time, open: payload.open,
+                            high: payload.high, low: payload.low, close: payload.close,
+                        });
+                        return;
+                    }
+                    // kline:1m: 收盘——竞态防护：tick 已推进下一分钟则跳过 candleSeries.update
+                    if (channel.startsWith('kline:1m:')) {
+                        if (payload.time >= (s.lastTickTime || 0)) {
+                            s.candleSeries.update({
+                                time: payload.time, open: payload.open,
+                                high: payload.high, low: payload.low, close: payload.close,
+                            });
+                        }
+                        if (payload.st_value != null && payload.st_value !== 0) {
+                            if (payload.st_dir !== s.stLastDir || !s.stLastSeries) {
+                                const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
+                                s.stLastSeries = s.chart.addLineSeries({
+                                    color, lineWidth: 2,
+                                    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                                });
+                                s.stSeriesList.push(s.stLastSeries);
+                                s.stLastDir = payload.st_dir;
+                            }
+                            s.stLastSeries.update({ time: payload.time, value: payload.st_value });
+                        }
+                    }
+                } catch (err) {
+                    console.error('[WS处理错误]', err.message, err);
+                }
+            };
+            ws.onclose = () => setTimeout(connectWS, 3000);
+        }
+
+        // ── 启动 ────────────────────────────────────────────────
+        DEFAULT_SYMBOLS.forEach(sym => {
+            createCell(sym);
+            initChart(sym);
+            bindEvents(sym);
+        });
+        Promise.all(DEFAULT_SYMBOLS.map(sym => loadSymbol(sym)));
+        connectWS();
+    </script>
+</body>
+
+</html>
