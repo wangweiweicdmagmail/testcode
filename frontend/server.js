@@ -92,6 +92,60 @@ function calcATR10(bars) {
     return n > 0 ? sumTR / n : null;
 }
 
+// ─── 日内连续新高状态（内存，进程存活期间有效）─────────────────────────
+// 结构：{ [symbol]: { dayKey: 'YYYYMMDD', dayHigh: number, count: number } }
+const nhState = {};
+
+// 从 Redis 中的 5m bars 重算当日连续新高计数（用于 /api/indicators 恢复状态）
+function calcNewHigh(m5Bars) {
+    if (!m5Bars || !m5Bars.length) return { count: 0, dayHigh: null };
+    // 只保留今日的 bar（Unix timestamp 按 ET fake-UTC 判断）
+    const now = Date.now() / 1000;
+    // ET offset 简化: 夏令时3-11月 -4h，其他 -5h
+    const month = new Date().getUTCMonth() + 1;
+    const etOffsetSec = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    // ET 今日零点（ET fake-UTC）
+    const etNow = now + etOffsetSec;
+    const etMidnight = etNow - (etNow % 86400);  // 当天0点 ET fake-UTC
+    const todayBars = m5Bars.filter(b => b.time >= etMidnight);
+    if (!todayBars.length) return { count: 0, dayHigh: null };
+
+    let dayHigh = -Infinity;
+    let count = 0;
+    for (const bar of todayBars) {
+        const c = bar.close;
+        if (c > dayHigh) {
+            dayHigh = c;
+            count++;
+        } else {
+            count = 0;  // 跌破新高，清零
+        }
+    }
+    return { count, dayHigh };
+}
+
+// 在 kline:5m: 推送时更新 nhState（实时路径）
+function updateNHState(symbol, close) {
+    const month = new Date().getUTCMonth() + 1;
+    const etOffsetSec = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    const etNow = Math.floor(Date.now() / 1000) + etOffsetSec;
+    const dayKey = new Date(etNow * 1000).toISOString().slice(0, 10);  // YYYY-MM-DD
+
+    if (!nhState[symbol] || nhState[symbol].dayKey !== dayKey) {
+        // 新的一天，重置
+        nhState[symbol] = { dayKey, dayHigh: close, count: 1 };
+    } else {
+        const s = nhState[symbol];
+        if (close > s.dayHigh) {
+            s.dayHigh = close;
+            s.count++;
+        } else {
+            s.count = 0;
+        }
+    }
+    return nhState[symbol].count;
+}
+
 app.get("/api/indicators", async (req, res) => {
     try {
         const results = await Promise.all(ALL_SYMBOLS.map(async sym => {
@@ -119,12 +173,18 @@ app.get("/api/indicators", async (req, res) => {
                 }
             }
 
+            const nhResult = nhState[sym]
+                ? nhState[sym]
+                : calcNewHigh(m5);  // 首次从 bars 恢复
+            if (!nhState[sym]) nhState[sym] = nhResult;  // 缓存
+
             return {
                 symbol: sym,
                 price: lastM1.close,
                 st_score_m1: stScoreM1,     // M1 ST 积分（做多+，做空-）
                 st_score_m5: stScoreM5,     // M5 ST 积分
-                ema_score: emaScore,      // EMA 积分（ATR 倍数，正=价格在EMA上）
+                ema_score: emaScore,        // EMA 积分（ATR 倍数，正=价格在EMA上）
+                nh_score: nhResult.count ?? 0,  // 日内连续新高计数
                 st_dir_m1: lastM1.st_dir,
                 st_dir_m5: lastM5 ? lastM5.st_dir : null,
                 st_val_m1: lastM1.st_value,
@@ -280,7 +340,23 @@ redisSub.on("ready", () => {
 
 redisSub.on("pmessage", (_pattern, channel, message) => {
     try {
-        const payload = JSON.stringify({ channel, data: JSON.parse(message) });
+        const parsed = JSON.parse(message);
+
+        // kline:5m: 收盘事件 → 更新日内连续新高状态并广播
+        if (channel.startsWith('kline:5m:')) {
+            const sym = channel.split(':')[2];
+            if (sym && ALL_SYMBOLS.includes(sym)) {
+                const count = updateNHState(sym, parsed.close);
+                // 广播 nh:update 事件给前端（用于语音播报）
+                const nhPayload = JSON.stringify({
+                    channel: 'nh:update',
+                    data: { symbol: sym, count, close: parsed.close },
+                });
+                wss.clients.forEach(c => c.readyState === 1 && c.send(nhPayload));
+            }
+        }
+
+        const payload = JSON.stringify({ channel, data: parsed });
         wss.clients.forEach((client) => {
             if (client.readyState === 1) {
                 client.send(payload);

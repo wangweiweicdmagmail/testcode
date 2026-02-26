@@ -182,7 +182,7 @@
 
     /* 右侧指标面板 */
     #right-panel {
-      width: 270px;
+      width: 405px;
       flex-shrink: 0;
       background: #1e222d;
       border-left: 1px solid #2a2e39;
@@ -199,9 +199,9 @@
     .ind-card-head {
       display: flex;
       align-items: center;
-      gap: 7px;
-      padding: 8px 12px 6px;
-      font-size: 12px;
+      gap: 10px;
+      padding: 12px 18px 9px;
+      font-size: 18px;
       font-weight: 700;
       color: #d1d4dc;
       border-bottom: 1px solid #2a2e3960;
@@ -224,7 +224,7 @@
     .ind-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 12px;
+      font-size: 18px;
     }
 
     .ind-table thead tr {
@@ -232,8 +232,8 @@
     }
 
     .ind-table thead th {
-      padding: 5px 10px;
-      font-size: 10px;
+      padding: 7px 15px;
+      font-size: 15px;
       font-weight: 600;
       color: #4b5563;
       text-align: left;
@@ -257,7 +257,7 @@
     }
 
     .ind-table td {
-      padding: 8px 10px;
+      padding: 12px 15px;
       vertical-align: middle;
     }
 
@@ -266,14 +266,14 @@
     }
 
     .ind-sym {
-      font-size: 13px;
+      font-size: 20px;
       font-weight: 700;
       color: #fff;
       text-decoration: none;
     }
 
     .ind-score {
-      font-size: 16px;
+      font-size: 24px;
       font-weight: 800;
       font-variant-numeric: tabular-nums;
       line-height: 1;
@@ -294,9 +294,9 @@
     }
 
     .ind-badge {
-      font-size: 10px;
+      font-size: 15px;
       font-weight: 700;
-      padding: 1px 5px;
+      padding: 2px 8px;
       border-radius: 3px;
     }
 
@@ -881,7 +881,7 @@
       <div id="chart"></div>
       <!-- Toast 语音提醒非弹语（右上角） -->
       <div id="toast-container" style="
-      position:fixed;top:56px;right:290px;z-index:9999;
+      position:fixed;top:56px;right:420px;z-index:9999;
       display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
       <div id="legend">
         <div class="legend-item">
@@ -1030,6 +1030,29 @@
             </tr>
           </thead>
           <tbody id="ind-ema">
+            <tr>
+              <td colspan="3" class="ind-empty">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 日内连续新高 -->
+      <div class="ind-card">
+        <div class="ind-card-head">
+          <span class="dot" style="background:#a78bfa"></span>
+          日内连续新高
+          <span class="ind-card-sub">M5收盘创新高+1 跌破清零</span>
+        </div>
+        <table class="ind-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="r">连续次数</th>
+              <th>评价</th>
+            </tr>
+          </thead>
+          <tbody id="ind-nh">
             <tr>
               <td colspan="3" class="ind-empty">加载中…</td>
             </tr>
@@ -1555,6 +1578,18 @@
                 showToast(`📎 ${sym} 订单状态: ${o.status}`, 'info');
             }
           }
+
+          // ── 5分钟新高事件（server.js 计算后广播）──
+          if (channel === 'nh:update') {
+            loadIndicators();  // 刷新右侧面板
+            const o = payload;
+            if (o.count >= 1) {  // 任何一次新高都播报
+              const tag = o.count === 1 ? '创日内新高'
+                : o.count <= 3 ? `连续${o.count}次新高`
+                  : `强势！连续${o.count}次新高`;
+              speak(`${o.symbol} ${tag}`, true);
+            }
+          }
         } catch (err) {
           console.error('[WS处理错误]', err.message, err);
         }
@@ -1897,6 +1932,23 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
         <td>${indPosLabel(ema)}</td>
       </tr>`;
     }
+    function indNHRow(sym, count) {
+      // 0次=灰 1-2=黄 3-4=涼绿 5+=绿
+      const color = count === 0 ? '#4b5563'
+        : count <= 2 ? '#f59e0b'
+          : count <= 4 ? '#4ade80'
+            : '#26a69a';
+      const label = count === 0 ? '—— 暂无新高'
+        : count <= 2 ? `⚡ 新高 x${count}`
+          : count <= 4 ? `🔥 连续 x${count}`
+            : `🚀 连续 x${count}`;
+      return `<tr class="${count > 0 ? 'bull' : ''}">
+        <td><a href="/?symbol=${sym}" class="ind-sym">${sym}</a></td>
+        <td class="r"><span class="ind-score" style="color:${color}">${count}</span>
+          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:${Math.min(100, count * 20)}%;background:${color}"></div></div></td>
+        <td><span style="color:${color};font-size:13px;font-weight:600">${label}</span></td>
+      </tr>`;
+    }
     async function loadIndicators() {
       try {
         const res = await fetch('/api/indicators');
@@ -1905,6 +1957,7 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
         const byM1 = [...rows].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
         const byM5 = [...rows].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
         const byEma = [...rows].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
+        const byNH = [...rows].sort((a, b) => (b.nh_score ?? 0) - (a.nh_score ?? 0));
         const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
         const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
         const maxEma = Math.max(.01, ...byEma.map(r => Math.abs(r.ema_score ?? 0)));
@@ -1917,6 +1970,8 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
         document.getElementById('ind-ema').innerHTML =
           byEma.map(r => indEmaRow(r.symbol, r.ema_score,
             (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)).join('');
+        const nhEl = document.getElementById('ind-nh');
+        if (nhEl) nhEl.innerHTML = byNH.map(r => indNHRow(r.symbol, r.nh_score ?? 0)).join('');
       } catch (e) { /* 静默失败，不影响主图 */ }
     }
     // 每30秒自动刷新指标面板

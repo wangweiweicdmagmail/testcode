@@ -256,6 +256,9 @@ class BarLoggerStrategy(Strategy):
         # 当前未完成的 tick K 线
         self._cur_bar: dict[str, Optional[dict]] = defaultdict(lambda: None)
 
+        # 日内连续新高状态：{ sym: {"date": "YYYY-MM-DD", "day_high": float, "count": int} }
+        self._nh_state: dict[str, dict] = {}
+
     # ── 解析所有订阅合约 ────────────────────────────────────────────────
     def _all_instrument_ids(self) -> list[InstrumentId]:
         ids = list(self.config.instrument_ids)
@@ -791,6 +794,21 @@ class BarLoggerStrategy(Strategy):
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
         ema21_m5 = self._ema_m5[sym].update(c)
 
+        # ─ 计算日内连续新高  ─────────────────────────────────────────────
+        today_str = self._today_et_date  # 'YYYY-MM-DD'
+        nh = self._nh_state.get(sym)
+        if nh is None or nh["date"] != today_str:
+            # 新的一天（或首次）：从 bars 重算，避免重启导致状态丢失
+            nh = {"date": today_str, "day_high": c, "count": 1}
+        else:
+            if c > nh["day_high"]:
+                nh["day_high"] = c
+                nh["count"] += 1
+            else:
+                nh["count"] = 0  # 跌破新高，清零
+        self._nh_state[sym] = nh
+        nh_score = nh["count"]
+
         m5_bar = {
             **m5_raw,
             "ema21":    ema21_m5,
@@ -798,6 +816,7 @@ class BarLoggerStrategy(Strategy):
             "st_dir":   st_dir,
             "st_upper": st_up,
             "st_lower": st_lo,
+            "nh_score": nh_score,   # 日内连续新高计数（跌破清零）
         }
 
         self.log.info(
