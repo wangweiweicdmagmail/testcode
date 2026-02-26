@@ -15,6 +15,7 @@
   1. TWS 或 IB Gateway 已启动并开启 API
   2. 修改下方 ACCOUNT_ID 为你的真实账号
 """
+import argparse
 import os
 
 from nautilus_trader.adapters.interactive_brokers.common import IB
@@ -66,6 +67,36 @@ class _FAIBOrderTags(IBOrderTags, frozen=True):
 
 # 替换 execution.py 模块中的 IBOrderTags 引用，使解析时包含 FA 字段
 _ib_exec_mod.IBOrderTags = _FAIBOrderTags
+
+# ============================================================
+# ⚙️  命令行参数解析
+# ============================================================
+_parser = argparse.ArgumentParser(
+    description="鹦鹉螺引擎 IBKR 交易节点",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    epilog="""
+示例:
+  python main.py                          # 实盘（今日数据 + 实时）
+  python main.py --mode backtest          # 回测（上一交易日数据）
+  python main.py --mode backtest --date 2026-02-25  # 回测指定日期
+"""
+)
+_parser.add_argument(
+    "--mode",
+    choices=["live", "backtest"],
+    default="live",
+    help="运行模式：live=实盘（今日数据+实时），backtest=回测（上一交易日数据，不订阅实时）",
+)
+_parser.add_argument(
+    "--date",
+    default="",
+    metavar="YYYY-MM-DD",
+    help="回测指定日期（仅 backtest 模式有效），默认自动选上一个交易日",
+)
+_args = _parser.parse_args()
+
+IS_BACKTEST   = _args.mode == "backtest"
+BACKTEST_DATE = _args.date   # 空字符串 = 自动
 
 # ============================================================
 # ⚙️  用户配置区
@@ -153,7 +184,9 @@ bar_strategy = BarLoggerStrategy(
         st_period=10,
         st_mult=2.0,
         ema_period=21,
-        history_days=1,   # 拉取当日历史 K 线用于预热
+        history_days=1,
+        backtest_mode=IS_BACKTEST,
+        backtest_date=BACKTEST_DATE,
     )
 )
 
@@ -181,11 +214,12 @@ node.build()
 
 if __name__ == "__main__":
     try:
+        mode_label = f"回测 {'[' + BACKTEST_DATE + ']' if BACKTEST_DATE else '[自动选上一交易日]'}" if IS_BACKTEST else "实盘"
         print("=" * 60)
-        print("  鹦鹉螺引擎 IBKR HelloWorld + OrderGateway")
+        print(f"  鹦鹉螺引擎 IBKR | 模式: {mode_label}")
         print(f"  K线合约: {BAR_INSTRUMENT_ID} | 账户: {ACCOUNT_ID}")
-        print(f"  下单网关: http://localhost:8888/order")
-        print("  发送测试单: python order_sender.py")
+        if not IS_BACKTEST:
+            print(f"  下单网关: http://localhost:8888/order")
         print("  按 Ctrl+C 停止...")
         print("=" * 60)
         node.run()

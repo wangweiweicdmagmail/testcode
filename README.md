@@ -6,10 +6,9 @@
 
 ```
 nautilus_ibkr_helloworld/
-├── main.py            # 主程序：配置并启动 TradingNode（含 FA Monkey-Patch）
-├── strategy.py        # 实盘策略：多标的 1m K 线 + SuperTrend(10,2) + 写入 Redis
-├── data_feeder.py     # 历史数据预加载：yfinance → 指标计算 → Redis
-├── order_actor.py     # HTTP 下单网关 Actor（端口 8888） → MessageBus → IBKR
+├── main.py            # 主程序：配置并启动 TradingNode（支持 --mode live/backtest）
+├── strategy.py        # 回测/实盘通用策略：1m K 线 + SuperTrend + EMA + 写Redis
+├── order_actor.py     # HTTP 下单网关 Actor（端口 8888）
 ├── order_sender.py    # 外部下单测试脚本（MARKET / BRACKET）
 └── frontend/
     ├── server.js      # Node.js WebSocket 服务器，从 Redis 推送 K 线给前端
@@ -22,7 +21,7 @@ nautilus_ibkr_helloworld/
 ### Python
 ```bash
 pip install uv
-uv pip install "nautilus_trader[ib]" yfinance pytz redis
+uv pip install "nautilus_trader[ib]" redis
 ```
 
 ### Node.js（前端）
@@ -72,9 +71,15 @@ export IB_FA_GROUP="dt_test"
 ## 启动顺序
 
 ```bash
-# Step 1：启动交易引擎（自动连接 IBKR + 拉取历史 K 线预热 + 实时 K 线 + 下单网关）
+# Step 1：启动交易引擎
+# 实盘模式：连接 IBKR，拉取今日历史 K 线，启动实时订阅
 python main.py
-# ↑ on_start() 会通过 IBKR request_bars() 拉取当日历史 K 线写入 Redis，无需单独预热步骤
+
+# 回测模式：连接 IBKR，拉取上一交易日 K 线，写入 Redis 后不订阅实时
+python main.py --mode backtest
+
+# 回测指定日期（IBKR 支持范围表1年内的 1m 数据）
+python main.py --mode backtest --date 2026-02-25
 
 # Step 2：启动前端 WebSocket 服务器
 cd frontend && node server.js
@@ -84,11 +89,15 @@ cd frontend && node server.js
 # 四图总览：http://localhost:3000/multi.html
 ```
 
-> **离线 UI 调试模式**（无需 IBKR，使用模拟数据）：
-> ```bash
-> python data_feeder.py --all --mock   # 生成模拟数据
-> cd frontend && node server.js        # 启动前端
-> ```
+> **模式对毕**
+> | 项目 | 实盘（live） | 回测（backtest） |
+> |------|------|------|
+> | IBKR 连接 | ✅ 必须 | ✅ 必须 |
+> | 数据来源 | 今日 IBKR 历史 K 线 | IBKR 上一交易日数据 |
+> | 实时 Bar 订阅 | ✅ | ❌（不订阅） |
+> | Tick 订阅 | ✅ | ❌（不订阅） |
+> | Redis 写入 | ✅ | ✅ |
+> | 前端可用 | ✅ | ✅ |
 
 ## 发送测试订单
 
@@ -136,18 +145,12 @@ curl -X POST http://localhost:8888/order \
 
 ## ⚠️ 项目核心要求
 
-> **禁止使用模拟数据。** 所有 K 线数据必须来自 yfinance 拉取的真实市场数据。
+> **全部数据来自 IBKR，无外部数据源依赖。** 无论回测还是实盘，均通过 IBKR `request_bars()` 获取真实 K 线。
 
-- `data_feeder.py` 已移除 `--mock` 参数，强制使用 yfinance 真实数据
-- 如需调试，请使用 `--date YYYY-MM-DD` 指定历史交易日获取真实 K 线
-
-```bash
-# 加载所有标的的 2026-02-24 真实数据
-python data_feeder.py --all --date 2026-02-24
-
-# 加载单个标的最近交易日的真实数据
-python data_feeder.py --symbol QQQ
-```
+- 实盘模式：拉取今日盘前数据（04:00 ET 起）+ 订阅实时；图表仅显示 RTH（09:30-16:00 ET）
+- 回测模式：拉取上一交易日（或指定日期）数据，写入 Redis 后不订阅实时
+- **盘前数据**：自动用于指标（SuperTrend/EMA）预热，但**不写入图表**
+- **盘后数据**：完全忽略（不处理）
 
 ## 指标参数
 
@@ -183,5 +186,5 @@ FA_METHOD = "NetLiq"    # 分配方式
 | `Could not find instrument` | 确认 `INSTRUMENT_ID` 格式正确，格式为 `代码.交易所` |
 | 无实时数据 | 将 `MARKET_DATA_TYPE` 改为 `IBMarketDataTypeEnum.DELAYED_FROZEN` |
 | 时区异常 | NautilusTrader 内部全部使用 UTC 纳秒时间戳；K 线前端展示使用 ET fake-UTC |
-| K 线图时间偏移 | 确认先执行了 `data_feeder.py`（会写入同格式的历史数据） |
-| ST 预热警告 | 正常现象，先运行 `data_feeder.py` 即可消除 |
+| 图表只显示 390 根 | 正常。盘前（570 根）用于指标预热，图表仅展示 RTH 09:30-16:00 的 390 根 |
+| ST 预热不准 | 正常。盘前 570 根历史数据已用于预热，RTH 第一根的 ST 值是经过充分预热的 |

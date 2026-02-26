@@ -1,20 +1,22 @@
 """
-鹦鹉螺引擎 (NautilusTrader) IBKR 实盘策略
+鹦鹉螺引擎 (NautilusTrader) IBKR 策略（回测 / 实盘通用）
 
 主要职责：
-  1. on_start() 通过 request_bars() 从 IBKR 拉取当日历史 K 线进行预热
+  1. on_start() 通过 request_bars() 从 IBKR 拉取历史 K 线预热
+     - 实盘模式：拉取当日（今天）历史数据 + 订阅实时 bar/tick
+     - 回测模式：拉取上一个交易日历史数据，写完 Redis 后不订阅实时
   2. on_historical_data() 批量处理历史 K 线 → 预热 ST/EMA 状态机 → 写 Redis
   3. on_bar() 实时追加 M1 K 线 → 聚合 M5 → 写 Redis → PUBLISH 通知前端
-  4. on_quote_tick() 实时更新当前 K 线 close/high/low → PUBLISH tick
+  4. on_quote_tick() 实时更新当前 K 线 close/high/low → PUBLISH tick（仅实盘）
 
 Redis Key 约定：
   bars:1m:{SYMBOL}       — 1m K 线列表（JSON，含 ema21/st_value/st_dir/st_upper/st_lower）
   bars:5m:{SYMBOL}       — 5m K 线列表（JSON，含同样指标字段）
   kline:1m:{SYMBOL}      — PUBLISH：K 线收盘事件
-  bars:1m:tick:{SYMBOL} — PUBLISH：Tick 实时更新（当前未完成 K 线）
+  bars:1m:tick:{SYMBOL}  — PUBLISH：Tick 实时更新（当前未完成 K 线，仅实盘）
   kline:5m:{SYMBOL}      — PUBLISH：M5 K 线收盘事件
 
-全部数据来自 IBKR，无 yfinance 依赖。
+全部数据来自 IBKR，无外部数据源依赖。
 """
 import json
 import os
@@ -191,7 +193,7 @@ class _M5Bucket:
 # ============================================================
 class BarLoggerStrategyConfig(StrategyConfig, frozen=True):
     """
-    实盘策略配置
+    策略配置（回测 / 实盘通用）
 
     参数
     ----------
@@ -201,6 +203,8 @@ class BarLoggerStrategyConfig(StrategyConfig, frozen=True):
     st_period/mult  : SuperTrend 参数
     ema_period      : EMA 周期
     history_days    : 预热时拉取 IBKR 历史的天数（默认 1=当天）
+    backtest_mode   : True=回测（上一交易日数据，不订阅实时）；False=实盘（今日数据+实时）
+    backtest_date   : 回测指定日期 'YYYY-MM-DD'，空则自动选上一个交易日
     """
     instrument_id:  InstrumentId
     instrument_ids: tuple[str, ...] = ()
@@ -209,6 +213,8 @@ class BarLoggerStrategyConfig(StrategyConfig, frozen=True):
     st_mult:        float = 2.0
     ema_period:     int   = 21
     history_days:   int   = 1
+    backtest_mode:  bool  = False
+    backtest_date:  str   = ""
 
 
 # ============================================================
@@ -263,11 +269,22 @@ class BarLoggerStrategy(Strategy):
     # ── 工具：ET 时区 fake-UTC 时间戳 ───────────────────────────────────
     @staticmethod
     def _et_fake_utc(ts_ns: int) -> int:
-        """纳秒级 UTC 时间戳 → ET fake-UTC 秒（与 data_feeder.py 一致）"""
+        """纳秒级 UTC 时间戳 → ET fake-UTC 秒"""
         ts_utc = ts_ns // 1_000_000_000
         utc_dt = datetime.fromtimestamp(ts_utc, tz=ZoneInfo("UTC"))
         et_dt  = utc_dt.astimezone(ZoneInfo("America/New_York"))
         return ts_utc + int(et_dt.utcoffset().total_seconds())
+
+    @staticmethod
+    def _is_rth(et_fake_utc: int) -> bool:
+        """判断 ET fake-UTC 时间戳是否处于正式交易时段（09:30-16:00 ET）。
+
+        et_fake_utc 的时分秒直接对应 ET 本地时间，因此无需时区转换。
+        """
+        from datetime import timezone as _tz
+        dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
+        et_minutes = dt.hour * 60 + dt.minute
+        return (9 * 60 + 30) <= et_minutes < (16 * 60)   # [09:30, 16:00)
 
     # ── 生命周期 ──────────────────────────────────────────────────────
     def on_start(self) -> None:
@@ -283,21 +300,40 @@ class BarLoggerStrategy(Strategy):
             self.log.error(f"[Strategy] Redis 连接失败: {e}")
             self._redis = None
 
-        # 计算历史数据起始时间：今日盘前 04:00 ET（包含盘前数据）
-        now_et  = datetime.now(tz=ZoneInfo("America/New_York"))
-        # 找最近交易日（周末就向前找工作日）
-        target  = now_et.date()
-        while target.weekday() >= 5:
-            target -= timedelta(days=1)
-        self._today_et_date = target.isoformat()   # 管个标共用同一个今日
+        # ── 计算历史数据目标日期 ────────────────────────────────────────
+        # 实盘模式：加载今日数据  回测模式：加载上一个交易日（或指定日期）数据
+        import datetime as _dt_mod
+        now_et = datetime.now(tz=ZoneInfo("America/New_York"))
+
+        if self.config.backtest_mode:
+            # 回测：使用指定日期 或 自动选上一个交易日
+            if self.config.backtest_date:
+                target = _dt_mod.date.fromisoformat(self.config.backtest_date)
+                self.log.info(f"[Strategy] 回测模式 — 指定日期: {target}")
+            else:
+                # 向前找最近的工作日（跳过今天）
+                target = now_et.date() - timedelta(days=1)
+                while target.weekday() >= 5:
+                    target -= timedelta(days=1)
+                self.log.info(f"[Strategy] 回测模式 — 自动选上一交易日: {target}")
+        else:
+            # 实盘：使用今日（若今天是周末则向前找最近工作日）
+            target = now_et.date()
+            while target.weekday() >= 5:
+                target -= timedelta(days=1)
+            self.log.info(f"[Strategy] 实盘模式 — 目标日期: {target}")
+
+        self._today_et_date = target.isoformat()
         hist_start_et = datetime(
             target.year, target.month, target.day,
             4, 0, 0, tzinfo=ZoneInfo("America/New_York")   # 04:00 盘前开始
         )
         hist_start_utc = hist_start_et.astimezone(timezone.utc)
+        mode_label = "回测" if self.config.backtest_mode else "实盘"
         self.log.info(
-            f"[Strategy] 今日日期: {self._today_et_date}  "
-            f"历史起点: {hist_start_et.strftime('%H:%M')} ET ({hist_start_utc.strftime('%Y-%m-%d %H:%M UTC')})"
+            f"[Strategy] 模式={mode_label}  日期={self._today_et_date}  "
+            f"历史起点={hist_start_et.strftime('%H:%M')} ET "
+            f"({hist_start_utc.strftime('%Y-%m-%d %H:%M UTC')})"
         )
 
         instrument_ids = self._all_instrument_ids()
@@ -333,30 +369,29 @@ class BarLoggerStrategy(Strategy):
                 aggregation_source=AggregationSource.EXTERNAL,
             )
 
-            # 从 IBKR 拉取当日历史 K 线
-            self._bar_types[sym] = bar_type   # 存储，刷写完成后用于订阅实时
+            # 向 IBKR 拉取历史 K 线
+            self._bar_types[sym] = bar_type   # 存储，刷写完成后视模式决定是否订阅实时
             self.log.info(
-                f"[Strategy] {sym}: → request_bars() 历史起点 {hist_start_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+                f"[Strategy] {sym}: → request_bars() 起点 {hist_start_utc.strftime('%Y-%m-%d %H:%M UTC')}"
             )
             self.request_bars(bar_type, start=hist_start_utc)
 
-            # 注意：不在这里 subscribe_bars()
-            # 将在 _flush_history_for() 写完历史数据后才订阅实时
+            # 实盘模式才订阅 Tick（回测无需实时 tick）
+            if not self.config.backtest_mode:
+                try:
+                    self.subscribe_quote_ticks(iid)
+                    self.log.info(f"[Strategy] {sym}: ✓ 订阅 QuoteTick（实盘）")
+                except Exception as e:
+                    self.log.warning(f"[Strategy] {sym}: ✗ QuoteTick 订阅失败 — {e}")
 
-            # 订阅 Tick（展示当前价格用，与历史/实时 bar 无冲突）
-            try:
-                self.subscribe_quote_ticks(iid)
-                self.log.info(f"[Strategy] {sym}: ✓ 订阅 QuoteTick")
-            except Exception as e:
-                self.log.warning(f"[Strategy] {sym}: ✗ QuoteTick 订阅失败 — {e}")
-
-            # 安排 Timer：15s 后刷写历史数据 + 订阅实时
+            # 安排 Timer：15s 后刷写历史数据（实盘还会订阅实时）
             delay = 15.0
             t = threading.Timer(delay, self._flush_history_for, args=(sym,))
             t.daemon = True
             t.start()
             self.log.info(
-                f"[Strategy] {sym}: ✓ Timer 已设置 ({delay:.0f}s 后刷写历史 + 订阅实时)"
+                f"[Strategy] {sym}: ✓ Timer 已设置 "
+                f"({delay:.0f}s 后刷写历史{'→不订阅实时' if self.config.backtest_mode else '→订阅实时'})"
             )
 
     def on_stop(self) -> None:
@@ -468,26 +503,30 @@ class BarLoggerStrategy(Strategy):
             if not self._redis:
                 self.log.warning(f"[FLUSH] {sym}: ⚠ Redis 不可用，跳过写入")
             else:
-                # ── 步骤1：写入 M1 历史 K 线 ──────────────────────────────
+                # ── 步骤1：写入 M1 历史 K 线（仅 RTH：09:30-16:00 ET）────
+                # 盘前数据已用于指标预热（on_historical_data），此处只写正式交易时段
+                rth_m1 = [b for b in bars if self._is_rth(b["time"])]
+                self.log.info(
+                    f"[FLUSH] {sym}: 过滤 RTH  "
+                    f"总缓冲={len(bars)} 根  RTH={len(rth_m1)} 根  "
+                    f"盘前={len(bars)-len(rth_m1)} 根（已用于指标预热，不写图表）"
+                )
                 try:
-                    last = bars[-1]
+                    rth_last = rth_m1[-1] if rth_m1 else None
                     key  = f"bars:1m:{sym}"
-                    written = bars[-MAX_BARS:]    # 最多保留 MAX_BARS 根
+                    written = rth_m1[-MAX_BARS:]
                     self._redis.set(key, json.dumps(written))
                     self.log.info(
                         f"[FLUSH] {sym}: ✓ bars:1m 写入完成  "
                         f"写入={len(written)} 根  "
-                        f"最新 C={last['close']}  "
-                        f"ST={last.get('st_value','?')}({'↑' if last.get('st_dir')==1 else '↓'})  "
-                        f"EMA21={last.get('ema21','?')}"
+                        + (f"最新 C={rth_last['close']}  "
+                           f"ST={rth_last.get('st_value','?')}({'↑' if rth_last.get('st_dir')==1 else '↓'})  "
+                           f"EMA21={rth_last.get('ema21','?')}" if rth_last else "（无 RTH 数据）")
                     )
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:1m Redis 写入失败: {e}")
 
                 # ── 步骤2：补刷最后一个未完成的 M5 bucket ─────────────────
-                # 注意：flush_current() 不清空 _bars，只是返回当前 bucket 的聚合结果。
-                # 只调用一次，计算指标后追加到 m5_bars，然后整体覆盖写入 Redis。
-                # （历史阶段 _hist_m5 是内存列表，不走 _process_m5_bar() 避免重复写 Redis）
                 m5_bars = self._hist_m5.get(sym, [])
                 last_m5 = self._m5_bucket[sym].flush_current()
                 if last_m5:
@@ -504,28 +543,34 @@ class BarLoggerStrategy(Strategy):
                     })
                     self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket  C={c5:.2f}")
 
-                # ── 步骤3：整体覆盖写入 M5 历史 K 线 ──────────────────────
+                # ── 步骤3：整体覆盖写入 M5 历史 K 线（仅 RTH）────────────
+                rth_m5 = [b for b in m5_bars if self._is_rth(b["time"])]
                 try:
-                    self._redis.set(f"bars:5m:{sym}", json.dumps(m5_bars[-MAX_BARS:]))
+                    self._redis.set(f"bars:5m:{sym}", json.dumps(rth_m5[-MAX_BARS:]))
                     self.log.info(
-                        f"[FLUSH] {sym}: ✓ bars:5m 覆盖写入完成  写入={len(m5_bars)} 根"
-                        + (f"  最新 C={m5_bars[-1]['close']}" if m5_bars else "")
+                        f"[FLUSH] {sym}: ✓ bars:5m 覆盖写入完成  "
+                        f"RTH={len(rth_m5)} 根"
+                        + (f"  最新 C={rth_m5[-1]['close']}" if rth_m5 else "")
                     )
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:5m Redis 写入失败: {e}")
 
-        # ── 步骤4：订阅实时 K 线 ────────────────────────────────────────
-        # 历史数据已写入 Redis，现在开始接收实时 bar（on_bar() 将被触发）
-        # 注意：subscribe_bars() 必须在历史 flush 完成后调用，否则实时 bar
-        # 可能在历史写入前到达，导致数据顺序混乱。
-        bar_type = self._bar_types.get(sym)
-        if bar_type:
-            self.subscribe_bars(bar_type)
+        # ── 步骤4：订阅实时 K 线（仅实盘模式）──────────────────────────
+        # 回测模式：数据已写入 Redis，不需要实时订阅，数据回放完毕
+        # 实盘模式：历史数据写完后才订阅实时 bar，确保数据顺序正确
+        if self.config.backtest_mode:
             self.log.info(
-                f"[FLUSH] {sym}: ✓ 订阅实时 M1 K 线（历史预热完成）"
+                f"[FLUSH] {sym}: ✓ 回测完成，数据已写入 Redis（不订阅实时）"
             )
         else:
-            self.log.error(f"[FLUSH] {sym}: ✗ bar_type 未记录，无法订阅实时")
+            bar_type = self._bar_types.get(sym)
+            if bar_type:
+                self.subscribe_bars(bar_type)
+                self.log.info(
+                    f"[FLUSH] {sym}: ✓ 订阅实时 M1 K 线（历史预热完成）"
+                )
+            else:
+                self.log.error(f"[FLUSH] {sym}: ✗ bar_type 未记录，无法订阅实时")
 
     # ── 实时 K 线收盘（P1）────────────────────────────────────
     def on_bar(self, bar: Bar) -> None:
@@ -558,6 +603,24 @@ class BarLoggerStrategy(Strategy):
                 )
                 return
 
+        # ─ RTH 过滤 ──────────────────────────────────────────────────────
+        # 对盘前（<09:30 ET）：更新指标状态机（预热）但不写 Redis，不显示在图表
+        # 对盘后（≥16:00 ET）：完全跳过（忽略）
+        is_rth      = self._is_rth(et)
+        is_premarket = not is_rth and (
+            datetime.fromtimestamp(et, tz=timezone.utc).hour * 60
+            + datetime.fromtimestamp(et, tz=timezone.utc).minute
+        ) < (9 * 60 + 30)
+
+        if not is_rth and not is_premarket:
+            # 盘后 bar（≥16:00 ET）：完全跳过
+            self.log.debug(
+                f"[BAR] {sym}: 跳过盘后 bar  "
+                f"et_hour={datetime.fromtimestamp(et, tz=timezone.utc).hour:02d}:"
+                f"{datetime.fromtimestamp(et, tz=timezone.utc).minute:02d}"
+            )
+            return
+
         # ─ M1 指标计算（极端情况：历史未到就收到实时 bar，临时初始化）────
         if sym not in self._st_m1:
             self.log.warning(
@@ -568,6 +631,15 @@ class BarLoggerStrategy(Strategy):
 
         st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
         ema21 = self._ema_m1[sym].update(c)
+
+        # 盘前 bar：指标已更新（继续预热），但不写 Redis / 不显示图表
+        if is_premarket:
+            self._cur_bar[sym] = None   # 清空 tick，避免盘前 tick 残留
+            self.log.debug(
+                f"[BAR] {sym}: 盘前 bar 指标预热（不写 Redis）  "
+                f"C={c:.2f}  ST={st_val:.2f}"
+            )
+            return
 
         bar_dict = {
             "symbol":   sym,    # 前端二次校验，防止数据串台
