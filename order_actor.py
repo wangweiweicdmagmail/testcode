@@ -24,8 +24,8 @@ OrderGatewayActor — 使用 NautilusTrader 标准 MessageBus 消息架构的订
 """
 import asyncio
 import json
+import time
 import threading
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from nautilus_trader.adapters.interactive_brokers.common import IBOrderTags
@@ -33,7 +33,6 @@ from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.message import Event
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
@@ -64,14 +63,13 @@ class ExternalOrderCommand(Event):
         sl_step_secs: int = 60,           # BRACKET: 两次修改的间隔秒数
     ) -> None:
         # Cython Event 子类：直接设置私有属性，不调 super().__init__()
-        import time
         self._id = UUID4()
         self._ts_event = time.time_ns()
         self._ts_init = time.time_ns()
         # 业务字段
         self.instrument_id = instrument_id
         self.side = side.upper()
-        self.qty = qty
+        self.qty = int(qty)   # 强制转整数，拒绝浮点股数
         self.order_type = order_type.upper()
         self.price = price
         self.stop_loss = stop_loss
@@ -180,7 +178,23 @@ class OrderGatewayActor(Strategy):
     # ------------------------------------------------------------------
 
     def get_account_info(self) -> dict:
-        """返回 IBKR 账户净资产和可用资金"""
+        """
+        返回 IBKR 账户净资产和可用资金。
+        通过 run_coroutine_threadsafe 在引擎事件循环中访问 cache，避免线程竞争。
+        """
+        if self._loop is None:
+            return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_get_account_info(), self._loop
+        )
+        try:
+            return future.result(timeout=3.0)
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_account_info 超时或失败: {e}")
+            return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
+
+    async def _async_get_account_info(self) -> dict:
+        """在引擎事件循环中安全访问 cache，获取账户余额"""
         try:
             from nautilus_trader.model.identifiers import Venue
             from nautilus_trader.model.currencies import USD
@@ -196,22 +210,40 @@ class OrderGatewayActor(Strategy):
                 "currency": "USD",
             }
         except Exception as e:
-            self.log.warning(f"[Gateway] get_account_info 失败: {e}")
+            self.log.warning(f"[Gateway] _async_get_account_info 失败: {e}")
             return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
 
     def get_positions(self) -> list:
-        """返回当前所有开放仓位"""
+        """
+        返回当前所有开放仓位。
+        通过 run_coroutine_threadsafe 在引擎事件循环中访问 cache，避免线程竞争。
+        """
+        if self._loop is None:
+            return []
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_get_positions(), self._loop
+        )
+        try:
+            return future.result(timeout=3.0)
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_positions 超时或失败: {e}")
+            return []
+
+    async def _async_get_positions(self) -> list:
+        """在引擎事件循环中安全访问 cache，获取开放仓位"""
         result = []
         try:
             for pos in self.cache.positions_open():
                 sym = pos.instrument_id.symbol.value
-                # 用最新成交价估算浮盈（取缓存中最新 quote/bar）
                 last_price = None
                 instrument = self.cache.instrument(pos.instrument_id)
-                # 尝试从 bar 缓存拿最新价
+                # 尝试从 bar 缓存拿最新收盘价
                 bars = self.cache.bars(pos.instrument_id)
-                if bars:
-                    last_price = instrument.make_price(bars[-1].close) if instrument else None
+                if bars and instrument:
+                    # bars 可能是对象或列表，用 list() 确保支持索引
+                    bar_list = list(bars)
+                    if bar_list:
+                        last_price = instrument.make_price(bar_list[-1].close)
 
                 upnl = None
                 if last_price is not None:
@@ -222,17 +254,17 @@ class OrderGatewayActor(Strategy):
                         pass
 
                 result.append({
-                    "symbol":       sym,
-                    "instrument_id": str(pos.instrument_id),
-                    "side":         "LONG" if pos.is_long else "SHORT",
-                    "quantity":     float(pos.quantity),
-                    "avg_px_open":  float(pos.avg_px_open),
+                    "symbol":         sym,
+                    "instrument_id":  str(pos.instrument_id),
+                    "side":           "LONG" if pos.is_long else "SHORT",
+                    "quantity":       float(pos.quantity),
+                    "avg_px_open":    float(pos.avg_px_open),
                     "unrealized_pnl": upnl,
-                    "realized_pnl": float(pos.realized_pnl.as_double()) if pos.realized_pnl else 0.0,
-                    "last_price":   float(last_price) if last_price else None,
+                    "realized_pnl":   float(pos.realized_pnl.as_double()) if pos.realized_pnl else 0.0,
+                    "last_price":     float(last_price) if last_price else None,
                 })
         except Exception as e:
-            self.log.warning(f"[Gateway] get_positions 失败: {e}")
+            self.log.warning(f"[Gateway] _async_get_positions 失败: {e}")
         return result
 
 
@@ -294,16 +326,16 @@ class OrderGatewayActor(Strategy):
                 return
 
             # 生成唯一 OCA 组名，确保两笔单联动
-            import time as _time
-            oca_group = f"BKT-{int(_time.time_ns() // 1_000_000)}"
+            oca_group = f"BKT-{int(time.time_ns() // 1_000_000)}"
             oca_extra = {"ocaGroup": oca_group, "ocaType": 2}
 
             # 入场单（市价）+ FA + OCA 字段合并进同一 IBOrderTags tag
+            # 市价单用 DAY，GTC 不适用于市价单（IBKR 会拒）
             entry_order = self.order_factory.market(
                 instrument_id=instrument_id,
                 order_side=order_side,
                 quantity=quantity,
-                time_in_force=TimeInForce.GTC,
+                time_in_force=TimeInForce.DAY,
                 tags=self._fa_tags(extra_fields=oca_extra),
             )
             sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
@@ -500,17 +532,12 @@ class OrderGatewayActor(Strategy):
         extra_fields : dict, optional
             额外的 IBOrderTags 字段，如 {'ocaGroup': 'BKT-xxx', 'ocaType': 2}
         """
-        import json as _json
         payload = {}
 
         # 先填入 FA 分配字段
         if self.config.fa_group:
             payload["faGroup"] = self.config.fa_group
             payload["faMethod"] = self.config.fa_method
-            self.log.info(
-                f"[Gateway] FA 分配 tag: group={self.config.fa_group} "
-                f"method={self.config.fa_method}"
-            )
 
         # 合并额外字段（如 ocaGroup/ocaType）
         if extra_fields:
@@ -519,7 +546,7 @@ class OrderGatewayActor(Strategy):
         if not payload:
             return None
 
-        tag_str = f"IBOrderTags:{_json.dumps(payload)}"
+        tag_str = f"IBOrderTags:{json.dumps(payload)}"
         return [tag_str]   # order_factory 的 tags 参数要求 list[str]
 
 

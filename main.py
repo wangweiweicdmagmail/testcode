@@ -102,14 +102,14 @@ BACKTEST_DATE = _args.date   # 空字符串 = 自动
 # ⚙️  用户配置区
 # ============================================================
 IBG_HOST = "127.0.0.1"
-IBG_PORT = 7496       # 实盘 TWS=7496 | 实盘 Gateway=4001 | 模拟 TWS=7497
-IBG_CLIENT_ID = 1
+IBG_PORT = int(os.environ.get("IBG_PORT", "7496"))  # 实盘 TWS=7496 | 实盘 Gateway=4001 | 模拟 TWS=7497
+IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "1"))  # 多客户端并行时修改，避免冲突
 
 ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
 
 # FA Group 配置
-FA_GROUP = os.environ.get("IB_FA_GROUP", "dt_test")
-FA_METHOD = "NetLiq"   # dt_test group 的默认分配方式
+FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
+FA_METHOD = os.environ.get("IB_FA_METHOD", "NetLiq")   # EqualQuantity | AvailableEquity | NetLiq | PctChange
 
 # K 线订阅合约（P6: 多标的）
 BAR_INSTRUMENT_ID = "AAPL.NASDAQ"   # 主合约（兼容旧配置）

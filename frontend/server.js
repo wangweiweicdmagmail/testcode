@@ -207,6 +207,7 @@ function proxyToEngine(method, path, body, fallback) {
                 catch { resolve(fallback); }
             });
         });
+        req.setTimeout(3000, () => { req.destroy(); resolve(fallback); }); // 3s 超时，引擎卡死时降级
         req.on('error', () => resolve(fallback));  // 引擎未启动时降级
         if (postData) req.write(postData);
         req.end();
