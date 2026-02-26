@@ -361,77 +361,209 @@
             background: rgba(239, 83, 80, .15);
         }
 
-        /* ── 全局开仓弹窗（共享一个） ── */
-        .modal-backdrop {
+        /* ── 止损药丸拖动控件 ── */
+        .sl-handle {
             display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, .55);
-            z-index: 9999;
+            position: absolute;
+            right: 58px;
+            transform: translateY(-50%);
             align-items: center;
-            justify-content: center;
+            gap: 5px;
+            background: #ef5350;
+            border-radius: 16px;
+            padding: 4px 10px 4px 8px;
+            cursor: ns-resize;
+            z-index: 50;
+            user-select: none;
+            box-shadow: 0 2px 8px rgba(239, 83, 80, .5);
+            white-space: nowrap;
+            font-size: 11px;
         }
 
-        .modal-backdrop.open {
+        .sl-handle.active {
             display: flex;
         }
 
-        .modal {
-            background: #1e222d;
-            border: 1px solid #2a2e39;
-            border-radius: 10px;
-            padding: 22px 26px;
-            min-width: 280px;
+        @keyframes sl-pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(239, 83, 80, .5), 0 2px 8px rgba(239, 83, 80, .5);
+            }
+
+            70% {
+                box-shadow: 0 0 0 6px rgba(239, 83, 80, 0), 0 2px 8px rgba(239, 83, 80, .5);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(239, 83, 80, 0), 0 2px 8px rgba(239, 83, 80, .5);
+            }
         }
 
-        .modal h3 {
-            margin-bottom: 14px;
-            font-size: 14px;
+        .sl-handle.active {
+            animation: sl-pulse 2s infinite;
+        }
+
+        .sl-handle:active {
+            animation: none;
+        }
+
+        .sl-handle .sl-icon {
+            flex-shrink: 0;
+            opacity: .9;
+        }
+
+        .sl-handle .sl-label {
+            color: rgba(255, 255, 255, .75);
+            font-weight: 500;
+        }
+
+        .sl-handle .sl-price {
+            font-family: 'Roboto Mono', monospace, sans-serif;
+            font-weight: 700;
+            color: #fff;
+            font-size: 12px;
+        }
+
+        /* ── 内嵌订单面板 ── */
+        .order-panel {
+            display: none;
+            position: absolute;
+            top: 8px;
+            right: 58px;
+            width: 190px;
+            background: rgba(19, 23, 34, .97);
+            border: 1px solid #2a2e39;
+            border-radius: 10px;
+            padding: 12px 14px;
+            z-index: 60;
+            color: #d1d4dc;
+        }
+
+        .order-panel.active {
+            display: block;
+        }
+
+        .op-hdr {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .op-hdr-title {
+            font-size: 12px;
+            font-weight: 700;
             color: #fff;
         }
 
-        .modal label {
-            display: block;
-            font-size: 11px;
-            color: #787b86;
-            margin-bottom: 3px;
-            margin-top: 10px;
-        }
-
-        .modal input {
-            width: 100%;
-            background: #131722;
-            border: 1px solid #2a2e39;
-            color: #d1d4dc;
-            border-radius: 4px;
-            padding: 5px 9px;
-            font-size: 12px;
-        }
-
-        .modal-btns {
-            display: flex;
-            gap: 8px;
-            margin-top: 16px;
-            justify-content: flex-end;
-        }
-
-        .modal-btns button {
-            padding: 5px 16px;
-            border-radius: 4px;
+        .op-x {
+            background: none;
             border: none;
+            color: #787b86;
             cursor: pointer;
-            font-size: 12px;
-            font-weight: 600;
+            font-size: 14px;
+            line-height: 1;
         }
 
-        #m-cancel {
+        .op-dir-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .op-dir-badge.buy {
+            background: rgba(38, 166, 154, .18);
+            color: #26a69a;
+            border: 1px solid #26a69a;
+        }
+
+        .op-dir-badge.sell {
+            background: rgba(239, 83, 80, .18);
+            color: #ef5350;
+            border: 1px solid #ef5350;
+        }
+
+        .op-field {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .op-lbl {
+            font-size: 10px;
+            color: #787b86;
+        }
+
+        .op-calc {
+            font-size: 11px;
+            font-weight: 700;
+            font-family: 'Roboto Mono', monospace, sans-serif;
+        }
+
+        .op-field input {
+            width: 75px;
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 4px;
+            color: #d1d4dc;
+            font-size: 11px;
+            padding: 3px 6px;
+            text-align: right;
+        }
+
+        .op-field input:focus {
+            outline: none;
+            border-color: #434651;
+        }
+
+        .op-divider {
+            height: 1px;
+            background: #2a2e39;
+            margin: 5px 0;
+        }
+
+        .op-hint {
+            font-size: 9px;
+            color: #787b86;
+            margin-top: 4px;
+            text-align: center;
+        }
+
+        .op-footer {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .op-btn {
+            flex: 1;
+            padding: 5px 0;
+            border: none;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .op-btn.cancel {
             background: #2a2e39;
             color: #d1d4dc;
         }
 
-        #m-confirm {
+        .op-btn.confirm {
             background: #26a69a;
             color: #fff;
+        }
+
+        .op-btn.confirm.sell {
+            background: #ef5350;
+        }
+
+        .op-btn:hover {
+            opacity: .85;
         }
     </style>
 </head>
@@ -450,32 +582,14 @@
     <!-- 2×2 网格（由 JS 动态生成） -->
     <div id="grid"></div>
 
-    <!-- 全局开仓弹窗 -->
-    <div class="modal-backdrop" id="open-modal">
-        <div class="modal">
-            <h3 id="m-title">开仓</h3>
-            <label>开仓价</label>
-            <input type="number" id="m-entry" step="0.01" placeholder="如 600.28">
-            <label>止损价</label>
-            <input type="number" id="m-sl" step="0.01" placeholder="如 599.28">
-            <label>数量（股）</label>
-            <input type="number" id="m-qty" value="1" min="1">
-            <div class="modal-btns">
-                <button id="m-cancel">取消</button>
-                <button id="m-confirm">确认开仓</button>
-            </div>
-        </div>
-    </div>
 
     <script>
         // ── 默认四个标的 ────────────────────────────────────────
         const DEFAULT_SYMBOLS = ['QQQ', 'AAPL', 'NVDA', 'TSLA'];
+        const state = {};
 
-        // 每个格子的状态存储
-        const state = {};   // state[symbol] = { chart, candleSeries, stSeriesList, stLastDir, stLastSeries, symbol }
-
-        // 全局弹窗当前操作的标的
-        let modalSymbol = null;
+        // 全局拖动状态（同一时刻只有一个面板在拖动）
+        let activeDrag = null;
 
         // ── 生成单元格 HTML ─────────────────────────────────────
         function createCell(symbol) {
@@ -536,18 +650,48 @@
         </div>
 
         <!-- 图表区 -->
-        <div class="c-chart-wrap">
+        <div class="c-chart-wrap" id="wrap-${id}">
           <div class="c-loading" id="loading-${id}">⏳ 加载中…</div>
           <div class="c-chart"  id="chart-${id}"></div>
           <!-- 图例 -->
           <div class="c-legend">
-            <div class="c-legend-item">
-              <div class="c-legend-dot" style="background:#26a69a"></div>
-              <span style="color:#26a69a">ST↑</span>
+            <div class="c-legend-item"><div class="c-legend-dot" style="background:#26a69a"></div><span style="color:#26a69a">ST↑</span></div>
+            <div class="c-legend-item"><div class="c-legend-dot" style="background:#ef5350"></div><span style="color:#ef5350">ST↓</span></div>
+          </div>
+          <!-- 止损药丸拖动控件 -->
+          <div class="sl-handle" id="slh-${id}" title="上下拖动调整止损价">
+            <svg class="sl-icon" width="10" height="13" viewBox="0 0 10 13" fill="none">
+              <path d="M5 0L9 4H1L5 0Z" fill="white"/>
+              <path d="M5 13L1 9H9L5 13Z" fill="white"/>
+              <rect x="4" y="4" width="2" height="5" rx="1" fill="white" opacity=".5"/>
+            </svg>
+            <span class="sl-label">止损</span>
+            <span class="sl-price">—</span>
+          </div>
+          <!-- 内嵌订单面板 -->
+          <div class="order-panel" id="op-${id}">
+            <div class="op-hdr">
+              <span class="op-hdr-title" id="opt-${id}">开仓</span>
+              <button class="op-x" id="opx-${id}">✕</button>
             </div>
-            <div class="c-legend-item">
-              <div class="c-legend-dot" style="background:#ef5350"></div>
-              <span style="color:#ef5350">ST↓</span>
+            <div class="op-dir-badge buy" id="opd-${id}">▲ 做多</div>
+            <div class="op-field">
+              <span class="op-lbl">最大亏损</span>
+              <input type="number" id="opm-${id}" value="100" min="1" step="1">
+            </div>
+            <div class="op-field">
+              <span class="op-lbl">止损价</span>
+              <span class="op-calc op-sl-val" style="color:#ef5350">—</span>
+            </div>
+            <div class="op-divider"></div>
+            <div class="op-field"><span class="op-lbl">建议股数</span><span class="op-calc" id="opq-${id}">—</span></div>
+            <div class="op-field"><span class="op-lbl">每股风险</span><span class="op-calc" id="opr-${id}" style="color:#ef5350">—</span></div>
+            <div class="op-field"><span class="op-lbl">止损幅度</span><span class="op-calc" id="ops-${id}" style="color:#ef5350">—</span></div>
+            <div class="op-field"><span class="op-lbl">开仓金额</span><span class="op-calc" id="opc-${id}">—</span></div>
+            <div class="op-hint" id="oph-${id}"></div>
+            <div class="op-footer">
+              <button class="op-btn cancel" id="opcancel-${id}">取消</button>
+              <button class="op-btn confirm" id="opconfirm-${id}">确认做多</button>
             </div>
           </div>
         </div>
@@ -722,19 +866,87 @@
                 updateHeader(symbol, m1_bars);
 
                 state[symbol].chart.timeScale().scrollToRealTime();
+
+                // ── 构建止损拖动 ctx ──
+                const s = state[symbol];
+                const lastBar = m1_bars[m1_bars.length - 1];
+                const lastST = [...m1_bars].reverse().find(b => b.st_value != null && b.st_value !== 0);
+                const id = symbol;
+                const ctx = {
+                    sym: symbol, cs: s.candleSeries, chart: s.chart,
+                    wrapEl: document.getElementById(`wrap-${id}`),
+                    chartEl: document.getElementById(`chart-${id}`),
+                    handleEl: document.getElementById(`slh-${id}`),
+                    panelEl: document.getElementById(`op-${id}`),
+                    latestClose: lastBar.close,
+                    latestST: lastST ? lastST.st_value : null,
+                    latestSTDir: lastST ? lastST.st_dir : null,
+                    slPrice: null, slPriceLine: null, orderDir: 'BUY', orderMode: false,
+                    // 订单面板子元素
+                    dirBadgeEl: document.getElementById(`opd-${id}`),
+                    panelTitleEl: document.getElementById(`opt-${id}`),
+                    qtyEl: document.getElementById(`opq-${id}`),
+                    riskEl: document.getElementById(`opr-${id}`),
+                    slPctEl: document.getElementById(`ops-${id}`),
+                    costEl: document.getElementById(`opc-${id}`),
+                    hintEl: document.getElementById(`oph-${id}`),
+                    maxLossEl: document.getElementById(`opm-${id}`),
+                    confirmBtn: document.getElementById(`opconfirm-${id}`),
+                };
+                s.ctx = ctx;
+
+                // 止损控件 mousedown → 开始拖动
+                ctx.handleEl.addEventListener('mousedown', e => {
+                    if (!ctx.orderMode) return;
+                    activeDrag = ctx;
+                    document.body.style.cursor = 'ns-resize';
+                    e.preventDefault();
+                });
+
+                // 最大亏损输入 → 重算
+                document.getElementById(`opm-${id}`).addEventListener('input', () => updateOrderPanel(ctx));
+
+                // 取消 / ✕ 关闭
+                document.getElementById(`opcancel-${id}`).addEventListener('click', () => exitOrderMode(ctx));
+                document.getElementById(`opx-${id}`).addEventListener('click', () => exitOrderMode(ctx));
+
+                // 确认开仓
+                document.getElementById(`opconfirm-${id}`).addEventListener('click', async () => {
+                    const sl = ctx.slPrice;
+                    const entry = ctx.latestClose || 0;
+                    const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
+                    const riskPerShare = Math.abs(entry - sl);
+                    const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+                    if (!sl || qty <= 0) { alert('止损价无效或每股风险过小'); return; }
+                    console.log('开仓请求', { symbol, side: ctx.orderDir, qty, entry, stop_loss: sl });
+                    /* await fetch(`/api/position/${symbol}`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ side: ctx.orderDir, entry_price: entry, stop_loss: sl, quantity: qty }),
+                    }); */
+                    exitOrderMode(ctx);
+                    alert(`${symbol} 开仓请求已发送\n方向: ${ctx.orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}  数量: ${qty} 股\n开仓: ~$${entry.toFixed(2)}  止损: $${sl.toFixed(2)}`);
+                });
+
+                // 图表缩放/滚动后重置控件位置
+                s.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    if (ctx.orderMode) snapHandle(ctx);
+                });
+
             } catch (e) {
                 const el = document.getElementById(`loading-${symbol}`);
                 if (el) el.textContent = `❌ ${e.message}`;
             }
         }
 
-        // ── 事件绑定（开仓/平仓/ST toggle） ────────────────────
+
+        // ── 事件绑定 ─────────────────────────────────────────────
         function bindEvents(symbol) {
-            // 开仓按钮 → 打开弹窗
+            const s = state[symbol];
+
+            // 开仓按钮 → 进入止损拖动模式
             document.getElementById(`btn-open-${symbol}`).addEventListener('click', () => {
-                modalSymbol = symbol;
-                document.getElementById('m-title').textContent = `开仓 — ${symbol}`;
-                document.getElementById('open-modal').classList.add('open');
+                if (!s.ctx) return;
+                enterOrderMode(s.ctx);
             });
 
             // 平仓
@@ -748,8 +960,7 @@
             document.getElementById(`st-toggle-${symbol}`).addEventListener('change', async e => {
                 const on = e.target.checked;
                 await fetch(`/api/settings/${symbol}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ st_trail: on }),
                 });
                 const lbl = document.getElementById(`st-label-${symbol}`);
@@ -757,26 +968,108 @@
             });
         }
 
-        // ── 全局弹窗逻辑 ────────────────────────────────────────
-        const openModal = document.getElementById('open-modal');
-        document.getElementById('m-cancel').addEventListener('click', () => openModal.classList.remove('open'));
-        openModal.addEventListener('click', e => { if (e.target === openModal) openModal.classList.remove('open'); });
-        document.getElementById('m-confirm').addEventListener('click', async () => {
-            if (!modalSymbol) return;
-            const entry = parseFloat(document.getElementById('m-entry').value);
-            const sl = parseFloat(document.getElementById('m-sl').value);
-            const qty = parseInt(document.getElementById('m-qty').value, 10);
-            if (isNaN(entry) || isNaN(sl) || isNaN(qty)) {
-                alert('请填写开仓价、止损价和数量'); return;
-            }
-            await fetch(`/api/position/${modalSymbol}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ entry_price: entry, stop_loss: sl, quantity: qty }),
-            });
-            openModal.classList.remove('open');
-            location.reload();
+        // ── 全局拖动事件（绑在 document 层）──────────────────────
+        document.addEventListener('mousemove', e => {
+            if (!activeDrag) return;
+            const { wrapEl, chartEl, handleEl } = activeDrag;
+            const wRect = wrapEl.getBoundingClientRect();
+            const eRect = chartEl.getBoundingClientRect();
+            const containerY = e.clientY - wRect.top;
+            const chartY = e.clientY - eRect.top;
+            const price = activeDrag.cs.coordinateToPrice(chartY);
+            if (price === null) return;
+            handleEl.style.top = containerY + 'px';
+            activeDrag.slPrice = parseFloat(price.toFixed(2));
+            updateHandlePriceLabel(activeDrag);
+            updateOrderPanel(activeDrag);
         });
+
+        document.addEventListener('mouseup', () => {
+            if (!activeDrag) return;
+            snapHandle(activeDrag);
+            document.body.style.cursor = '';
+            activeDrag = null;
+        });
+
+        // 止损控件精确对齐（priceToCoordinate + offset）
+        function snapHandle(ctx) {
+            const y = ctx.cs.priceToCoordinate(ctx.slPrice);
+            if (y === null) return;
+            const offset = ctx.chartEl.getBoundingClientRect().top - ctx.wrapEl.getBoundingClientRect().top;
+            ctx.handleEl.style.top = (y + offset) + 'px';
+        }
+
+        // 更新药丸价格标签
+        function updateHandlePriceLabel(ctx) {
+            ctx.handleEl.querySelector('.sl-price').textContent = ctx.slPrice.toFixed(2);
+            const el = ctx.panelEl.querySelector('.op-sl-val');
+            if (el) el.textContent = ctx.slPrice.toFixed(2);
+        }
+
+        // 核心：自动判方向 + 算股数 + 更新面板
+        function updateOrderPanel(ctx) {
+            const entry = ctx.latestClose || 0;
+            if (!ctx.slPrice || !entry) return;
+            const { slPrice } = ctx;
+
+            const isBuy = slPrice < entry;
+            ctx.orderDir = isBuy ? 'BUY' : 'SELL';
+            ctx.dirBadgeEl.className = `op-dir-badge ${isBuy ? 'buy' : 'sell'}`;
+            ctx.dirBadgeEl.textContent = isBuy ? '▲ 做多' : '▼ 做空';
+            ctx.panelTitleEl.textContent = isBuy ? '做多开仓' : '做空开仓';
+            ctx.confirmBtn.className = `op-btn confirm ${isBuy ? '' : 'sell'}`;
+            ctx.confirmBtn.textContent = isBuy ? '确认做多' : '确认做空';
+
+            const riskPerShare = Math.abs(entry - slPrice);
+            const slPct = entry > 0 ? (riskPerShare / entry * 100) : 0;
+            ctx.riskEl.textContent = riskPerShare > 0 ? `$${riskPerShare.toFixed(2)}` : '—';
+            ctx.slPctEl.textContent = slPct > 0 ? `${slPct.toFixed(2)}%` : '—';
+
+            const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
+            const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+            ctx.qtyEl.textContent = qty > 0 ? `${qty} 股` : '—';
+            ctx.qtyEl.style.color = qty > 0 ? '#d1d4dc' : '#787b86';
+
+            const cost = qty * entry;
+            ctx.costEl.textContent = qty > 0 ? `$${cost.toFixed(0)}` : '—';
+            ctx.hintEl.textContent = qty > 0
+                ? `💡 占用 $${cost.toFixed(0)}（$10万账户的 ${(cost / 100000 * 100).toFixed(1)}%）`
+                : '请拖动止损控件';
+
+            if (ctx.slPriceLine) {
+                ctx.slPriceLine.applyOptions({ price: slPrice, title: `止损 ${slPrice.toFixed(2)}` });
+            }
+        }
+
+        // 进入开仓模式
+        function enterOrderMode(ctx) {
+            const initSL = ctx.latestST
+                ? ctx.latestST
+                : (ctx.latestClose ? ctx.latestClose * 0.99 : 0);
+            ctx.slPrice = parseFloat(initSL.toFixed(2));
+            ctx.slPriceLine = ctx.cs.createPriceLine({
+                price: ctx.slPrice, color: '#ef5350', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true, title: `止损 ${ctx.slPrice.toFixed(2)}`,
+            });
+            ctx.orderMode = true;
+            ctx.handleEl.classList.add('active');
+            ctx.panelEl.classList.add('active');
+            updateHandlePriceLabel(ctx);
+            updateOrderPanel(ctx);
+            snapHandle(ctx);
+        }
+
+        // 退出开仓模式
+        function exitOrderMode(ctx) {
+            ctx.orderMode = false;
+            if (ctx.slPriceLine) { ctx.cs.removePriceLine(ctx.slPriceLine); ctx.slPriceLine = null; }
+            ctx.handleEl.classList.remove('active');
+            ctx.panelEl.classList.remove('active');
+            activeDrag = null;
+            document.body.style.cursor = '';
+        }
+
 
         // ── WebSocket 实时更新 ──────────────────────────────────
         function connectWS() {
