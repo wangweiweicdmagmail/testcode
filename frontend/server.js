@@ -49,8 +49,31 @@ app.get("/api/data/:symbol", async (req, res) => {
         // 防御层：按时间戳去重（保留最后出现的），确保 LightweightCharts setData 时间严格递增
         function dedupBars(bars) {
             const map = new Map();
-            bars.forEach(b => map.set(b.time, b));  // 相同 time 后者覆盖前者
+            bars.forEach(b => map.set(b.time, b));
             return Array.from(map.values()).sort((a, b) => a.time - b.time);
+        }
+
+        // 计算昨日 H/L/C（从 5m bars 中筛选昨日 ET 日期数据）
+        // ET fake-UTC：bars.time 已是 ET fake-UTC 秒
+        function calcPrevDay(m5Bars) {
+            if (!m5Bars.length) return null;
+            const now = Date.now() / 1000;
+            const month = new Date().getUTCMonth() + 1;
+            const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+            const etNow = now + etOff;
+            // 今日 ET 凌晨 0:00（fake-UTC）
+            const todayMidnight = etNow - (etNow % 86400);
+            // 昨日 ET 凌晨 0:00
+            const prevMidnight = todayMidnight - 86400;
+            // 筛选昨日 09:30-16:00（ET fake-UTC 秒）
+            const prevOpen = prevMidnight + 9 * 3600 + 30 * 60;
+            const prevClose = prevMidnight + 16 * 3600;
+            const prevBars = m5Bars.filter(b => b.time >= prevOpen && b.time < prevClose);
+            if (!prevBars.length) return null;
+            const prevHigh = Math.max(...prevBars.map(b => b.high));
+            const prevLow = Math.min(...prevBars.map(b => b.low));
+            const prevClosePrice = prevBars[prevBars.length - 1].close;
+            return { high: prevHigh, low: prevLow, close: prevClosePrice };
         }
 
         res.json({
@@ -58,6 +81,7 @@ app.get("/api/data/:symbol", async (req, res) => {
             m1_bars: dedupBars(m1All).slice(-MAX_BARS),
             m5_bars: dedupBars(m5All).slice(-MAX_BARS),
             position: posRaw ? JSON.parse(posRaw) : null,
+            prev_day: calcPrevDay(m5All),   // 昨日高低收（可能为 null）
         });
     } catch (e) {
         res.status(500).json({ error: e.message });

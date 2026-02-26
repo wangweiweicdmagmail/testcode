@@ -205,6 +205,36 @@
       font-weight: 700;
       color: #d1d4dc;
       border-bottom: 1px solid #2a2e3960;
+      cursor: pointer;
+      /* 可点击折叠 */
+      user-select: none;
+    }
+
+    .ind-card-head:hover {
+      background: rgba(255, 255, 255, .03);
+    }
+
+    /* 折叠箭头 */
+    .ind-chevron {
+      margin-left: auto;
+      font-size: 22px;
+      color: #787b86;
+      transition: transform .2s;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+
+    .ind-card-head:hover .ind-chevron {
+      color: #d1d4dc;
+    }
+
+    /* 已折叠状态 */
+    .ind-card.collapsed .ind-chevron {
+      transform: rotate(-90deg);
+    }
+
+    .ind-card.collapsed table {
+      display: none;
     }
 
     .ind-card-head .dot {
@@ -974,6 +1004,7 @@
           <span class="dot" style="background:#26a69a"></span>
           M1 SuperTrend 积分
           <span class="ind-card-sub">多+1/棒 空-1/棒</span>
+          <span class="ind-chevron">▾</span>
         </div>
         <table class="ind-table">
           <thead>
@@ -997,6 +1028,7 @@
           <span class="dot" style="background:#60a5fa"></span>
           M5 SuperTrend 积分
           <span class="ind-card-sub">多+1/棒 空-1/棒</span>
+          <span class="ind-chevron">▾</span>
         </div>
         <table class="ind-table">
           <thead>
@@ -1020,6 +1052,7 @@
           <span class="dot" style="background:#f59e0b"></span>
           EMA 偏离积分
           <span class="ind-card-sub">(M5收−EMA21)÷ATR₁₀</span>
+          <span class="ind-chevron">▾</span>
         </div>
         <table class="ind-table">
           <thead>
@@ -1043,6 +1076,7 @@
           <span class="dot" style="background:#a78bfa"></span>
           日内连续新高
           <span class="ind-card-sub">M5收盘创新高+1 跌破清零</span>
+          <span class="ind-chevron">▾</span>
         </div>
         <table class="ind-table">
           <thead>
@@ -1203,6 +1237,38 @@
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
         title: `OR Low  ${orLow.toFixed(2)}`,
+      });
+    }
+
+    // ─── 昨日围栏 昨日高/低/收价旰线 ─────────────────────────────────
+    function addPrevDayLines(pd) {
+      if (!pd) return;
+      // 昨日最高价（红色虚线）
+      candleSeries.createPriceLine({
+        price: pd.high,
+        color: '#ef5350',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: `PDH  ${pd.high.toFixed(2)}`,
+      });
+      // 昨日最低价（蓝色虚线）
+      candleSeries.createPriceLine({
+        price: pd.low,
+        color: '#2196f3',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: `PDL  ${pd.low.toFixed(2)}`,
+      });
+      // 昨日收盘价（灯白色虚线）
+      candleSeries.createPriceLine({
+        price: pd.close,
+        color: '#90a4ae',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `PDC  ${pd.close.toFixed(2)}`,
       });
     }
 
@@ -1378,7 +1444,7 @@
           const err = await res.json();
           throw new Error(err.error);
         }
-        const { symbol, m1_bars, position } = await res.json();
+        const { symbol, m1_bars, position, prev_day } = await res.json();
 
         document.getElementById("symbol-label").textContent = symbol;
         document.getElementById("loading").style.display = "none";
@@ -1394,6 +1460,8 @@
 
         // 开盘区间（前15分钟 OR High / OR Low）
         addOpeningRange(m1_bars);
+        // 昨日围栏（PDH / PDL / PDC）
+        addPrevDayLines(prev_day);
 
         // 仓位线
         addPositionLines(position);
@@ -1976,6 +2044,12 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
     }
     // 每30秒自动刷新指标面板
     setInterval(loadIndicators, 30000);
+
+    // ─── 右侧指标面板折叠 ────────────────────────────────────────
+    document.getElementById('right-panel').addEventListener('click', e => {
+      const head = e.target.closest('.ind-card-head');
+      if (head) head.closest('.ind-card').classList.toggle('collapsed');
+    });
 
     // 启动
     loadData();
