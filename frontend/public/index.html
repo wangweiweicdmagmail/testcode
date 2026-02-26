@@ -907,52 +907,115 @@
       });
     }
 
-    // ─── 仓位线 ─────────────────────────────────────────────
+    // ─── 仓位展示（兼容真实 IBKR 数据格式和旧 Redis 格式）──────────────
+    // 真实 IBKR 字段：avg_px_open / unrealized_pnl / side / quantity / last_price / stop_loss
+    // 旧 Redis 字段： entry_price / pnl / pnl_pct / quantity / entry_time / stop_loss
+    let currentPosition = null;   // 缓存当前仓位，供行情更新时刷新浮盈
+
     function addPositionLines(position) {
       if (!position) return;
+      currentPosition = position;
 
-      // 开仓价（蓝色虚线）
+      // 统一字段：真实数据优先，兜底旧格式
+      const entryPrice = position.avg_px_open ?? position.entry_price;
+      const stopLoss = position.stop_loss;
+      const qty = position.quantity;
+      const side = position.side || (position.entry_price ? 'LONG' : null);
+      const entryTime = position.entry_time;      // 旧格式才有
+      const isLong = side !== 'SHORT';
+
+      if (!entryPrice) return;
+
+      // 开仓价线（蓝色虚线）
       candleSeries.createPriceLine({
-        price: position.entry_price,
+        price: entryPrice,
         color: "#2196f3",
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `开仓 ${position.entry_price}`,
+        title: `开仓 ${entryPrice.toFixed ? entryPrice.toFixed(2) : entryPrice}`,
       });
 
-      // 止损价（红色虚线）
-      candleSeries.createPriceLine({
-        price: position.stop_loss,
-        color: "#ef5350",
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `止损 ${position.stop_loss}`,
-      });
+      // 止损价线（红色虚线，无止损时不画）
+      if (stopLoss) {
+        candleSeries.createPriceLine({
+          price: stopLoss,
+          color: "#ef5350",
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `止损 ${stopLoss}`,
+        });
+      }
 
-      // 开仓 Marker
-      candleSeries.setMarkers([{
-        time: position.entry_time,
-        position: "belowBar",
-        color: "#2196f3",
-        shape: "arrowUp",
-        text: `BUY @${position.entry_price}`,
-        size: 1,
-      }]);
+      // 开仓 Marker（有入场时间时才画）
+      if (entryTime) {
+        candleSeries.setMarkers([{
+          time: entryTime,
+          position: isLong ? "belowBar" : "aboveBar",
+          color: "#2196f3",
+          shape: isLong ? "arrowUp" : "arrowDown",
+          text: `${isLong ? 'BUY' : 'SELL'} @${entryPrice}`,
+          size: 1,
+        }]);
+      }
 
-      // 更新仓位面板
-      const pnlEl = document.getElementById("p-pnl");
-      const pnlPct = document.getElementById("p-pnl-pct");
-      document.getElementById("p-entry").textContent = position.entry_price;
-      document.getElementById("p-sl").textContent = position.stop_loss;
-      document.getElementById("p-qty").textContent = `${position.quantity} 股`;
-      pnlEl.textContent = `${position.pnl >= 0 ? "+" : ""}${position.pnl}`;
-      pnlPct.textContent = `(${position.pnl_pct >= 0 ? "+" : ""}${position.pnl_pct}%)`;
-      pnlEl.className = position.pnl >= 0 ? "up" : "down";
-      pnlPct.className = position.pnl >= 0 ? "up" : "down";
+      // 面板更新
+      refreshPositionPanel(position);
       document.getElementById("position-panel").style.display = "block";
     }
+
+    function refreshPositionPanel(position) {
+      if (!position) return;
+      const entryPrice = position.avg_px_open ?? position.entry_price;
+      const stopLoss = position.stop_loss;
+      const qty = position.quantity;
+      const side = position.side || 'LONG';
+      const isLong = side !== 'SHORT';
+
+      // 浮盈：真实数据用 unrealized_pnl，旧格式用 pnl
+      let pnl = position.unrealized_pnl ?? position.pnl;
+      let pnlPct = position.pnl_pct;   // 旧格式专有；真实数据实时计算
+
+      // 真实数据实时重算浮盈%
+      if (position.unrealized_pnl != null && entryPrice) {
+        pnlPct = qty > 0 ? (position.unrealized_pnl / (entryPrice * qty) * 100) : 0;
+        pnlPct = parseFloat(pnlPct.toFixed(2));
+      }
+
+      const pnlEl = document.getElementById("p-pnl");
+      const pctEl = document.getElementById("p-pnl-pct");
+      const fmt = v => typeof v === 'number' ? v.toFixed(2) : v;
+
+      document.getElementById("p-entry").textContent = entryPrice ? fmt(entryPrice) : '—';
+      document.getElementById("p-sl").textContent = stopLoss ?? '—';
+      document.getElementById("p-qty").textContent = `${qty ?? '—'} 股 (${isLong ? '多' : '空'})`;
+
+      if (pnl != null) {
+        pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${fmt(pnl)}`;
+        pnlEl.className = pnl >= 0 ? 'up' : 'down';
+      } else {
+        pnlEl.textContent = '—';
+        pnlEl.className = '';
+      }
+      if (pnlPct != null) {
+        pctEl.textContent = `(${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct)}%)`;
+        pctEl.className = pnlPct >= 0 ? 'up' : 'down';
+      } else {
+        pctEl.textContent = '';
+      }
+    }
+
+    function clearPositionUI() {
+      currentPosition = null;
+      document.getElementById("position-panel").style.display = "none";
+      document.getElementById("p-entry").textContent = "—";
+      document.getElementById("p-sl").textContent = "—";
+      document.getElementById("p-qty").textContent = "—";
+      document.getElementById("p-pnl").textContent = "—";
+      document.getElementById("p-pnl-pct").textContent = "";
+    }
+
 
     // ─── 价格更新工具栏 ──────────────────────────────────────
     function updateToolbar(bars) {
@@ -1137,6 +1200,30 @@
                 stLastDir = payload.st_dir;
               }
               stLastSeries.update({ time: payload.time, value: payload.st_value });
+            }
+            // 行情变动时同步刷新仓位浮盈
+            if (currentPosition && payload.symbol === SYMBOL) {
+              currentPosition.unrealized_pnl =
+                (latestClose - (currentPosition.avg_px_open ?? currentPosition.entry_price)) *
+                currentPosition.quantity *
+                (currentPosition.side === 'SHORT' ? -1 : 1);
+              refreshPositionPanel(currentPosition);
+            }
+          }
+
+          // ── 真实 IBKR 仓位实时推送（strategy.py 成交/平仓时 PUBLISH）──
+          if (channel === 'position:update') {
+            const pos = payload;
+            // 判断是否是当前展示的标的
+            if (pos.symbol !== SYMBOL) return;
+            if (pos.closed) {
+              // 平仓：清空面板
+              clearPositionUI();
+            } else {
+              // 建仓/加仓/浮盈更新：重绘仓位线 + 面板
+              // 注意：重绘前先重置图表 markers（避免叠加）
+              candleSeries.setMarkers([]);
+              addPositionLines(pos);
             }
           }
         } catch (err) {

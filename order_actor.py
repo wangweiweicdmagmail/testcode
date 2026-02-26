@@ -277,7 +277,16 @@ class OrderGatewayActor(Strategy):
         处理来自 MessageBus 的外部下单指令
         此函数由 msgbus.publish() 在引擎事件循环中同步触发
         """
-        self.log.info(f"[Gateway] 收到 MessageBus 消息: {event}")
+        self.log.info(
+            f"[Order] ⬇ 收到下单指令  "
+            f"类型={event.order_type}  "
+            f"{'买入' if event.side == 'BUY' else '卖出'}  "
+            f"qty={event.qty}  "
+            f"symbol={event.instrument_id}  "
+            f"{'price=' + str(event.price) + '  ' if event.price else ''}"
+            f"{'stop_loss=' + str(event.stop_loss) + '  ' if event.stop_loss else ''}"
+            f"{'sl_steps=' + str(event.sl_steps) if event.sl_steps else ''}"
+        )
 
         # 解析合约
         instrument_id = InstrumentId.from_str(event.instrument_id)
@@ -300,8 +309,15 @@ class OrderGatewayActor(Strategy):
                 time_in_force=TimeInForce.DAY,  # M2: IBKR 市价单不接受 GTC
                 tags=self._fa_tags(),
             )
+            self.log.info(
+                f"[Order] → submit MARKET  "
+                f"{'买入' if order_side == OrderSide.BUY else '卖出'}  "
+                f"qty={quantity}  {instrument_id}  "
+                f"ClientOrderId={order.client_order_id}"
+            )
             self.submit_order(order)
             self._log_submitted(event, order.client_order_id.value)
+
 
         elif event.order_type == "LIMIT":
             if event.price is None:
@@ -314,6 +330,12 @@ class OrderGatewayActor(Strategy):
                 price=instrument.make_price(Decimal(str(event.price))),
                 time_in_force=TimeInForce.GTC,
                 tags=self._fa_tags(),
+            )
+            self.log.info(
+                f"[Order] → submit LIMIT  "
+                f"{'买入' if order_side == OrderSide.BUY else '卖出'}  "
+                f"qty={quantity}  price={event.price}  {instrument_id}  "
+                f"ClientOrderId={order.client_order_id}"
             )
             self.submit_order(order)
             self._log_submitted(event, order.client_order_id.value)
@@ -386,6 +408,98 @@ class OrderGatewayActor(Strategy):
             f"{event.qty}股 {event.instrument_id} "
             f"{'| FA Group=' + self.config.fa_group if self.config.fa_group else ''} | "
             f"ClientOrderId={client_order_id}"
+        )
+
+    # ------------------------------------------------------------------
+    # 订单生命周期回调（NautilusTrader 标准 on_order_* 接口）
+    # 覆盖范围：denied → rejected → accepted → (triggered) → filled/canceled/expired
+    # ------------------------------------------------------------------
+
+    def on_order_denied(self, event) -> None:
+        """订单被 NautilusTrader 风控引擎拒绝（未到达交易所）"""
+        self.log.error(
+            f"[Order] ❌ DENIED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"原因: {event.reason}"
+        )
+
+    def on_order_rejected(self, event) -> None:
+        """订单被交易所拒绝（已到达 IBKR，IBKR 拒绝）"""
+        self.log.error(
+            f"[Order] ❌ REJECTED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"原因: {event.reason}"
+        )
+
+    def on_order_accepted(self, event) -> None:
+        """订单被交易所接受（已进入撮合队列，等待成交）"""
+        self.log.info(
+            f"[Order] ✅ ACCEPTED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}"
+        )
+
+    def on_order_pending_update(self, event) -> None:
+        """改单请求已发出，等待交易所响应"""
+        self.log.info(
+            f"[Order] ⏳ PENDING_UPDATE  "
+            f"ClientOrderId={event.client_order_id}"
+        )
+
+    def on_order_updated(self, event) -> None:
+        """改单成功（止损价移动等）"""
+        self.log.info(
+            f"[Order] ✅ UPDATED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}"
+        )
+
+    def on_order_triggered(self, event) -> None:
+        """止损单触发（stop price 已触碰，转为市价单执行）"""
+        self.log.warning(
+            f"[Order] 🔔 TRIGGERED（止损单触发）"
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}"
+        )
+
+    def on_order_filled(self, event) -> None:
+        """订单完全成交"""
+        self.log.info(
+            f"[Order] ✅ FILLED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}  "
+            f"成交价={event.last_px}  "
+            f"成交量={event.last_qty}  "
+            f"{'买入' if str(event.order_side) == 'BUY' else '卖出'}  "
+            f"佣金={event.commission}"
+        )
+
+    def on_order_partially_filled(self, event) -> None:
+        """订单部分成交"""
+        self.log.info(
+            f"[Order] 🔶 PARTIALLY_FILLED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}  "
+            f"成交价={event.last_px}  "
+            f"本次={event.last_qty}  "
+            f"累计={event.filled_qty}  "
+            f"剩余={event.leaves_qty}"
+        )
+
+    def on_order_canceled(self, event) -> None:
+        """订单已取消"""
+        self.log.info(
+            f"[Order] ⛔ CANCELED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}"
+        )
+
+    def on_order_expired(self, event) -> None:
+        """订单已过期（DAY 单收市未成交）"""
+        self.log.warning(
+            f"[Order] ⌛ EXPIRED  "
+            f"ClientOrderId={event.client_order_id}  "
+            f"VenueOrderId={event.venue_order_id}"
         )
 
     async def _schedule_sl_modify(
@@ -494,7 +608,12 @@ class OrderGatewayActor(Strategy):
 
                 # 跨线程安全：将协程调度到引擎事件循环
                 asyncio.run_coroutine_threadsafe(publish_fn(data), loop)
-
+                print(
+                    f"[HTTP] ← POST /order  {data.get('side')} {data.get('qty')} "
+                    f"{data.get('instrument_id')}  type={data.get('order_type','MARKET')}  "
+                    f"stop_loss={data.get('stop_loss')}",
+                    flush=True,
+                )
                 self._send(200, {"status": "accepted", "message": str(data)})
 
             def _send(self, code: int, body: dict) -> None:

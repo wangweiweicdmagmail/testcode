@@ -214,3 +214,42 @@ FA_METHOD = "NetLiq"    # 分配方式
 | 时区异常 | NautilusTrader 内部全部使用 UTC 纳秒时间戳；K 线前端展示使用 ET fake-UTC |
 | 图表只显示 390 根 | 正常。盘前（570 根）用于指标预热，图表仅展示 RTH 09:30-16:00 的 390 根 |
 | ST 预热不准 | 正常。盘前 570 根历史数据已用于预热，RTH 第一根的 ST 值是经过充分预热的 |
+| 前端提示「引擎未连接」 | 重启 `server.js`（旧进程可能缺少 `/api/account` 路由）|
+
+## 订单生命周期日志
+
+`OrderGatewayActor` 已实现完整的 NautilusTrader 订单回调，实盘日志覆盖如下：
+
+| 日志前缀 | 时机 | 级别 |
+|----------|------|------|
+| `[HTTP] ← POST /order` | HTTP 请求到达（跨线程 print）| INFO |
+| `[Order] ⬇ 收到下单指令` | MessageBus 分发给 Actor | INFO |
+| `[Order] → submit MARKET/LIMIT` | submit_order 调用前 | INFO |
+| `[Gateway] ✅ 订单已提交` | submit_order 返回后 | INFO |
+| `[Order] ✅ ACCEPTED` | 交易所接受，附 VenueOrderId | INFO |
+| `[Order] ❌ REJECTED` | 交易所拒绝，附拒绝原因 | ERROR |
+| `[Order] ❌ DENIED` | NautilusTrader 风控拒绝 | ERROR |
+| `[Order] ✅ FILLED` | 完全成交，附成交价/量/佣金 | INFO |
+| `[Order] 🔶 PARTIALLY_FILLED` | 部分成交，附本次/累计/剩余 | INFO |
+| `[Order] 🔔 TRIGGERED` | 止损单触发（stop price 到达）| WARNING |
+| `[Order] ⛔ CANCELED` | 订单取消 | INFO |
+| `[Order] ⌛ EXPIRED` | DAY 单收市未成交 | WARNING |
+| `[Gateway] 止损修改 Step N` | 止损价定时移动 | INFO |
+
+## 真实 IBKR 仓位对接
+
+前端仓位面板直接使用 IB 真实持仓数据，数据流：
+
+```
+成交 → strategy.py on_position_changed()
+   → redis.publish("position:update", {avg_px_open, unrealized_pnl, side, quantity, ...})
+   → server.js psubscribe("position:*")
+   → WebSocket 广播 channel="position:update"
+   → index.html / multi.html 实时刷新仓位面板
+```
+
+- 仓位面板字段适配：`avg_px_open`（均价）、`unrealized_pnl`（浮盈）、`side`（多/空）
+- 每根 K 线收盘时自动重算浮盈（含做空方向）
+- 平仓时推送 `{closed: true}` 自动清空面板
+- 旧 Redis 格式（`entry_price / pnl / pnl_pct`）依然兼容，无需迁移
+

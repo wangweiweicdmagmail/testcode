@@ -797,39 +797,101 @@
             });
         }
 
-        // ── 仓位线 ──────────────────────────────────────────────
+        // ── 仓位展示（兼容真实 IBKR 数据格式和旧 Redis 格式）──────────────
+        // 真实 IBKR 字段：avg_px_open / unrealized_pnl / side / quantity / stop_loss
+        // 旧 Redis 字段： entry_price / pnl / pnl_pct / quantity / entry_time / stop_loss
         function addPositionLines(symbol, position) {
             if (!position) return;
             const { candleSeries } = state[symbol];
 
-            candleSeries.createPriceLine({
-                price: position.entry_price, color: '#2196f3', lineWidth: 1,
-                lineStyle: LightweightCharts.LineStyle.Dashed,
-                axisLabelVisible: true, title: `开仓 ${position.entry_price}`,
-            });
-            candleSeries.createPriceLine({
-                price: position.stop_loss, color: '#ef5350', lineWidth: 1,
-                lineStyle: LightweightCharts.LineStyle.Dashed,
-                axisLabelVisible: true, title: `止损 ${position.stop_loss}`,
-            });
-            candleSeries.setMarkers([{
-                time: position.entry_time, position: 'belowBar',
-                color: '#2196f3', shape: 'arrowUp',
-                text: `BUY @${position.entry_price}`, size: 1,
-            }]);
+            const entryPrice = position.avg_px_open ?? position.entry_price;
+            const stopLoss = position.stop_loss;
+            const qty = position.quantity;
+            const side = position.side || 'LONG';
+            const isLong = side !== 'SHORT';
+            const entryTime = position.entry_time;
 
-            // 更新仓位面板
-            const pnlEl = document.getElementById(`p-pnl-${symbol}`);
-            const pnlPctEl = document.getElementById(`p-pnl-pct-${symbol}`);
-            document.getElementById(`p-entry-${symbol}`).textContent = position.entry_price;
-            document.getElementById(`p-sl-${symbol}`).textContent = position.stop_loss;
-            document.getElementById(`p-qty-${symbol}`).textContent = `${position.quantity}股`;
-            pnlEl.textContent = `${position.pnl >= 0 ? '+' : ''}${position.pnl}`;
-            pnlPctEl.textContent = `(${position.pnl_pct >= 0 ? '+' : ''}${position.pnl_pct}%)`;
-            pnlEl.className = position.pnl >= 0 ? 'up' : 'down';
-            pnlPctEl.className = position.pnl >= 0 ? 'up' : 'down';
+            if (!entryPrice) return;
+
+            // 保存仓位到 state，供行情变动时刷新浮盈
+            state[symbol].position = position;
+
+            // 开仓价线（蓝色虚线）
+            candleSeries.createPriceLine({
+                price: entryPrice, color: '#2196f3', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true,
+                title: `开仓 ${typeof entryPrice === 'number' ? entryPrice.toFixed(2) : entryPrice}`,
+            });
+
+            // 止损价线（红色虚线，无止损时不画）
+            if (stopLoss) {
+                candleSeries.createPriceLine({
+                    price: stopLoss, color: '#ef5350', lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true, title: `止损 ${stopLoss}`,
+                });
+            }
+
+            // 开仓 Marker（有入场时间时才画）
+            if (entryTime) {
+                candleSeries.setMarkers([{
+                    time: entryTime,
+                    position: isLong ? 'belowBar' : 'aboveBar',
+                    color: '#2196f3',
+                    shape: isLong ? 'arrowUp' : 'arrowDown',
+                    text: `${isLong ? 'BUY' : 'SELL'} @${entryPrice}`, size: 1,
+                }]);
+            }
+
+            refreshPositionPanel(symbol, position);
             document.getElementById(`pos-panel-${symbol}`).style.display = 'block';
         }
+
+        function refreshPositionPanel(symbol, position) {
+            if (!position) return;
+            const entryPrice = position.avg_px_open ?? position.entry_price;
+            const qty = position.quantity;
+            const side = position.side || 'LONG';
+            const isLong = side !== 'SHORT';
+
+            let pnl = position.unrealized_pnl ?? position.pnl;
+            let pnlPct = position.pnl_pct;
+
+            // 真实数据实时重算浮盈%
+            if (position.unrealized_pnl != null && entryPrice && qty > 0) {
+                pnlPct = parseFloat((position.unrealized_pnl / (entryPrice * qty) * 100).toFixed(2));
+            }
+
+            const pnlEl = document.getElementById(`p-pnl-${symbol}`);
+            const pnlPctEl = document.getElementById(`p-pnl-pct-${symbol}`);
+            const fmt = v => typeof v === 'number' ? v.toFixed(2) : v;
+
+            document.getElementById(`p-entry-${symbol}`).textContent = entryPrice ? fmt(entryPrice) : '—';
+            document.getElementById(`p-sl-${symbol}`).textContent = position.stop_loss ?? '—';
+            document.getElementById(`p-qty-${symbol}`).textContent = `${qty ?? '—'}股(${isLong ? '多' : '空'})`;
+
+            if (pnl != null) {
+                pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${fmt(pnl)}`;
+                pnlEl.className = pnl >= 0 ? 'up' : 'down';
+            } else { pnlEl.textContent = '—'; pnlEl.className = ''; }
+
+            if (pnlPct != null) {
+                pnlPctEl.textContent = `(${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct)}%)`;
+                pnlPctEl.className = pnlPct >= 0 ? 'up' : 'down';
+            } else { pnlPctEl.textContent = ''; }
+        }
+
+        function clearPositionUI(symbol) {
+            state[symbol].position = null;
+            document.getElementById(`pos-panel-${symbol}`).style.display = 'none';
+            document.getElementById(`p-entry-${symbol}`).textContent = '—';
+            document.getElementById(`p-sl-${symbol}`).textContent = '—';
+            document.getElementById(`p-qty-${symbol}`).textContent = '—';
+            document.getElementById(`p-pnl-${symbol}`).textContent = '—';
+            document.getElementById(`p-pnl-pct-${symbol}`).textContent = '';
+        }
+
 
         // ── 工具栏价格更新 ──────────────────────────────────────
         function updateHeader(symbol, bars) {
@@ -1123,6 +1185,20 @@
                 try {
                     const { channel, data: payload } = JSON.parse(data);
 
+                    // ── 真实 IBKR 仓位推送（无 :symbol 后缀，提前处理）──
+                    if (channel === 'position:update') {
+                        const posSym = payload.symbol;
+                        if (posSym && state[posSym]) {
+                            if (payload.closed) {
+                                clearPositionUI(posSym);
+                            } else {
+                                state[posSym].candleSeries.setMarkers([]);
+                                addPositionLines(posSym, payload);
+                            }
+                        }
+                        return;
+                    }
+
                     // ── 第一步：从 channel 末段提取 symbol ────────────────
                     const sym = DEFAULT_SYMBOLS.find(s => channel.endsWith(`:${s}`));
                     if (!sym || !state[sym]) return;
@@ -1132,6 +1208,7 @@
                         console.error(`[WS串台拦截] channel=${channel} 对应 ${sym}，但 payload.symbol=${payload.symbol}，已丢弃`);
                         return;
                     }
+
 
                     const s = state[sym];
 
@@ -1152,6 +1229,20 @@
                                 high: payload.high, low: payload.low, close: payload.close,
                             });
                         }
+                        // 行情变动：更新 latestClose，刷新仓位浮盈面板
+                        if (s.ctx) s.ctx.latestClose = payload.close;
+                        const priceEl = document.getElementById(`price-${sym}`);
+                        if (priceEl) priceEl.textContent = payload.close.toFixed(2);
+                        if (s.position) {
+                            const pos = s.position;
+                            const ep = pos.avg_px_open ?? pos.entry_price;
+                            if (ep) {
+                                pos.unrealized_pnl =
+                                    (payload.close - ep) * pos.quantity *
+                                    (pos.side === 'SHORT' ? -1 : 1);
+                                refreshPositionPanel(sym, pos);
+                            }
+                        }
                         if (payload.st_value != null && payload.st_value !== 0) {
                             if (payload.st_dir !== s.stLastDir || !s.stLastSeries) {
                                 const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
@@ -1164,7 +1255,12 @@
                             }
                             s.stLastSeries.update({ time: payload.time, value: payload.st_value });
                         }
+                        return;
                     }
+
+
+
+
                 } catch (err) {
                     console.error('[WS处理错误]', err.message, err);
                 }
