@@ -184,7 +184,7 @@ bar_strategy = BarLoggerStrategy(
         st_period=10,
         st_mult=2.0,
         ema_period=21,
-        history_days=1,
+        history_days=2,      # 加载今日+昨日，使 prev_day 围栏数据可用
         backtest_mode=IS_BACKTEST,
         backtest_date=BACKTEST_DATE,
     )
