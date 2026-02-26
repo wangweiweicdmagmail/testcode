@@ -33,10 +33,11 @@ const ALL_SYMBOLS = ["QQQ", "AAPL", "NVDA", "TSLA"];
 app.get("/api/data/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     try {
-        const [m1Raw, m5Raw, posRaw] = await Promise.all([
+        const [m1Raw, m5Raw, posRaw, prevDayRaw] = await Promise.all([
             redis.get(`bars:1m:${symbol}`),
             redis.get(`bars:5m:${symbol}`),
             redis.get(`position:${symbol}`),
+            redis.get(`prev_day:${symbol}`),   // 引擎启动时从日K写入
         ]);
 
         if (!m1Raw) {
@@ -81,7 +82,8 @@ app.get("/api/data/:symbol", async (req, res) => {
             m1_bars: dedupBars(m1All).slice(-MAX_BARS),
             m5_bars: dedupBars(m5All).slice(-MAX_BARS),
             position: posRaw ? JSON.parse(posRaw) : null,
-            prev_day: calcPrevDay(m5All),   // 昨日高低收（可能为 null）
+            // 优先用引擎写入的日K数据，否则 fallback 到从5m bars计算
+            prev_day: prevDayRaw ? JSON.parse(prevDayRaw) : calcPrevDay(m5All),
         });
     } catch (e) {
         res.status(500).json({ error: e.message });

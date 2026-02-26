@@ -1243,30 +1243,30 @@
     // ─── 昨日围栏 昨日高/低/收价旰线 ─────────────────────────────────
     function addPrevDayLines(pd) {
       if (!pd) return;
-      // 昨日最高价（红色虚线）
+      // 昨日最高价（绿色点线）
       candleSeries.createPriceLine({
         price: pd.high,
-        color: '#ef5350',
-        lineWidth: 1,
+        color: '#26a69a',
+        lineWidth: 2,
         lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
         title: `PDH  ${pd.high.toFixed(2)}`,
       });
-      // 昨日最低价（蓝色虚线）
+      // 昨日最低价（红色点线）
       candleSeries.createPriceLine({
         price: pd.low,
-        color: '#2196f3',
-        lineWidth: 1,
+        color: '#ef5350',
+        lineWidth: 2,
         lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
         title: `PDL  ${pd.low.toFixed(2)}`,
       });
-      // 昨日收盘价（灯白色虚线）
+      // 昨日收盘价（灰白色点线）
       candleSeries.createPriceLine({
         price: pd.close,
         color: '#90a4ae',
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
         title: `PDC  ${pd.close.toFixed(2)}`,
       });

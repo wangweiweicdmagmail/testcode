@@ -259,6 +259,9 @@ class BarLoggerStrategy(Strategy):
         # 日内连续新高状态：{ sym: {"date": "YYYY-MM-DD", "day_high": float, "count": int} }
         self._nh_state: dict[str, dict] = {}
 
+        # 日K 缓冲（每个标的，合并后取倒数第二根即是昨日）
+        self._hist_daily: dict[str, list[dict]] = defaultdict(list)
+
     # ── 解析所有订阅合约 ────────────────────────────────────────────────
     def _all_instrument_ids(self) -> list[InstrumentId]:
         ids = list(self.config.instrument_ids)
@@ -379,6 +382,21 @@ class BarLoggerStrategy(Strategy):
             )
             self.request_bars(bar_type, start=hist_start_utc)
 
+            # 额外请求日K（取昨日 H/L/C 围栏）
+            daily_bar_type = BarType(
+                instrument_id=iid,
+                bar_spec=BarSpecification(
+                    step=1,
+                    aggregation=BarAggregation.DAY,
+                    price_type=PriceType.LAST,
+                ),
+                aggregation_source=AggregationSource.EXTERNAL,
+            )
+            # 拉取最近 5 个交易日的日K，确保能拿到昨日（周一可拉到上周五）
+            daily_start = hist_start_utc - timedelta(days=7)
+            self.request_bars(daily_bar_type, start=daily_start)
+            self.log.info(f"[Strategy] {sym}: → request_bars(DAY) 起点 {daily_start.strftime('%Y-%m-%d UTC')}")
+
             # 实盘模式才订阅 Tick（回测无需实时 tick）
             if not self.config.backtest_mode:
                 try:
@@ -478,6 +496,34 @@ class BarLoggerStrategy(Strategy):
             return
 
         sym = data.bar_type.instrument_id.symbol.value
+
+        # ─ 日K：瘶取昨日 H/L/C 写入 Redis prev_day:{sym} ──────────────────
+        if data.bar_type.bar_spec.aggregation == BarAggregation.DAY:
+            o, h, lo, c = float(data.open), float(data.high), float(data.low), float(data.close)
+            et = self._et_fake_utc(data.ts_event)
+            self._hist_daily[sym].append({"time": et, "high": h, "low": lo, "close": c})
+            # 对每根日K，实时功合并后尝试写入（则取倒数第二个，即昨日）
+            today_str = self._today_et_date  # 'YYYY-MM-DD'
+            daily_bars = self._hist_daily[sym]
+            # 找到最近一个不是今天的 bar
+            prev = None
+            for bar in reversed(daily_bars):
+                bar_date = datetime.fromtimestamp(bar["time"], tz=timezone.utc).strftime("%Y-%m-%d")
+                if bar_date != today_str:
+                    prev = bar
+                    break
+            if prev and self._redis:
+                try:
+                    pd_data = {"high": prev["high"], "low": prev["low"], "close": prev["close"]}
+                    self._redis.set(f"prev_day:{sym}", json.dumps(pd_data))
+                    self.log.info(
+                        f"[HIST-DAY] {sym}: 昨日围栏已写入 Redis — "
+                        f"PDH={prev['high']:.2f}  PDL={prev['low']:.2f}  PDC={prev['close']:.2f}"
+                    )
+                except Exception as e:
+                    self.log.error(f"[HIST-DAY] {sym}: 写入 Redis 失败: {e}")
+            return  # 日K 不进入 M1/M5 流程
+
         o, h, lo, c = float(data.open), float(data.high), float(data.low), float(data.close)
         v  = int(data.volume)
         # ts_event 是 bar 开始时间（即 bar 所属分钟），直接使用
