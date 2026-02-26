@@ -161,15 +161,160 @@
       gap: 10px;
     }
 
-    /* 图表区 */
+    /* 主区域：左K线 + 右指标 */
+    #main-area {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* 图表区（左侧）*/
     #chart-container {
       flex: 1;
       position: relative;
+      min-width: 0;
     }
 
     #chart {
       width: 100%;
       height: 100%;
+    }
+
+    /* 右侧指标面板 */
+    #right-panel {
+      width: 270px;
+      flex-shrink: 0;
+      background: #1e222d;
+      border-left: 1px solid #2a2e39;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .ind-card {
+      border-bottom: 1px solid #2a2e39;
+      flex-shrink: 0;
+    }
+
+    .ind-card-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 12px 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #d1d4dc;
+      border-bottom: 1px solid #2a2e3960;
+    }
+
+    .ind-card-head .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .ind-card-sub {
+      font-size: 10px;
+      color: #4b5563;
+      font-weight: 400;
+      margin-left: 2px;
+    }
+
+    .ind-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .ind-table thead tr {
+      background: #13172280;
+    }
+
+    .ind-table thead th {
+      padding: 5px 10px;
+      font-size: 10px;
+      font-weight: 600;
+      color: #4b5563;
+      text-align: left;
+      letter-spacing: 0.3px;
+    }
+
+    .ind-table thead th.r {
+      text-align: right;
+    }
+
+    .ind-table tbody tr {
+      border-top: 1px solid #2a2e3944;
+    }
+
+    .ind-table tbody tr.bull {
+      background: rgba(38, 166, 154, .07);
+    }
+
+    .ind-table tbody tr.bear {
+      background: rgba(239, 83, 80, .07);
+    }
+
+    .ind-table td {
+      padding: 8px 10px;
+      vertical-align: middle;
+    }
+
+    .ind-table td.r {
+      text-align: right;
+    }
+
+    .ind-sym {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      text-decoration: none;
+    }
+
+    .ind-score {
+      font-size: 16px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+
+    .ind-bar-bg {
+      height: 3px;
+      border-radius: 2px;
+      background: #2a2e39;
+      overflow: hidden;
+      margin-top: 3px;
+    }
+
+    .ind-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width .3s;
+    }
+
+    .ind-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+
+    .badge-bull {
+      background: rgba(38, 166, 154, .2);
+      color: #26a69a;
+    }
+
+    .badge-bear {
+      background: rgba(239, 83, 80, .2);
+      color: #ef5350;
+    }
+
+    .ind-empty {
+      text-align: center;
+      padding: 12px;
+      color: #4b5563;
+      font-size: 11px;
     }
 
     /* 图例 */
@@ -718,97 +863,182 @@
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
         <button class="btn btn-close" id="btn-close">平仓</button>
+        <div style="width:1px;height:22px;background:#2a2e39"></div>
+        <!-- 语音提醒开关 -->
+        <button id="voice-toggle" title="语音提醒" style="
+          background:none;border:1px solid #2a2e39;border-radius:4px;
+          color:#787b86;font-size:13px;padding:3px 8px;cursor:pointer;
+          transition:all .2s;">🔔 语音</button>
       </div>
     </div>
   </div>
 
-  <div id="chart-container">
-    <div id="loading">⏳ 加载数据中…</div>
-    <div id="chart"></div>
-    <div id="legend">
-      <div class="legend-item">
-        <div class="legend-dot" style="background:#26a69a"></div>
-        <span style="color:#26a69a">SuperTrend↑</span>
+  <!-- 主区域：左K线 + 右指标 -->
+  <div id="main-area">
+
+    <div id="chart-container">
+      <div id="loading">⏳ 加载数据中…</div>
+      <div id="chart"></div>
+      <!-- Toast 语音提醒非弹语（右上角） -->
+      <div id="toast-container" style="
+      position:fixed;top:56px;right:290px;z-index:9999;
+      display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
+      <div id="legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#26a69a"></div>
+          <span style="color:#26a69a">SuperTrend↑</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#ef5350"></div>
+          <span style="color:#ef5350">SuperTrend↓</span>
+        </div>
       </div>
-      <div class="legend-item">
-        <div class="legend-dot" style="background:#ef5350"></div>
-        <span style="color:#ef5350">SuperTrend↓</span>
+
+      <!-- 止损一体化拖动控件 -->
+      <div id="sl-handle" title="上下拖动调整止损价">
+        <svg class="sl-icon" width="12" height="16" viewBox="0 0 12 16" fill="none">
+          <path d="M6 0L10 5H2L6 0Z" fill="white" />
+          <path d="M6 16L2 11H10L6 16Z" fill="white" />
+          <rect x="5" y="5" width="2" height="6" rx="1" fill="white" opacity=".5" />
+        </svg>
+        <span class="sl-label">止损</span>
+        <span class="sl-price" id="sl-price-val">—</span>
+      </div>
+      <!-- 拖动截捕层（拖动时防止图表吸收事件） -->
+      <div id="drag-capture"></div>
+
+      <!-- 浮动订单面板 -->
+      <div id="order-panel">
+        <div class="op-header">
+          <!-- 动态显示做多/做空标题 -->
+          <span class="op-title" id="op-title">新建订单</span>
+          <button class="op-close-btn" id="op-close">✕</button>
+        </div>
+
+        <!-- 方向 badge（只读，自动判断） -->
+        <div id="op-dir-badge" class="op-dir-badge buy">▲ 做多</div>
+
+        <!-- 最大亏损（用户输入） -->
+        <div class="op-field">
+          <span class="op-label">最大亏损 ($)</span>
+          <input type="number" id="op-max-loss" value="100" min="1" step="1">
+        </div>
+
+        <!-- 止损价（可手动输入 / 拖动同步） -->
+        <div class="op-field">
+          <span class="op-label">止损价</span>
+          <input type="number" class="sl-field" id="op-sl-input" step="0.01" readonly
+            style="cursor:default;opacity:.75;" title="拖动上方止损控件调整">
+        </div>
+
+        <!-- 分隔线 -->
+        <div class="op-divider"></div>
+
+        <!-- 计算结果：股数（只读） -->
+        <div class="op-field">
+          <span class="op-label">建议股数</span>
+          <span id="op-qty-display" class="op-calc-val">—</span>
+        </div>
+
+        <!-- 每股风险 & 止损% -->
+        <div class="op-field">
+          <span class="op-label">每股风险</span>
+          <span id="op-risk-per-share" class="op-calc-val down">—</span>
+        </div>
+        <div class="op-field">
+          <span class="op-label">止损幅度</span>
+          <span id="op-sl-pct" class="op-calc-val down">—</span>
+        </div>
+
+        <!-- 预计开仓金额 -->
+        <div class="op-field">
+          <span class="op-label">开仓金额</span>
+          <span id="op-cost" class="op-calc-val">—</span>
+        </div>
+
+        <!-- 资金占比提示 -->
+        <div id="op-capital-hint" class="op-hint"></div>
+
+        <div class="op-footer">
+          <button class="op-btn cancel" id="op-cancel">取消</button>
+          <button class="op-btn confirm" id="op-confirm">确认做多</button>
+        </div>
       </div>
     </div>
 
-    <!-- 止损一体化拖动控件 -->
-    <div id="sl-handle" title="上下拖动调整止损价">
-      <svg class="sl-icon" width="12" height="16" viewBox="0 0 12 16" fill="none">
-        <path d="M6 0L10 5H2L6 0Z" fill="white" />
-        <path d="M6 16L2 11H10L6 16Z" fill="white" />
-        <rect x="5" y="5" width="2" height="6" rx="1" fill="white" opacity=".5" />
-      </svg>
-      <span class="sl-label">止损</span>
-      <span class="sl-price" id="sl-price-val">—</span>
-    </div>
-    <!-- 拖动截捕层（拖动时防止图表吸收事件） -->
-    <div id="drag-capture"></div>
+    <div id="right-panel">
 
-    <!-- 浮动订单面板 -->
-    <div id="order-panel">
-      <div class="op-header">
-        <!-- 动态显示做多/做空标题 -->
-        <span class="op-title" id="op-title">新建订单</span>
-        <button class="op-close-btn" id="op-close">✕</button>
+      <!-- M1 ST 积分 -->
+      <div class="ind-card">
+        <div class="ind-card-head">
+          <span class="dot" style="background:#26a69a"></span>
+          M1 SuperTrend 积分
+          <span class="ind-card-sub">多+1/棒 空-1/棒</span>
+        </div>
+        <table class="ind-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="r">积分</th>
+              <th>方向</th>
+            </tr>
+          </thead>
+          <tbody id="ind-m1">
+            <tr>
+              <td colspan="3" class="ind-empty">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <!-- 方向 badge（只读，自动判断） -->
-      <div id="op-dir-badge" class="op-dir-badge buy">▲ 做多</div>
-
-      <!-- 最大亏损（用户输入） -->
-      <div class="op-field">
-        <span class="op-label">最大亏损 ($)</span>
-        <input type="number" id="op-max-loss" value="100" min="1" step="1">
+      <!-- M5 ST 积分 -->
+      <div class="ind-card">
+        <div class="ind-card-head">
+          <span class="dot" style="background:#60a5fa"></span>
+          M5 SuperTrend 积分
+          <span class="ind-card-sub">多+1/棒 空-1/棒</span>
+        </div>
+        <table class="ind-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="r">积分</th>
+              <th>方向</th>
+            </tr>
+          </thead>
+          <tbody id="ind-m5">
+            <tr>
+              <td colspan="3" class="ind-empty">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <!-- 止损价（可手动输入 / 拖动同步） -->
-      <div class="op-field">
-        <span class="op-label">止损价</span>
-        <input type="number" class="sl-field" id="op-sl-input" step="0.01" readonly style="cursor:default;opacity:.75;"
-          title="拖动上方止损控件调整">
+      <!-- EMA 偏离 -->
+      <div class="ind-card">
+        <div class="ind-card-head">
+          <span class="dot" style="background:#f59e0b"></span>
+          EMA 偏离积分
+          <span class="ind-card-sub">(M5收−EMA21)÷ATR₁₀</span>
+        </div>
+        <table class="ind-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="r">偏离</th>
+              <th>位置</th>
+            </tr>
+          </thead>
+          <tbody id="ind-ema">
+            <tr>
+              <td colspan="3" class="ind-empty">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <!-- 分隔线 -->
-      <div class="op-divider"></div>
-
-      <!-- 计算结果：股数（只读） -->
-      <div class="op-field">
-        <span class="op-label">建议股数</span>
-        <span id="op-qty-display" class="op-calc-val">—</span>
-      </div>
-
-      <!-- 每股风险 & 止损% -->
-      <div class="op-field">
-        <span class="op-label">每股风险</span>
-        <span id="op-risk-per-share" class="op-calc-val down">—</span>
-      </div>
-      <div class="op-field">
-        <span class="op-label">止损幅度</span>
-        <span id="op-sl-pct" class="op-calc-val down">—</span>
-      </div>
-
-      <!-- 预计开仓金额 -->
-      <div class="op-field">
-        <span class="op-label">开仓金额</span>
-        <span id="op-cost" class="op-calc-val">—</span>
-      </div>
-
-      <!-- 资金占比提示 -->
-      <div id="op-capital-hint" class="op-hint"></div>
-
-      <div class="op-footer">
-        <button class="op-btn cancel" id="op-cancel">取消</button>
-        <button class="op-btn confirm" id="op-confirm">确认做多</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 容备用显示仓位''线的背景弹窗（保留，当前不使用） -->
+    </div><!-- /right-panel -->
+  </div><!-- /main-area -->
   <div class="modal-backdrop" id="open-modal" style="display:none!important"></div>
 
   <script>
@@ -828,6 +1058,52 @@
     let slPriceLine = null;  // LWC priceLine 对象
     let orderDir = 'BUY'; // 'BUY' | 'SELL'
     let isDragging = false;
+
+    // ─── 语音提醒模块 ─────────────────────────────────────
+    // 语音默认开启（用户可手动关闭）
+    let voiceEnabled = true;
+    const voiceBtn = document.getElementById('voice-toggle');
+    // 初始花样：默认就是开启状态
+    voiceBtn.textContent = '🔔 语音 ON';
+    voiceBtn.style.color = '#26a69a';
+    voiceBtn.style.borderColor = '#26a69a';
+    voiceBtn.addEventListener('click', () => {
+      voiceEnabled = !voiceEnabled;
+      voiceBtn.style.color = voiceEnabled ? '#26a69a' : '#787b86';
+      voiceBtn.style.borderColor = voiceEnabled ? '#26a69a' : '#2a2e39';
+      voiceBtn.textContent = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
+    });
+
+    // 防重叠播放：相同文本 5s 内不重复
+    const _spokenCache = new Map();
+    function speak(text, priority = false) {
+      if (!voiceEnabled) return;
+      const now = Date.now();
+      if (!priority && _spokenCache.has(text) && now - _spokenCache.get(text) < 5000) return;
+      _spokenCache.set(text, now);
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-CN';
+      u.rate = 1.1;
+      speechSynthesis.speak(u);
+    }
+
+    // Toast 提醒弹出（订单事件可视化）
+    function showToast(text, type = 'info') {
+      const colors = { info: '#2196f3', ok: '#26a69a', warn: '#ef5350', tip: '#f59e0b' };
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      const el = document.createElement('div');
+      el.textContent = text;
+      el.style.cssText = (
+        `background:${colors[type] || colors.info};color:#fff;padding:6px 14px;` +
+        `border-radius:6px;font-size:12px;font-weight:600;opacity:0;` +
+        `transition:opacity .3s;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;`
+      );
+      container.appendChild(el);
+      requestAnimationFrame(() => { el.style.opacity = '1'; });
+      setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 4000);
+    }
 
     // ─── 图表初始化 ─────────────────────────────────────────
     const chartEl = document.getElementById("chart");
@@ -1188,8 +1464,13 @@
             const priceEl = document.getElementById("price-label");
             if (priceEl) priceEl.textContent = payload.close.toFixed(2);
             if (payload.st_value != null && payload.st_value !== 0) {
+              const prevSTDir = latestSTDir;
               latestST = payload.st_value;
               latestSTDir = payload.st_dir;
+              // ── ST 转向语音提醒 ──
+              if (prevSTDir !== null && payload.st_dir !== prevSTDir) {
+                speak(`${SYMBOL} 超级趋势转${payload.st_dir === 1 ? '向上' : '向下'}，注意转向`, true);
+              }
               if (payload.st_dir !== stLastDir || stLastSeries === null) {
                 const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
                 stLastSeries = chart.addLineSeries({
@@ -1209,6 +1490,8 @@
                 (currentPosition.side === 'SHORT' ? -1 : 1);
               refreshPositionPanel(currentPosition);
             }
+            // 每根 K 线收盘后刷新右侧指标面板
+            loadIndicators();
           }
 
           // ── 真实 IBKR 仓位实时推送（strategy.py 成交/平仓时 PUBLISH）──
@@ -1219,11 +1502,57 @@
             if (pos.closed) {
               // 平仓：清空面板
               clearPositionUI();
+              speak(`${SYMBOL} 仓位已平仓`, true);
             } else {
               // 建仓/加仓/浮盈更新：重绘仓位线 + 面板
               // 注意：重绘前先重置图表 markers（避免叠加）
+              const isNew = !currentPosition;
               candleSeries.setMarkers([]);
               addPositionLines(pos);
+              if (isNew) speak(`${SYMBOL} ${pos.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
+            }
+          }
+
+          // ── 引擎订单状态回执（order_actor.py 通过 Redis 发布）──
+          if (channel === 'order:update') {
+            const o = payload;
+            const sym = o.symbol || SYMBOL;
+            const side = o.side === 'BUY' ? '做多' : '做空';
+            const id = (o.client_order_id || '').slice(-6); // 只显后6位
+            switch (o.status) {
+              case 'ACCEPTED':
+                speak(`${sym} 订单已接受`, true);
+                showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                break;
+              case 'FILLED':
+                speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
+                showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                break;
+              case 'PARTIALLY_FILLED':
+                speak(`${sym} 订单部分成交`, true);
+                showToast(`🔶 ${sym} 部分成交 @${o.last_px} x${o.last_qty}`, 'tip');
+                break;
+              case 'REJECTED':
+                speak(`${sym} 订单被交易所拒绝，${o.reason || ''}`, true);
+                showToast(`❌ ${sym} 订单拒绝: ${o.reason || ''}`, 'warn');
+                break;
+              case 'DENIED':
+                speak(`${sym} 订单被风控拒绝，${o.reason || ''}`, true);
+                showToast(`❌ ${sym} 风控拒绝: ${o.reason || ''}`, 'warn');
+                break;
+              case 'TRIGGERED':
+                speak(`${sym} 止损单已触发，注意`, true);
+                showToast(`🔔 ${sym} 止损单触发`, 'tip');
+                break;
+              case 'CANCELED':
+                showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
+                break;
+              case 'EXPIRED':
+                speak(`${sym} 订单已过期`, true);
+                showToast(`⌛ ${sym} 订单过期 #${id}`, 'tip');
+                break;
+              default:
+                showToast(`📎 ${sym} 订单状态: ${o.status}`, 'info');
             }
           }
         } catch (err) {
@@ -1479,6 +1808,8 @@
       );
       if (!confirmed) return;
 
+      speak(`${SYMBOL} 订单已下发，${orderDir === 'BUY' ? '做多' : '做空'} ${qty}股，止损 ${sl.toFixed(2)}`);
+
       try {
         const resp = await fetch(`/api/order/${SYMBOL}`, {
           method: 'POST',
@@ -1487,14 +1818,17 @@
         });
         const result = await resp.json();
         if (result.engine_offline || result.error) {
+          speak(`订单失败，${result.error || '引擎未连接'}`, true);
           alert(`⚠ 引擎未连接或出错: ${result.error || '请启动引擎'}
 请检查 main.py 是否已启动`);
         } else {
+          speak(`${SYMBOL} 订单已受理`, true);
           alert(`✅ 开仓请求已发小到引擎
 ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
 止损: $${sl.toFixed(2)}`);
         }
       } catch (e) {
+        speak('网络错误，订单失败', true);
         alert(`网络错误: ${e.message}`);
       }
 
@@ -1528,8 +1862,69 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
       window.location.href = `/?symbol=${symbolSelect.value}`;
     });
 
+    // ─── 右侧指标面板  loadIndicators() ──────────────────────────
+    function indBadge(dir) {
+      if (dir === 1) return '<span class="ind-badge badge-bull">▲ 多</span>';
+      if (dir === -1) return '<span class="ind-badge badge-bear">▼ 空</span>';
+      return '<span style="color:#4b5563">—</span>';
+    }
+    function indPosLabel(v) {
+      if (v == null) return '<span style="color:#4b5563">—</span>';
+      return v >= 0
+        ? '<span class="ind-badge badge-bull">↑ 上方</span>'
+        : '<span class="ind-badge badge-bear">↓ 下方</span>';
+    }
+    function indRow(sym, score, dir, color, maxAbs) {
+      const cls = dir === 1 ? 'bull' : 'bear';
+      const pct = Math.min(100, maxAbs > 0 ? Math.abs(score) / maxAbs * 100 : 0).toFixed(1);
+      const sign = score > 0 ? '+' : '';
+      return `<tr class="${cls}">
+        <td><a href="/?symbol=${sym}" class="ind-sym">${sym}</a></td>
+        <td class="r"><span class="ind-score" style="color:${color}">${sign}${score}</span>
+          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:${pct}%;background:${color}"></div></div></td>
+        <td>${indBadge(dir)}</td>
+      </tr>`;
+    }
+    function indEmaRow(sym, ema, color, maxAbs) {
+      const is = (ema ?? 0) >= 0;
+      const cls = is ? 'bull' : 'bear';
+      const pct = Math.min(100, maxAbs > 0 ? Math.abs(ema ?? 0) / maxAbs * 100 : 0).toFixed(1);
+      const val = ema != null ? (ema > 0 ? '+' : '') + ema.toFixed(2) : '—';
+      return `<tr class="${cls}">
+        <td><a href="/?symbol=${sym}" class="ind-sym">${sym}</a></td>
+        <td class="r"><span class="ind-score" style="color:${color}">${val}</span>
+          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:${pct}%;background:${color}"></div></div></td>
+        <td>${indPosLabel(ema)}</td>
+      </tr>`;
+    }
+    async function loadIndicators() {
+      try {
+        const res = await fetch('/api/indicators');
+        if (!res.ok) return;
+        const rows = (await res.json()).filter(r => !r.error);
+        const byM1 = [...rows].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
+        const byM5 = [...rows].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
+        const byEma = [...rows].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
+        const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
+        const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
+        const maxEma = Math.max(.01, ...byEma.map(r => Math.abs(r.ema_score ?? 0)));
+        document.getElementById('ind-m1').innerHTML =
+          byM1.map(r => indRow(r.symbol, r.st_score_m1 ?? 0, r.st_dir_m1,
+            r.st_dir_m1 === 1 ? '#26a69a' : '#ef5350', maxM1)).join('');
+        document.getElementById('ind-m5').innerHTML =
+          byM5.map(r => indRow(r.symbol, r.st_score_m5 ?? 0, r.st_dir_m5,
+            r.st_dir_m5 === 1 ? '#4ade80' : '#f87171', maxM5)).join('');
+        document.getElementById('ind-ema').innerHTML =
+          byEma.map(r => indEmaRow(r.symbol, r.ema_score,
+            (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)).join('');
+      } catch (e) { /* 静默失败，不影响主图 */ }
+    }
+    // 每30秒自动刷新指标面板
+    setInterval(loadIndicators, 30000);
+
     // 启动
     loadData();
+    loadIndicators();
     connectWS();
   </script>
 </body>

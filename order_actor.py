@@ -28,6 +28,12 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+try:
+    import redis as _redis_lib   # pip install redis
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+
 from nautilus_trader.adapters.interactive_brokers.common import IBOrderTags
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.message import Event
@@ -125,6 +131,7 @@ class OrderGatewayActor(Strategy):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._http_server: HTTPServer | None = None
         self._sl_tasks: list[asyncio.Task] = []  # P5: 保存 task 引用，避免被 GC 或引擎停止时静默取消
+        self._redis: "_redis_lib.Redis | None" = None  # Redis 确认客户端
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -134,6 +141,21 @@ class OrderGatewayActor(Strategy):
         """启动：注册 MessageBus 订阅 → 启动 HTTP Server"""
         # 获取引擎的 asyncio 事件循环（跨线程通信用）
         self._loop = asyncio.get_event_loop()
+
+        # Redis 客户端（用于向前端推送订单状态通知）
+        if _REDIS_AVAILABLE:
+            try:
+                self._redis = _redis_lib.Redis(
+                    host="localhost", port=6379,
+                    decode_responses=True, socket_connect_timeout=2
+                )
+                self._redis.ping()
+                self.log.info("[Gateway] Redis 已连接，将推送 order:update 事件")
+            except Exception as e:
+                self._redis = None
+                self.log.warning(f"[Gateway] Redis 连接失败，order:update 推送已禁用: {e}")
+        else:
+            self.log.warning("[Gateway] redis 包未安装，order:update 推送已禁用")
 
         # ★ 标准 MessageBus 订阅：注册 ExternalOrderCommand 的处理函数
         self.msgbus.subscribe(
@@ -411,6 +433,55 @@ class OrderGatewayActor(Strategy):
         )
 
     # ------------------------------------------------------------------
+    # Redis 订单状态推送辅助方法
+    # ------------------------------------------------------------------
+
+    def _pub_order(self, status: str, event, extra: dict | None = None) -> None:
+        """
+        向 Redis 发布 order:update 消息，前端通过 WebSocket 接收并触发语音/提示。
+
+        消息格式：
+        {
+            "status": "FILLED" | "REJECTED" | "ACCEPTED" | ...,
+            "client_order_id": "...",
+            "venue_order_id": "...",
+            "reason": "..."       (REJECTED/DENIED 才有),
+            "last_px": "...",    (FILLED 才有),
+            "last_qty": "...",   (FILLED 才有),
+            "side": "BUY"|"SELL",
+            "symbol": "QQQ",    (从 instrument_id 提取)
+            "ts": 1234567890
+        }
+        """
+        if not self._redis:
+            return
+        try:
+            msg = {
+                "status": status,
+                "client_order_id": str(event.client_order_id),
+                "ts": int(time.time()),
+            }
+            # 安全取字段（各 event 类型字段不同）
+            for field in ("venue_order_id", "reason", "last_px", "last_qty",
+                          "filled_qty", "leaves_qty", "commission"):
+                val = getattr(event, field, None)
+                if val is not None:
+                    msg[field] = str(val)
+            # 尝试从 order cache 拿 side 和 symbol
+            try:
+                order = self.cache.order(event.client_order_id)
+                if order:
+                    msg["side"] = str(order.side).replace("OrderSide.", "")
+                    msg["symbol"] = str(order.instrument_id).split(".")[0]
+            except Exception:
+                pass
+            if extra:
+                msg.update(extra)
+            self._redis.publish("order:update", json.dumps(msg, ensure_ascii=False))
+        except Exception as e:
+            self.log.warning(f"[Gateway] Redis publish order:update 失败: {e}")
+
+    # ------------------------------------------------------------------
     # 订单生命周期回调（NautilusTrader 标准 on_order_* 接口）
     # 覆盖范围：denied → rejected → accepted → (triggered) → filled/canceled/expired
     # ------------------------------------------------------------------
@@ -422,6 +493,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"原因: {event.reason}"
         )
+        self._pub_order("DENIED", event)
 
     def on_order_rejected(self, event) -> None:
         """订单被交易所拒绝（已到达 IBKR，IBKR 拒绝）"""
@@ -430,6 +502,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"原因: {event.reason}"
         )
+        self._pub_order("REJECTED", event)
 
     def on_order_accepted(self, event) -> None:
         """订单被交易所接受（已进入撮合队列，等待成交）"""
@@ -438,6 +511,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        self._pub_order("ACCEPTED", event)
 
     def on_order_pending_update(self, event) -> None:
         """改单请求已发出，等待交易所响应"""
@@ -461,6 +535,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        self._pub_order("TRIGGERED", event)
 
     def on_order_filled(self, event) -> None:
         """订单完全成交"""
@@ -473,6 +548,7 @@ class OrderGatewayActor(Strategy):
             f"{'买入' if str(event.order_side) == 'BUY' else '卖出'}  "
             f"佣金={event.commission}"
         )
+        self._pub_order("FILLED", event)
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
@@ -485,6 +561,7 @@ class OrderGatewayActor(Strategy):
             f"累计={event.filled_qty}  "
             f"剩余={event.leaves_qty}"
         )
+        self._pub_order("PARTIALLY_FILLED", event)
 
     def on_order_canceled(self, event) -> None:
         """订单已取消"""
@@ -493,6 +570,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        self._pub_order("CANCELED", event)
 
     def on_order_expired(self, event) -> None:
         """订单已过期（DAY 单收市未成交）"""
@@ -501,6 +579,7 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        self._pub_order("EXPIRED", event)
 
     async def _schedule_sl_modify(
         self,

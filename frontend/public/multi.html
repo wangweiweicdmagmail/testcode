@@ -576,6 +576,11 @@
         <div class="nav-links">
             <a href="/">单图模式</a>
             <a href="/multi.html" class="active">⊞ 四图总览</a>
+            <!-- 语音提醒开关 -->
+            <button id="voice-toggle" title="语音提醒" style="
+              background:none;border:1px solid #2a2e39;border-radius:4px;
+              color:#787b86;font-size:12px;padding:2px 8px;cursor:pointer;
+              transition:all .2s;">🔔 语音</button>
         </div>
     </div>
 
@@ -584,7 +589,32 @@
 
 
     <script>
-        // ── 默认四个标的 ────────────────────────────────────────
+        // ─── 语音提醒模块（全局共享）────────────────────────────────
+        let voiceEnabled = true;  // 默认开启，用户可手动关闭
+        const voiceBtn = document.getElementById('voice-toggle');
+        // 初始外观：默认 ON（绿色）
+        voiceBtn.textContent = '🔔 语音 ON';
+        voiceBtn.style.color = '#26a69a';
+        voiceBtn.style.borderColor = '#26a69a';
+        voiceBtn.addEventListener('click', () => {
+            voiceEnabled = !voiceEnabled;
+            voiceBtn.style.color       = voiceEnabled ? '#26a69a' : '#787b86';
+            voiceBtn.style.borderColor = voiceEnabled ? '#26a69a' : '#2a2e39';
+            voiceBtn.textContent       = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
+        });
+        const _spokenCache = new Map();
+        function speak(text, priority = false) {
+            if (!voiceEnabled) return;
+            const now = Date.now();
+            if (!priority && _spokenCache.has(text) && now - _spokenCache.get(text) < 5000) return;
+            _spokenCache.set(text, now);
+            speechSynthesis.cancel();
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = 'zh-CN'; u.rate = 1.1;
+            speechSynthesis.speak(u);
+        }
+
+        // ── 默认四个标的 ──────────────────────────────────────────
         const DEFAULT_SYMBOLS = ['QQQ', 'AAPL', 'NVDA', 'TSLA'];
         const state = {};
 
@@ -997,6 +1027,8 @@
                     );
                     if (!confirmed) return;
 
+                    speak(`${symbol} 订单已下发，${ctx.orderDir === 'BUY' ? '做多' : '做空'} ${qty}股，止损 ${sl.toFixed(2)}`);
+
                     try {
                         const resp = await fetch(`/api/order/${symbol}`, {
                             method: 'POST',
@@ -1005,11 +1037,16 @@
                         });
                         const result = await resp.json();
                         if (result.engine_offline || result.error) {
+                            speak(`订单失败，${result.error || '引擎未连接'}`, true);
                             alert(`⚠ 引擎未连接或出错: ${result.error || '请启动引擎'}`);
                         } else {
+                            speak(`${symbol} 订单已受理`, true);
                             alert(`✅ 开仓请求已发送到引擎\n${symbol} ${ctx.orderDir === 'BUY' ? '做多' : '做空'} x${qty}\n止损: $${sl.toFixed(2)}`);
                         }
-                    } catch (e) { alert(`网络错误: ${e.message}`); }
+                    } catch (e) {
+                        speak('网络错误，订单失败', true);
+                        alert(`网络错误: ${e.message}`);
+                    }
                     exitOrderMode(ctx);
                 });
 
@@ -1191,10 +1228,57 @@
                         if (posSym && state[posSym]) {
                             if (payload.closed) {
                                 clearPositionUI(posSym);
+                                speak(`${posSym} 仓位已平仓`, true);
                             } else {
+                                const isNew = !state[posSym].position;
                                 state[posSym].candleSeries.setMarkers([]);
                                 addPositionLines(posSym, payload);
+                                if (isNew) speak(`${posSym} ${payload.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
                             }
+                        }
+                        return;
+                    }
+
+                    // ── 引擎订单状态回执（order_actor.py 通过 Redis 发布）──
+                    if (channel === 'order:update') {
+                        const o = payload;
+                        const sym = o.symbol || '未知';
+                        const side = o.side === 'BUY' ? '做多' : '做空';
+                        const id = (o.client_order_id || '').slice(-6);
+                        switch (o.status) {
+                            case 'ACCEPTED':
+                                speak(`${sym} 订单已接受`, true);
+                                showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                                break;
+                            case 'FILLED':
+                                speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
+                                showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                                break;
+                            case 'PARTIALLY_FILLED':
+                                speak(`${sym} 订单部分成交`, true);
+                                showToast(`🔶 ${sym} 部分成交 @${o.last_px} x${o.last_qty}`, 'tip');
+                                break;
+                            case 'REJECTED':
+                                speak(`${sym} 订单被拒绝，${o.reason || ''}`, true);
+                                showToast(`❌ ${sym} 订单拒绝: ${o.reason || ''}`, 'warn');
+                                break;
+                            case 'DENIED':
+                                speak(`${sym} 订单被风控拒绝，${o.reason || ''}`, true);
+                                showToast(`❌ ${sym} 风控拒绝: ${o.reason || ''}`, 'warn');
+                                break;
+                            case 'TRIGGERED':
+                                speak(`${sym} 止损单已触发，注意`, true);
+                                showToast(`🔔 ${sym} 止损单触发`, 'tip');
+                                break;
+                            case 'CANCELED':
+                                showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
+                                break;
+                            case 'EXPIRED':
+                                speak(`${sym} 订单已过期`, true);
+                                showToast(`⌛ ${sym} 订单过期 #${id}`, 'tip');
+                                break;
+                            default:
+                                showToast(`📎 ${sym} 订单状态: ${o.status}`, 'info');
                         }
                         return;
                     }
@@ -1244,6 +1328,10 @@
                             }
                         }
                         if (payload.st_value != null && payload.st_value !== 0) {
+                            // ST 转向语音提醒
+                            if (s.stLastDir !== null && payload.st_dir !== s.stLastDir) {
+                                speak(`${sym} 超级趋势转${payload.st_dir === 1 ? '向上' : '向下'}，注意转向`, true);
+                            }
                             if (payload.st_dir !== s.stLastDir || !s.stLastSeries) {
                                 const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
                                 s.stLastSeries = s.chart.addLineSeries({
