@@ -1163,6 +1163,9 @@
     const opMaxLoss = document.getElementById('op-max-loss');
 
     // 核心计算：根据止损价与当前价自动判方向，按最大亏损算股数
+    // 账户信息缓存（进入开仓模式时异步获取）
+    let accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
+
     function recalcOrder() {
       const entry = latestClose || 0;
       if (!slPrice || !entry) return;
@@ -1187,20 +1190,35 @@
       opSlPctEl.textContent = slPct > 0 ? `${slPct.toFixed(2)}%` : '—';
       opSlPctEl.style.color = '#ef5350';
 
-      // 股数 = floor(最大亏损 / 每股风险)
+      // ── 股数计算（取 最大亏损 和 资金上限 两者较小値）──
       const maxLoss = parseFloat(opMaxLoss.value) || 100;
-      const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+      const available = accountInfo.available_cash || 0;
+      const total = accountInfo.total_equity || 0;
+      // 可用资金上限：90% 可用资金 vs 100% 总资产，取较小值
+      const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
+      const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+      const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
+      const qty = Math.min(qtyByLoss, qtyByCash);
       opQtyDisplay.textContent = qty > 0 ? `${qty} 股` : '—';
       opQtyDisplay.style.color = qty > 0 ? '#d1d4dc' : '#787b86';
+      if (qty > 0 && qtyByCash < qtyByLoss) {
+        opQtyDisplay.title = `按止损可开 ${qtyByLoss} 股，因资金上限抓到 ${qty} 股`;
+      } else {
+        opQtyDisplay.title = '';
+      }
 
-      // 开仓金额 & 资金占比（模拟账户 $100,000）
+      // 开仓金额 & 资金占比
       const cost = qty * entry;
       opCost.textContent = qty > 0 ? `$${cost.toFixed(0)}` : '—';
-      const accountSize = 100000;
-      const pct = cost / accountSize * 100;
-      opCapitalHint.textContent = qty > 0
-        ? `💡 占用资金 $${cost.toFixed(0)}  (账户$10万的 ${pct.toFixed(1)}%)`
-        : '请先设置止损价';
+      const displayTotal = total > 0 ? total : null;
+      if (qty > 0 && displayTotal) {
+        const pct = cost / displayTotal * 100;
+        opCapitalHint.textContent = `💡 占用 $${cost.toFixed(0)}  (账户$${(displayTotal / 10000).toFixed(1)}万的 ${pct.toFixed(1)}%)${accountInfo.engine_online === false ? '  ⚠ 引擎離线' : ''}`;
+      } else if (qty > 0) {
+        opCapitalHint.textContent = `💡 占用 $${cost.toFixed(0)}  (引擎未连接，资金校验已跳过)`;
+      } else {
+        opCapitalHint.textContent = '请先设置止损价';
+      }
     }
 
     // 更新拖动把手的 Y 坐标（单元素直接定位）
@@ -1244,7 +1262,16 @@
     }
 
     // 进入开仓模式
-    function enterOrderMode() {
+    async function enterOrderMode() {
+      // 异步获取真实账户余额
+      try {
+        const resp = await fetch('/api/account');
+        const data = await resp.json();
+        accountInfo = { ...data, engine_online: !data.engine_offline };
+      } catch (e) {
+        accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
+      }
+
       // 初始止损价：优先用 ST 值；如无则按当前价 ±1% 作为初始占位
       // 方向会在 recalcOrder() 内由 SL 与当前价的位置关系自动判定
       const initSL = latestST
@@ -1334,33 +1361,57 @@
       exitOrderMode();
     });
 
-    // 确认开仓
+    // 确认开仓 —— 实际调用引擎 API
     document.getElementById('op-confirm').addEventListener('click', async () => {
       const sl = parseFloat(opSlInput.value);
       const entry = latestClose || 0;
       const maxLoss = parseFloat(opMaxLoss.value) || 100;
       const riskPerShare = Math.abs(entry - sl);
-      const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+
+      // 资金上限校验
+      const available = accountInfo.available_cash || 0;
+      const total = accountInfo.total_equity || 0;
+      const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
+      const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+      const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
+      const qty = Math.min(qtyByLoss, qtyByCash);
+
       if (isNaN(sl) || sl <= 0 || qty <= 0) {
         alert('止损价无效或风险/股过小，无法计算有效股数');
         return;
       }
-      // TODO: 实际调用后端实盘接口
-      console.log('开仓请求', { symbol: SYMBOL, side: orderDir, qty, entry, stop_loss: sl });
-      /*
-      await fetch(`/api/position/${SYMBOL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ side: orderDir, entry_price: entry, stop_loss: sl, quantity: qty }),
-      });
-      */
+
+      const costTotal = qty * entry;
+      const confirmed = confirm(
+        `确认开仓？\n` +
+        `方向: ${orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}\n` +
+        `标的: ${SYMBOL}  数量: ${qty} 股\n` +
+        `开仓: 市价 (~$${entry.toFixed(2)})\n` +
+        `止损: $${sl.toFixed(2)}  (每股风险 $${riskPerShare.toFixed(2)})\n` +
+        `预计资金: $${costTotal.toFixed(0)}`
+      );
+      if (!confirmed) return;
+
+      try {
+        const resp = await fetch(`/api/order/${SYMBOL}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ side: orderDir, qty, stop_loss: sl, order_type: 'BRACKET' }),
+        });
+        const result = await resp.json();
+        if (result.engine_offline || result.error) {
+          alert(`⚠ 引擎未连接或出错: ${result.error || '请启动引擎'}
+请检查 main.py 是否已启动`);
+        } else {
+          alert(`✅ 开仓请求已发小到引擎
+${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
+止损: $${sl.toFixed(2)}`);
+        }
+      } catch (e) {
+        alert(`网络错误: ${e.message}`);
+      }
+
       exitOrderMode();
-      alert(`开仓请求已发送
-方向: ${orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}  数量: ${qty} 股
-开仓: 市价 (~$${entry.toFixed(2)})
-止损: $${sl.toFixed(2)}
-每股风险: $${riskPerShare.toFixed(2)}
-最大亏损: $${(riskPerShare * qty).toFixed(2)}`);
     });
 
     // 平仓按钮

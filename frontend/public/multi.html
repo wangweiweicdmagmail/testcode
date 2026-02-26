@@ -910,22 +910,47 @@
                 document.getElementById(`opcancel-${id}`).addEventListener('click', () => exitOrderMode(ctx));
                 document.getElementById(`opx-${id}`).addEventListener('click', () => exitOrderMode(ctx));
 
-                // 确认开仓
+                // 确认开仓 —— 实际调用引擎 API
                 document.getElementById(`opconfirm-${id}`).addEventListener('click', async () => {
                     const sl = ctx.slPrice;
                     const entry = ctx.latestClose || 0;
                     const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
                     const riskPerShare = Math.abs(entry - sl);
-                    const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+
+                    const acct = ctx.accountInfo || {};
+                    const available = acct.available_cash || 0;
+                    const total = acct.total_equity || 0;
+                    const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
+                    const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+                    const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
+                    const qty = Math.min(qtyByLoss, qtyByCash);
+
                     if (!sl || qty <= 0) { alert('止损价无效或每股风险过小'); return; }
-                    console.log('开仓请求', { symbol, side: ctx.orderDir, qty, entry, stop_loss: sl });
-                    /* await fetch(`/api/position/${symbol}`, {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ side: ctx.orderDir, entry_price: entry, stop_loss: sl, quantity: qty }),
-                    }); */
+
+                    const confirmed = confirm(
+                        `确认开仓？\n方向: ${ctx.orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}\n` +
+                        `标的: ${symbol}  数量: ${qty} 股\n` +
+                        `开仓: 市价 (~$${entry.toFixed(2)})  止损: $${sl.toFixed(2)}\n` +
+                        `预计资金: $${(qty * entry).toFixed(0)}`
+                    );
+                    if (!confirmed) return;
+
+                    try {
+                        const resp = await fetch(`/api/order/${symbol}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ side: ctx.orderDir, qty, stop_loss: sl, order_type: 'BRACKET' }),
+                        });
+                        const result = await resp.json();
+                        if (result.engine_offline || result.error) {
+                            alert(`⚠ 引擎未连接或出错: ${result.error || '请启动引擎'}`);
+                        } else {
+                            alert(`✅ 开仓请求已发送到引擎\n${symbol} ${ctx.orderDir === 'BUY' ? '做多' : '做空'} x${qty}\n止损: $${sl.toFixed(2)}`);
+                        }
+                    } catch (e) { alert(`网络错误: ${e.message}`); }
                     exitOrderMode(ctx);
-                    alert(`${symbol} 开仓请求已发送\n方向: ${ctx.orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}  数量: ${qty} 股\n开仓: ~$${entry.toFixed(2)}  止损: $${sl.toFixed(2)}`);
                 });
+
 
                 // 图表缩放/滚动后重置控件位置
                 s.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
@@ -1006,7 +1031,7 @@
             if (el) el.textContent = ctx.slPrice.toFixed(2);
         }
 
-        // 核心：自动判方向 + 算股数 + 更新面板
+        // 核心：自动判方向 + 算股数（双上限） + 更新面板
         function updateOrderPanel(ctx) {
             const entry = ctx.latestClose || 0;
             if (!ctx.slPrice || !entry) return;
@@ -1025,24 +1050,44 @@
             ctx.riskEl.textContent = riskPerShare > 0 ? `$${riskPerShare.toFixed(2)}` : '—';
             ctx.slPctEl.textContent = slPct > 0 ? `${slPct.toFixed(2)}%` : '—';
 
+            // ── 股数：最大亏损 + 资金上限 取较小値 ──
             const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
-            const qty = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+            const acct = ctx.accountInfo || {};
+            const available = acct.available_cash || 0;
+            const total = acct.total_equity || 0;
+            const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
+            const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
+            const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
+            const qty = Math.min(qtyByLoss, qtyByCash);
             ctx.qtyEl.textContent = qty > 0 ? `${qty} 股` : '—';
             ctx.qtyEl.style.color = qty > 0 ? '#d1d4dc' : '#787b86';
+            ctx.qtyEl.title = (qty > 0 && qtyByCash < qtyByLoss)
+                ? `按止损可开 ${qtyByLoss} 股，因资金上限抽到 ${qty} 股` : '';
 
             const cost = qty * entry;
             ctx.costEl.textContent = qty > 0 ? `$${cost.toFixed(0)}` : '—';
-            ctx.hintEl.textContent = qty > 0
-                ? `💡 占用 $${cost.toFixed(0)}（$10万账户的 ${(cost / 100000 * 100).toFixed(1)}%）`
-                : '请拖动止损控件';
-
+            if (qty > 0 && total > 0) {
+                ctx.hintEl.textContent = `💡 占用 $${cost.toFixed(0)}（账户$${(total / 10000).toFixed(1)}万的 ${(cost / total * 100).toFixed(1)}%）`;
+            } else if (qty > 0) {
+                ctx.hintEl.textContent = `💡 占用 $${cost.toFixed(0)}（引擎未连接，资金校验已跳过）`;
+            } else {
+                ctx.hintEl.textContent = '请拖动止损控件';
+            }
             if (ctx.slPriceLine) {
                 ctx.slPriceLine.applyOptions({ price: slPrice, title: `止损 ${slPrice.toFixed(2)}` });
             }
         }
 
-        // 进入开仓模式
-        function enterOrderMode(ctx) {
+        // 进入开仓模式（异步获取真实账户余额）
+        async function enterOrderMode(ctx) {
+            try {
+                const resp = await fetch('/api/account');
+                const data = await resp.json();
+                ctx.accountInfo = { ...data, engine_online: !data.engine_offline };
+            } catch (e) {
+                ctx.accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
+            }
+
             const initSL = ctx.latestST
                 ? ctx.latestST
                 : (ctx.latestClose ? ctx.latestClose * 0.99 : 0);

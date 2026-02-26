@@ -399,6 +399,71 @@ class BarLoggerStrategy(Strategy):
             self._redis.close()
         self.log.info(f"[Strategy] 停止，共收到实时 K 线 {self._bar_count} 根")
 
+    # ── 仓位事件回调：将真实 IBKR 仓位同步到 Redis ───────────────────────
+    def on_position_opened(self, event) -> None:
+        self._sync_position_to_redis(event.instrument_id)
+
+    def on_position_changed(self, event) -> None:
+        self._sync_position_to_redis(event.instrument_id)
+
+    def on_position_closed(self, event) -> None:
+        sym = event.instrument_id.symbol.value
+        if self._redis:
+            try:
+                self._redis.delete(f"position:{sym}")
+                self._redis.publish("position:update", json.dumps({"symbol": sym, "closed": True}))
+                self.log.info(f"[Strategy] 仓位已平仓，Redis key 已删除: {sym}")
+            except Exception as e:
+                self.log.warning(f"[Strategy] 仓位关闭写 Redis 失败: {e}")
+
+    def _sync_position_to_redis(self, instrument_id) -> None:
+        """将 NautilusTrader 缓存中的仓位信息写入 Redis 并 PUBLISH 通知前端"""
+        if not self._redis:
+            return
+        try:
+            pos = self.cache.position(self.cache.position_id(instrument_id))
+            if pos is None:
+                # 尝试从 positions_open 查找
+                for p in self.cache.positions_open():
+                    if p.instrument_id == instrument_id:
+                        pos = p
+                        break
+            if pos is None:
+                return
+
+            sym = instrument_id.symbol.value
+            # 获取最新价格用于计算浮盈
+            last_price = None
+            instrument = self.cache.instrument(instrument_id)
+            bars = self.cache.bars(instrument_id)
+            if bars and instrument:
+                last_price = float(instrument.make_price(bars[-1].close))
+
+            upnl = None
+            if last_price and instrument:
+                try:
+                    price_obj = instrument.make_price(last_price)
+                    money = pos.unrealized_pnl(price_obj)
+                    upnl = float(money.as_double()) if money else None
+                except Exception:
+                    pass
+
+            pos_data = {
+                "symbol":         sym,
+                "side":           "LONG" if pos.is_long else "SHORT",
+                "entry_price":    float(pos.avg_px_open),
+                "quantity":       float(pos.quantity),
+                "stop_loss":      None,          # 止损价由前端开仓时传入，此处留空
+                "unrealized_pnl": upnl,
+                "realized_pnl":   float(pos.realized_pnl.as_double()) if pos.realized_pnl else 0.0,
+                "last_price":     last_price,
+            }
+            self._redis.set(f"position:{sym}", json.dumps(pos_data))
+            self._redis.publish("position:update", json.dumps(pos_data))
+            self.log.info(f"[Strategy] 仓位已同步到 Redis: {sym} {pos_data['side']} x{pos_data['quantity']}")
+        except Exception as e:
+            self.log.warning(f"[Strategy] _sync_position_to_redis 失败: {e}")
+
     # ── 历史 K 线回调（IBKR request_bars 响应）─────────────────────────
     def on_historical_data(self, data) -> None:
         """

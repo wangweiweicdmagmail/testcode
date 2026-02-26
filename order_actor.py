@@ -176,6 +176,67 @@ class OrderGatewayActor(Strategy):
         self.log.info("[Gateway] OrderGatewayActor 已停止")
 
     # ------------------------------------------------------------------
+    # 账户 & 仓位查询（供 HTTP GET /account 和 /positions 调用）
+    # ------------------------------------------------------------------
+
+    def get_account_info(self) -> dict:
+        """返回 IBKR 账户净资产和可用资金"""
+        try:
+            from nautilus_trader.model.identifiers import Venue
+            from nautilus_trader.model.currencies import USD
+            venue = Venue("INTERACTIVE_BROKERS")
+            account = self.cache.account_for_venue(venue)
+            if account is None:
+                return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
+            total = account.balance_total(USD)
+            free  = account.balance_free(USD)
+            return {
+                "total_equity":   float(total.as_double()) if total else 0.0,
+                "available_cash": float(free.as_double())  if free  else 0.0,
+                "currency": "USD",
+            }
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_account_info 失败: {e}")
+            return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
+
+    def get_positions(self) -> list:
+        """返回当前所有开放仓位"""
+        result = []
+        try:
+            for pos in self.cache.positions_open():
+                sym = pos.instrument_id.symbol.value
+                # 用最新成交价估算浮盈（取缓存中最新 quote/bar）
+                last_price = None
+                instrument = self.cache.instrument(pos.instrument_id)
+                # 尝试从 bar 缓存拿最新价
+                bars = self.cache.bars(pos.instrument_id)
+                if bars:
+                    last_price = instrument.make_price(bars[-1].close) if instrument else None
+
+                upnl = None
+                if last_price is not None:
+                    try:
+                        money = pos.unrealized_pnl(last_price)
+                        upnl = float(money.as_double()) if money else None
+                    except Exception:
+                        pass
+
+                result.append({
+                    "symbol":       sym,
+                    "instrument_id": str(pos.instrument_id),
+                    "side":         "LONG" if pos.is_long else "SHORT",
+                    "quantity":     float(pos.quantity),
+                    "avg_px_open":  float(pos.avg_px_open),
+                    "unrealized_pnl": upnl,
+                    "realized_pnl": float(pos.realized_pnl.as_double()) if pos.realized_pnl else 0.0,
+                    "last_price":   float(last_price) if last_price else None,
+                })
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_positions 失败: {e}")
+        return result
+
+
+    # ------------------------------------------------------------------
     # ★ 标准 MessageBus 消息处理器
     # ------------------------------------------------------------------
 
@@ -364,8 +425,18 @@ class OrderGatewayActor(Strategy):
         """在守护线程中启动 HTTP 网关"""
         loop = self._loop
         publish_fn = self._async_bridge  # 使用 self 的 coroutine
+        actor = self                     # 闭包中显式引用 actor，避免 _Handler 内 self 覆盖
 
         class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                """GET /account  —— 账户余额；GET /positions —— 当前仓位"""
+                if self.path == "/account":
+                    self._send(200, actor.get_account_info())
+                elif self.path == "/positions":
+                    self._send(200, actor.get_positions())
+                else:
+                    self._send(404, {"error": f"未知路径: {self.path}"})
+
             def do_POST(self) -> None:
                 # P4: Token 认证（设置环境变量 ORDER_GATEWAY_SECRET 启用）
                 import os as _os

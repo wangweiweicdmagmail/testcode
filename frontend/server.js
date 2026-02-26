@@ -174,6 +174,77 @@ app.delete("/api/position/:symbol", async (req, res) => {
     res.json({ ok: true });
 });
 
+
+// ── 引擎代理路由（转发到 order_actor :8888）─────────────────────────────
+
+// symbol → NautilusTrader instrument_id 映射
+const SYMBOL_MAP = {
+    QQQ: 'QQQ.NASDAQ',
+    AAPL: 'AAPL.NASDAQ',
+    NVDA: 'NVDA.NASDAQ',
+    TSLA: 'TSLA.NASDAQ',
+};
+
+/**
+ * 通用 HTTP 代理：向 order_actor 发 GET/POST 请求
+ * 引擎未启动时返回 fallback 值，不抛错
+ */
+function proxyToEngine(method, path, body, fallback) {
+    return new Promise((resolve) => {
+        const http = require('http');
+        const postData = body ? JSON.stringify(body) : null;
+        const opts = {
+            host: '127.0.0.1', port: 8888, path, method,
+            headers: { 'Content-Type': 'application/json' },
+        };
+        if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
+
+        const req = http.request(opts, (r) => {
+            let data = '';
+            r.on('data', chunk => data += chunk);
+            r.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { resolve(fallback); }
+            });
+        });
+        req.on('error', () => resolve(fallback));  // 引擎未启动时降级
+        if (postData) req.write(postData);
+        req.end();
+    });
+}
+
+// GET /api/account — 真实账户余额
+app.get('/api/account', async (req, res) => {
+    const data = await proxyToEngine('GET', '/account', null,
+        { total_equity: 0, available_cash: 0, currency: 'USD', engine_offline: true });
+    res.json(data);
+});
+
+// GET /api/positions — 真实 IBKR 仓位
+app.get('/api/positions', async (req, res) => {
+    const data = await proxyToEngine('GET', '/positions', null, []);
+    res.json(data);
+});
+
+// POST /api/order/:symbol — 下单代理
+app.post('/api/order/:symbol', async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    const instrumentId = SYMBOL_MAP[symbol];
+    if (!instrumentId) {
+        return res.status(400).json({ error: `未知标的: ${symbol}，支持: ${Object.keys(SYMBOL_MAP).join(', ')}` });
+    }
+    const { side, qty, stop_loss, order_type = 'BRACKET' } = req.body;
+    if (!side || !qty) {
+        return res.status(400).json({ error: 'side 和 qty 必填' });
+    }
+    const payload = { instrument_id: instrumentId, side, qty: parseInt(qty), order_type };
+    if (stop_loss != null) payload.stop_loss = parseFloat(stop_loss);
+
+    console.log(`📤 下单代理 → ${instrumentId} ${side} x${qty} SL=${stop_loss} type=${order_type}`);
+    const data = await proxyToEngine('POST', '/order', payload, { error: '引擎未启动', engine_offline: true });
+    res.json(data);
+});
+
 // POST /api/settings/:symbol — ST 跟踪止盈等开关
 app.post("/api/settings/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
