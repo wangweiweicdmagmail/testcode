@@ -58,13 +58,13 @@
             color: #2962ff;
         }
 
-        /* ── 三表并排布局 ── */
+        /* ── 四表并排布局 ── */
         #main {
             display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
             gap: 16px;
             padding: 24px 20px;
-            max-width: 1200px;
+            max-width: 1600px;
             margin: 0 auto;
         }
 
@@ -340,6 +340,34 @@
         </div>
     </div>
 
+    <!-- 日内连续新高积分 -->
+    <div id="nh-section" style="max-width:1600px;margin:0 20px 24px;padding:0 0px;">
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#a78bfa"></span>
+                    日内连续新高
+                </div>
+                <div class="card-sub">M5收盘创新高 +1/次 · 跌破清零</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">连续次数</th>
+                        <th>评价</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-nh">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <script>
         const REFRESH_MS = 10_000;
 
@@ -397,6 +425,31 @@
       `;
         }
 
+        function buildNHRow(rank, sym, count) {
+            const color = count === 0 ? '#4b5563'
+                : count <= 2 ? '#f59e0b'
+                    : count <= 4 ? '#4ade80'
+                        : '#26a69a';
+            const label = count === 0 ? '<span style="color:#4b5563">——</span>'
+                : count <= 2 ? `<span class="badge badge-bull">⚡ x${count}</span>`
+                    : count <= 4 ? `<span class="badge badge-bull">🔥 x${count}</span>`
+                        : `<span class="badge badge-bull">🚀 x${count}</span>`;
+            const pct = Math.min(100, count * 20).toFixed(1);
+            return `
+        <tr class="${count > 0 ? 'bull' : ''}">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${color}">${count}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+            </div>
+          </td>
+          <td>${label}</td>
+        </tr>
+      `;
+        }
+
         async function loadData() {
             try {
                 const res = await fetch('/api/indicators');
@@ -407,6 +460,7 @@
                 const byM1 = [...data].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
                 const byM5 = [...data].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
                 const byEma = [...data].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
+                const byNH = [...data].sort((a, b) => (b.nh_score ?? 0) - (a.nh_score ?? 0));
 
                 const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
                 const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
@@ -425,6 +479,10 @@
                 document.getElementById('tbody-ema').innerHTML = byEma.map((r, i) =>
                     buildEmaRow(i + 1, r.symbol, r.ema_score,
                         (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)
+                ).join('');
+
+                document.getElementById('tbody-nh').innerHTML = byNH.map((r, i) =>
+                    buildNHRow(i + 1, r.symbol, r.nh_score ?? 0)
                 ).join('');
 
                 const now = new Date();
