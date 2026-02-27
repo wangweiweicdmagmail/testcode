@@ -38,6 +38,7 @@ from nautilus_trader.model.enums import (
 )
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
+from events import BarCollectedEvent
 
 
 # ── Redis 配置 ────────────────────────────────────────────────────────────
@@ -379,13 +380,13 @@ class BarLoggerStrategy(Strategy):
 
             # 构造 BarType
             bar_type = BarType(
-                instrument_id=iid,
-                bar_spec=BarSpecification(
+                iid,
+                BarSpecification(
                     step=self.config.bar_step,
                     aggregation=BarAggregation.MINUTE,
                     price_type=PriceType.LAST,
                 ),
-                aggregation_source=AggregationSource.EXTERNAL,
+                AggregationSource.EXTERNAL,
             )
 
             # 向 IBKR 拉取历史 K 线
@@ -397,13 +398,13 @@ class BarLoggerStrategy(Strategy):
 
             # 额外请求日K（取昨日 H/L/C 围栏）
             daily_bar_type = BarType(
-                instrument_id=iid,
-                bar_spec=BarSpecification(
+                iid,
+                BarSpecification(
                     step=1,
                     aggregation=BarAggregation.DAY,
                     price_type=PriceType.LAST,
                 ),
-                aggregation_source=AggregationSource.EXTERNAL,
+                AggregationSource.EXTERNAL,
             )
             # 拉取最近 5 个交易日的日K，确保能拿到昨日（周一可拉到上周五）
             daily_start = hist_start_utc - timedelta(days=7)
@@ -930,6 +931,10 @@ class BarLoggerStrategy(Strategy):
             self.log.debug(
                 f"[BAR] {sym}: ✓ Redis SET bars:1m ({len(all_)} 根) + PUBLISH {ch}"
             )
+
+            # ★ 发布内部事件供 ExitManager 止盈逻辑使用
+            bar_dict_with_id = {**bar_dict, "instrument_id": str(self.config.instrument_id)}
+            self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
         except Exception as e:
             self.log.error(f"[BAR] {sym}: ✗ Redis 写入失败: {e}")
 

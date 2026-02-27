@@ -41,6 +41,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from order_actor import OrderGatewayActor, OrderGatewayConfig
 from strategy import BarLoggerStrategy, BarLoggerStrategyConfig
+from exit_manager import ExitManager, ExitManagerConfig
 
 # ============================================================
 # ⚠️  FA 支持增强（monkey-patch）
@@ -103,9 +104,9 @@ BACKTEST_DATE = _args.date   # 空字符串 = 自动
 # ============================================================
 IBG_HOST = "127.0.0.1"
 IBG_PORT = int(os.environ.get("IBG_PORT", "7496"))  # 实盘 TWS=7496 | 实盘 Gateway=4001 | 模拟 TWS=7497
-IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "1"))  # 多客户端并行时修改，避免冲突
+IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "2"))  # 多客户端并行时修改，避免冲突
 
-ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
+ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F19890576")  # FA 主账号
 
 # FA Group 配置
 FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
@@ -203,11 +204,17 @@ gateway_actor = OrderGatewayActor(
 )
 
 # ============================================================
+# 策略 3：止盈管理器 Actor（独立风险控制模块）
+# ============================================================
+exit_manager = ExitManager(config=ExitManagerConfig())
+
+# ============================================================
 # 启动交易节点
 # ============================================================
 node = TradingNode(config=config_node)
 node.trader.add_strategy(bar_strategy)
 node.trader.add_strategy(gateway_actor)   # Actor 以 Strategy 形式注册
+node.trader.add_strategy(exit_manager)    # 注册独立止盈模块
 node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)
 node.add_exec_client_factory(IB, InteractiveBrokersLiveExecClientFactory)
 node.build()

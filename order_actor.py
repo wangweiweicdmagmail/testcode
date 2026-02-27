@@ -44,6 +44,7 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
+from events import STTrailSettingsEvent
 
 
 # ---------------------------------------------------------------------------
@@ -139,40 +140,51 @@ class OrderGatewayActor(Strategy):
 
     def on_start(self) -> None:
         """启动：注册 MessageBus 订阅 → 启动 HTTP Server"""
-        # 获取引擎的 asyncio 事件循环（跨线程通信用）
-        self._loop = asyncio.get_event_loop()
-
-        # Redis 客户端（用于向前端推送订单状态通知）
-        if _REDIS_AVAILABLE:
+        self.log.info("[Gateway] 正在启动 OrderGatewayActor...")
+        try:
+            # 获取引擎的 asyncio 事件循环（跨线程通信用）
             try:
-                self._redis = _redis_lib.Redis(
-                    host="localhost", port=6379,
-                    decode_responses=True, socket_connect_timeout=2
-                )
-                self._redis.ping()
-                self.log.info("[Gateway] Redis 已连接，将推送 order:update 事件")
-            except Exception as e:
-                self._redis = None
-                self.log.warning(f"[Gateway] Redis 连接失败，order:update 推送已禁用: {e}")
-        else:
-            self.log.warning("[Gateway] redis 包未安装，order:update 推送已禁用")
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = asyncio.get_event_loop()
+            
+            self.log.info(f"[Gateway] 成功获取事件循环: {self._loop}")
 
-        # ★ 标准 MessageBus 订阅：注册 ExternalOrderCommand 的处理函数
-        self.msgbus.subscribe(
-            topic=ExternalOrderCommand.TOPIC,
-            handler=self.on_external_order_command,
-        )
-        self.log.info(
-            f"[Gateway] 已订阅 MessageBus Topic: {ExternalOrderCommand.TOPIC!r}"
-        )
+            # Redis 客户端（用于向前端推送订单状态通知）
+            if _REDIS_AVAILABLE:
+                try:
+                    self._redis = _redis_lib.Redis(
+                        host="localhost", port=6379,
+                        decode_responses=True, socket_connect_timeout=2
+                    )
+                    self._redis.ping()
+                    self.log.info("[Gateway] Redis 已连接，将推送 order:update 事件")
+                except Exception as e:
+                    self._redis = None
+                    self.log.warning(f"[Gateway] Redis 连接失败，order:update 推送已禁用: {e}")
+            else:
+                self.log.warning("[Gateway] redis 包未安装，order:update 推送已禁用")
 
-        # 启动 HTTP 网关线程
-        self._start_http_server()
+            # ★ 标准 MessageBus 订阅：注册 ExternalOrderCommand 的处理函数
+            self.msgbus.subscribe(
+                topic=ExternalOrderCommand.TOPIC,
+                handler=self.on_external_order_command,
+            )
+            self.log.info(
+                f"[Gateway] 已订阅 MessageBus Topic: {ExternalOrderCommand.TOPIC!r}"
+            )
 
-        self.log.info(
-            f"[Gateway] OrderGatewayActor 就绪 | "
-            f"HTTP: http://{self.config.http_host}:{self.config.http_port}/order"
-        )
+            # 启动 HTTP 网关线程
+            self._start_http_server()
+
+            self.log.info(
+                f"[Gateway] OrderGatewayActor 就绪 | "
+                f"HTTP: http://{self.config.http_host}:{self.config.http_port}/order"
+            )
+        except Exception as e:
+            self.log.error(f"[Gateway] OrderGatewayActor 启动失败: {e}")
+            import traceback
+            self.log.error(traceback.format_exc())
 
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
@@ -646,6 +658,17 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.error(f"[Gateway] 消息发布失败: {e}")
 
+    async def _async_bridge_settings(self, data: dict) -> None:
+        """转发设置变更到 MessageBus"""
+        try:
+            event = STTrailSettingsEvent(
+                symbol=data["symbol"],
+                active=bool(data["active"])
+            )
+            self.msgbus.publish(topic="settings.st_trail", msg=event)
+        except Exception as e:
+            self.log.error(f"[Gateway] 设置发布失败: {e}")
+
     def _start_http_server(self) -> None:
         """在守护线程中启动 HTTP 网关"""
         loop = self._loop
@@ -668,6 +691,16 @@ class OrderGatewayActor(Strategy):
                 _secret = _os.environ.get("ORDER_GATEWAY_SECRET", "")
                 if _secret and self.headers.get("X-Order-Token") != _secret:
                     self._send(403, {"error": "Unauthorized: invalid X-Order-Token"})
+                    return
+
+                if self.path == "/settings":
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n))
+                        asyncio.run_coroutine_threadsafe(actor._async_bridge_settings(data), loop)
+                        self._send(200, {"status": "ok"})
+                    except Exception as e:
+                        self._send(400, {"error": str(e)})
                     return
 
                 if self.path != "/order":

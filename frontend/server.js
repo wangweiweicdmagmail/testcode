@@ -349,6 +349,15 @@ app.post("/api/settings/:symbol", async (req, res) => {
     Object.assign(settings, req.body);
     await redis.set(`settings:${symbol}`, JSON.stringify(settings));
     console.log(`⚙️  设置更新 [${symbol}]:`, settings);
+
+    // ★ 同步给 Python 引擎内存
+    if (req.body.st_trail !== undefined) {
+        await proxyToEngine('POST', '/settings', {
+            symbol: symbol,
+            active: req.body.st_trail
+        }).catch(e => console.error("同步设置到引擎失败:", e.message));
+    }
+
     res.json({ ok: true, settings });
 });
 // Redis 推送设置——防止连接丢失导致进程崩溃
