@@ -1183,7 +1183,7 @@
         borderColor: "#2a2e39",
         timeVisible: true,
         secondsVisible: false,
-        fixLeftEdge: true,
+        fixLeftEdge: false,   // 允许视图向右拖过第一根 K 线
       },
     });
 
@@ -1276,6 +1276,11 @@
     // 真实 IBKR 字段：avg_px_open / unrealized_pnl / side / quantity / last_price / stop_loss
     // 旧 Redis 字段： entry_price / pnl / pnl_pct / quantity / entry_time / stop_loss
     let currentPosition = null;   // 缓存当前仓位，供行情更新时刷新浮盈
+    let orderMarkers = [];  // 订单生命周期标记全量存储（setMarkers 需完整数组，不支持增量追加）
+    function refreshMarkers() {
+      // 按时间升序排序后刷新（LWC 要求 markers 必须升序）
+      candleSeries.setMarkers([...orderMarkers].sort((a, b) => a.time - b.time));
+    }
 
     function addPositionLines(position) {
       if (!position) return;
@@ -1313,16 +1318,17 @@
         });
       }
 
-      // 开仓 Marker（有入场时间时才画）
+      // 开仓 Marker（旧格式有 entryTime 时才画，实时格式通过 order:update FILLED 事件添加）
       if (entryTime) {
-        candleSeries.setMarkers([{
+        orderMarkers.push({
           time: entryTime,
           position: isLong ? "belowBar" : "aboveBar",
           color: "#2196f3",
           shape: isLong ? "arrowUp" : "arrowDown",
           text: `${isLong ? 'BUY' : 'SELL'} @${entryPrice}`,
           size: 1,
-        }]);
+        });
+        refreshMarkers();
       }
 
       // 面板更新
@@ -1479,6 +1485,14 @@
 
         // 跳到最新数据
         chart.timeScale().scrollToRealTime();
+        // 用官方 API 扩展可见逻辑范围左侧，让首根 K 线前留出 8 根棒的空白
+        const visRange = chart.timeScale().getVisibleLogicalRange();
+        if (visRange !== null) {
+          chart.timeScale().setVisibleLogicalRange({
+            from: visRange.from - 8,
+            to: visRange.to,
+          });
+        }
 
       } catch (e) {
         document.getElementById("loading").textContent = `❌ ${e.message}`;
@@ -1591,14 +1605,25 @@
             // 判断是否是当前展示的标的
             if (pos.symbol !== SYMBOL) return;
             if (pos.closed) {
-              // 平仓：清空面板
+              // 平仓标记（橙色圆点）
+              const closeTime = lastTickTime || currentBars[currentBars.length - 1]?.time;
+              if (closeTime) {
+                const wasLong = currentPosition ? currentPosition.side !== 'SHORT' : true;
+                orderMarkers.push({
+                  time: closeTime,
+                  position: wasLong ? 'aboveBar' : 'belowBar',
+                  color: '#ff9800',
+                  shape: 'circle',
+                  text: '平仓',
+                  size: 0.8,
+                });
+                refreshMarkers();
+              }
               clearPositionUI();
               speak(`${SYMBOL} 仓位已平仓`, true);
             } else {
               // 建仓/加仓/浮盈更新：重绘仓位线 + 面板
-              // 注意：重绘前先重置图表 markers（避免叠加）
               const isNew = !currentPosition;
-              candleSeries.setMarkers([]);
               addPositionLines(pos);
               if (isNew) speak(`${SYMBOL} ${pos.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
             }
@@ -1615,10 +1640,25 @@
                 speak(`${sym} 订单已接受`, true);
                 showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
                 break;
-              case 'FILLED':
+              case 'FILLED': {
                 speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
                 showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                // 成交标记（蓝色/红色箭头）
+                const fillTime = lastTickTime || currentBars[currentBars.length - 1]?.time;
+                if (fillTime) {
+                  const isBuy = o.side === 'BUY';
+                  orderMarkers.push({
+                    time: fillTime,
+                    position: isBuy ? 'belowBar' : 'aboveBar',
+                    color: isBuy ? '#2196f3' : '#ef5350',
+                    shape: isBuy ? 'arrowUp' : 'arrowDown',
+                    text: `${isBuy ? '开多' : '开空'} @${o.last_px}`,
+                    size: 1,
+                  });
+                  refreshMarkers();
+                }
                 break;
+              }
               case 'PARTIALLY_FILLED':
                 speak(`${sym} 订单部分成交`, true);
                 showToast(`🔶 ${sym} 部分成交 @${o.last_px} x${o.last_qty}`, 'tip');
@@ -1631,10 +1671,24 @@
                 speak(`${sym} 订单被风控拒绝，${o.reason || ''}`, true);
                 showToast(`❌ ${sym} 风控拒绝: ${o.reason || ''}`, 'warn');
                 break;
-              case 'TRIGGERED':
+              case 'TRIGGERED': {
                 speak(`${sym} 止损单已触发，注意`, true);
                 showToast(`🔔 ${sym} 止损单触发`, 'tip');
+                // 止损触发标记（黄色圆点）
+                const trigTime = lastTickTime || currentBars[currentBars.length - 1]?.time;
+                if (trigTime) {
+                  orderMarkers.push({
+                    time: trigTime,
+                    position: 'aboveBar',
+                    color: '#f59e0b',
+                    shape: 'circle',
+                    text: '止损触发',
+                    size: 0.8,
+                  });
+                  refreshMarkers();
+                }
                 break;
+              }
               case 'CANCELED':
                 showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
                 break;

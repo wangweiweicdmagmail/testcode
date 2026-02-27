@@ -598,9 +598,9 @@
         voiceBtn.style.borderColor = '#26a69a';
         voiceBtn.addEventListener('click', () => {
             voiceEnabled = !voiceEnabled;
-            voiceBtn.style.color       = voiceEnabled ? '#26a69a' : '#787b86';
+            voiceBtn.style.color = voiceEnabled ? '#26a69a' : '#787b86';
             voiceBtn.style.borderColor = voiceEnabled ? '#26a69a' : '#2a2e39';
-            voiceBtn.textContent       = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
+            voiceBtn.textContent = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
         });
         const _spokenCache = new Map();
         function speak(text, priority = false) {
@@ -620,6 +620,15 @@
 
         // 全局拖动状态（同一时刻只有一个面板在拖动）
         let activeDrag = null;
+
+        // 全局订单标记刷新函数（setMarkers 需完整数组，必须升序）
+        function refreshMarkers(sym) {
+            const s = state[sym];
+            s.candleSeries.setMarkers([...s.orderMarkers].sort((a, b) => a.time - b.time));
+        }
+
+        // 四图时间轴联动防递归忽
+        let isSyncing = false;
 
         // ── 生成单元格 HTML ─────────────────────────────────────
         function createCell(symbol) {
@@ -737,7 +746,7 @@
                 grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
                 crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                 rightPriceScale: { borderColor: '#2a2e39' },
-                timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false, fixLeftEdge: true },
+                timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false, fixLeftEdge: false },  // 允许视图向右拖过第一根 K 线
             });
 
             const candleSeries = chart.addCandlestickSeries({
@@ -779,6 +788,7 @@
             state[symbol] = {
                 symbol, chart, candleSeries,
                 stSeriesList: [], stLastDir: null, stLastSeries: null,
+                orderMarkers: [],  // 订单生命周期标记全量存储
             };
         }
 
@@ -863,15 +873,16 @@
                 });
             }
 
-            // 开仓 Marker（有入场时间时才画）
+            // 开仓 Marker（旧格式有 entryTime 时才画，实时格式通过 order:update FILLED 事件添加）
             if (entryTime) {
-                candleSeries.setMarkers([{
+                state[symbol].orderMarkers.push({
                     time: entryTime,
                     position: isLong ? 'belowBar' : 'aboveBar',
                     color: '#2196f3',
                     shape: isLong ? 'arrowUp' : 'arrowDown',
                     text: `${isLong ? 'BUY' : 'SELL'} @${entryPrice}`, size: 1,
-                }]);
+                });
+                refreshMarkers(symbol);
             }
 
             refreshPositionPanel(symbol, position);
@@ -958,6 +969,14 @@
                 updateHeader(symbol, m1_bars);
 
                 state[symbol].chart.timeScale().scrollToRealTime();
+                // 用官方 API 扩展可见逻辑范围左侧，让首根 K 线前留出 8 根棒的空白
+                const visRange = state[symbol].chart.timeScale().getVisibleLogicalRange();
+                if (visRange !== null) {
+                    state[symbol].chart.timeScale().setVisibleLogicalRange({
+                        from: visRange.from - 8,
+                        to: visRange.to,
+                    });
+                }
 
                 // ── 构建止损拖动 ctx ──
                 const s = state[symbol];
@@ -1227,11 +1246,25 @@
                         const posSym = payload.symbol;
                         if (posSym && state[posSym]) {
                             if (payload.closed) {
+                                // 平仓标记（橙色圆点）
+                                const ct = state[posSym].lastTickTime;
+                                if (ct) {
+                                    const wasLong = state[posSym].position
+                                        ? state[posSym].position.side !== 'SHORT' : true;
+                                    state[posSym].orderMarkers.push({
+                                        time: ct,
+                                        position: wasLong ? 'aboveBar' : 'belowBar',
+                                        color: '#ff9800',
+                                        shape: 'circle',
+                                        text: '平仓',
+                                        size: 0.8,
+                                    });
+                                    refreshMarkers(posSym);
+                                }
                                 clearPositionUI(posSym);
                                 speak(`${posSym} 仓位已平仓`, true);
                             } else {
                                 const isNew = !state[posSym].position;
-                                state[posSym].candleSeries.setMarkers([]);
                                 addPositionLines(posSym, payload);
                                 if (isNew) speak(`${posSym} ${payload.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
                             }
@@ -1250,10 +1283,28 @@
                                 speak(`${sym} 订单已接受`, true);
                                 showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
                                 break;
-                            case 'FILLED':
+                            case 'FILLED': {
                                 speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
                                 showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                                // 成交标记（蓝色/红色箭头）
+                                const fillSym = sym;
+                                if (state[fillSym]) {
+                                    const ft = state[fillSym].lastTickTime;
+                                    if (ft) {
+                                        const isBuy = o.side === 'BUY';
+                                        state[fillSym].orderMarkers.push({
+                                            time: ft,
+                                            position: isBuy ? 'belowBar' : 'aboveBar',
+                                            color: isBuy ? '#2196f3' : '#ef5350',
+                                            shape: isBuy ? 'arrowUp' : 'arrowDown',
+                                            text: `${isBuy ? '开多' : '开空'} @${o.last_px}`,
+                                            size: 1,
+                                        });
+                                        refreshMarkers(fillSym);
+                                    }
+                                }
                                 break;
+                            }
                             case 'PARTIALLY_FILLED':
                                 speak(`${sym} 订单部分成交`, true);
                                 showToast(`🔶 ${sym} 部分成交 @${o.last_px} x${o.last_qty}`, 'tip');
@@ -1266,10 +1317,27 @@
                                 speak(`${sym} 订单被风控拒绝，${o.reason || ''}`, true);
                                 showToast(`❌ ${sym} 风控拒绝: ${o.reason || ''}`, 'warn');
                                 break;
-                            case 'TRIGGERED':
+                            case 'TRIGGERED': {
                                 speak(`${sym} 止损单已触发，注意`, true);
                                 showToast(`🔔 ${sym} 止损单触发`, 'tip');
+                                // 止损触发标记（黄色圆点）
+                                const trigSym = sym;
+                                if (state[trigSym]) {
+                                    const tt = state[trigSym].lastTickTime;
+                                    if (tt) {
+                                        state[trigSym].orderMarkers.push({
+                                            time: tt,
+                                            position: 'aboveBar',
+                                            color: '#f59e0b',
+                                            shape: 'circle',
+                                            text: '止损触发',
+                                            size: 0.8,
+                                        });
+                                        refreshMarkers(trigSym);
+                                    }
+                                }
                                 break;
+                            }
                             case 'CANCELED':
                                 showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
                                 break;
@@ -1362,8 +1430,39 @@
             initChart(sym);
             bindEvents(sym);
         });
-        Promise.all(DEFAULT_SYMBOLS.map(sym => loadSymbol(sym)));
+        Promise.all(DEFAULT_SYMBOLS.map(sym => loadSymbol(sym))).then(() => {
+            // ── 四图时间轴联动（拖动/缩放任一图，其余三图同步）──────────
+            DEFAULT_SYMBOLS.forEach(sym => {
+                state[sym].chart.timeScale().subscribeVisibleTimeRangeChange(range => {
+                    if (isSyncing || !range) return;
+                    isSyncing = true;
+                    DEFAULT_SYMBOLS.forEach(other => {
+                        if (other !== sym) {
+                            try { state[other].chart.timeScale().setVisibleRange(range); } catch (_) { }
+                        }
+                    });
+                    isSyncing = false;
+                });
+
+                // ── 十字线联动（悬停任一图，其余三图同步显示十字线）──────
+                state[sym].chart.subscribeCrosshairMove(param => {
+                    if (!param || !param.time) return;
+                    DEFAULT_SYMBOLS.forEach(other => {
+                        if (other !== sym) {
+                            try {
+                                state[other].chart.setCrosshairPosition(
+                                    param.seriesData.get(state[sym].candleSeries)?.close ?? 0,
+                                    param.time,
+                                    state[other].candleSeries
+                                );
+                            } catch (_) { }
+                        }
+                    });
+                });
+            });
+        });
         connectWS();
+
     </script>
 </body>
 

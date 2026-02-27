@@ -173,7 +173,26 @@ cd frontend && node server.js
 | PDL | 🔴 红色点线 2px | 昨日最低价 |
 | PDC | ⬜ 灰白点线 2px | 昨日收盘价 |
 
+**订单生命周期标记**：
+
+| 标记 | 外观 | 触发时机 |
+|------|------|---------|
+| 开多/开空 | 蓝/红色 ↑↓ 箭头 | `order:update` FILLED |
+| 止损触发 | 黄色 ● 圆点 | `order:update` TRIGGERED |
+| 平仓 | 橙色 ● 圆点 | `position:update` closed |
+
+> 标记用 `orderMarkers` 全量数组统一管理，自动升序刷新，符合 LightweightCharts API 要求。
+
+### 四图总览（multi.html）
+
+2×2 网格同时显示四个标的实时 K 线图：
+
+- **时间轴联动**：拖动/缩放任意一张图，其余三张同步可见时间范围
+- **十字线联动**：悬停任意一张，其余三张同步十字线（`setCrosshairPosition`）
+- **订单标记**：每个标的独立记录完整订单生命周期
+
 ### 指标面板（右侧，单图 + indicators.html 四列排行）
+
 
 | 面板 | 积分规则 |
 |------|---------|
