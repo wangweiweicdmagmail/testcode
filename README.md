@@ -18,6 +18,20 @@ nautilus_ibkr_helloworld/
         └── indicators.html # 四列指标排行（M1 ST / M5 ST / EMA偏离 / 日内新高）
 ```
 
+## 架构设计
+
+![系统架构图](docs/architecture.png)
+
+**三条核心数据链路：**
+
+| 链路 | 路径 | 触发时机 |
+|------|------|---------|
+| 实时K线 | IBKR → strategy.py → Redis PUBLISH → server.js → WebSocket → 浏览器 | 每分钟K线收盘 |
+| 指标轮询 | 浏览器 → HTTP GET /api/* → server.js → Redis GET | 每30秒 |
+| 订单状态 | 浏览器下单 → order_actor.py → IBKR → Redis PUBLISH → WebSocket → 语音/Toast | 每次订单回报 |
+
+> Redis 是三层之间唯一的共享状态，引擎 / server.js / 浏览器三者可独立重启，互不影响。
+
 ## 依赖
 
 ### Python
