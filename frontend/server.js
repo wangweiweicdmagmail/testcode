@@ -300,10 +300,19 @@ function proxyToEngine(method, path, body, fallback) {
     });
 }
 
-// GET /api/account — 真实账户余额
+// GET /api/account — 真实账户余额（优先从 Redis account:funds 读取，引擎离线时 fallback 到 order_actor）
 app.get('/api/account', async (req, res) => {
+    try {
+        const raw = await redis.get('account:funds');
+        if (raw) {
+            return res.json(JSON.parse(raw));
+        }
+    } catch (e) {
+        console.warn('[account] Redis 读取失败，尝试大幅降级到 order_actor:', e.message);
+    }
+    // Redis 无数据时 fallback 到 order_actor
     const data = await proxyToEngine('GET', '/account', null,
-        { total_equity: 0, available_cash: 0, currency: 'USD', engine_offline: true });
+        { account_id: '', balances: [], ts: 0, engine_offline: true });
     res.json(data);
 });
 
@@ -360,8 +369,8 @@ redisSub.on("error", (err) => {
 });
 
 redisSub.on("ready", () => {
-    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:*`);
-    redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*").catch(console.error);
+    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:*`);
+    redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*").catch(console.error);
 });
 
 redisSub.on("pmessage", (_pattern, channel, message) => {

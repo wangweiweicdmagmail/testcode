@@ -824,6 +824,78 @@
       font-family: 'Roboto Mono', monospace, sans-serif;
       color: #d1d4dc;
     }
+
+    /* ─── 账户资金面板 ──────────────────────────────────────── */
+    #account-panel {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin: 0 auto;
+      padding: 4px 16px;
+      background: rgba(19, 23, 34, .5);
+      border: 1px solid #2a2e39;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: 'Roboto Mono', monospace, sans-serif;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #account-panel .acct-group {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 1px;
+    }
+
+    #account-panel .acct-label {
+      font-size: 9px;
+      color: #4b5563;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+
+    #account-panel .acct-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: #d1d4dc;
+      transition: color .3s;
+    }
+
+    #account-panel .acct-val.acct-free {
+      color: #26a69a;
+    }
+
+    #account-panel .acct-divider {
+      width: 1px;
+      height: 26px;
+      background: #2a2e39;
+    }
+
+    #account-panel .acct-ts {
+      font-size: 9px;
+      color: #4b5563;
+      margin-top: 1px;
+    }
+
+    /* 数字刷新闪烁 */
+    @keyframes acct-flash {
+      0% {
+        color: #26a69a;
+      }
+
+      60% {
+        color: #26a69a;
+      }
+
+      100% {
+        color: #d1d4dc;
+      }
+    }
+
+    .acct-flash {
+      animation: acct-flash 1.2s ease-out;
+    }
   </style>
 </head>
 
@@ -854,6 +926,29 @@
               id="ci-l"></span></span>
           <span class="ohlc-item"><span class="ohlc-label">C</span><span class="ohlc-val" id="ci-c"></span></span>
         </div>
+      </div>
+    </div>
+
+    <!-- 中间：账户资金面板 -->
+    <div id="account-panel" title="账户净资产 / 可用资金">
+      <div class="acct-group">
+        <span class="acct-label">Net Liq</span>
+        <span class="acct-val" id="acct-total">—</span>
+      </div>
+      <div class="acct-divider"></div>
+      <div class="acct-group">
+        <span class="acct-label">Available</span>
+        <span class="acct-val acct-free" id="acct-free">—</span>
+      </div>
+      <div class="acct-divider"></div>
+      <div class="acct-group">
+        <span class="acct-label">Currency</span>
+        <span class="acct-val" id="acct-currency" style="color:#787b86">USD</span>
+      </div>
+      <div class="acct-divider"></div>
+      <div class="acct-group" style="align-items:center">
+        <span class="acct-label">Updated</span>
+        <span class="acct-ts" id="acct-ts">—</span>
       </div>
     </div>
 
@@ -1534,6 +1629,47 @@
       ciBox.style.display = 'flex';
     });
 
+    // ─── 账户资金面板更新 ──────────────────────────────────────
+    function updateAccountPanel(data) {
+      // data: { account_id, balances: [{currency, total, free, locked}], ts }
+      const balances = data.balances || [];
+      const usd = balances.find(b => b.currency === 'USD') || balances[0];
+      if (!usd) return;
+
+      const fmt = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      const elTotal = document.getElementById('acct-total');
+      const elFree = document.getElementById('acct-free');
+      const elCurrency = document.getElementById('acct-currency');
+      const elTs = document.getElementById('acct-ts');
+
+      if (elTotal) {
+        elTotal.textContent = fmt(usd.total);
+        // 刷新闪烁效果
+        elTotal.classList.remove('acct-flash');
+        void elTotal.offsetWidth; // reflow
+        elTotal.classList.add('acct-flash');
+      }
+      if (elFree) {
+        elFree.textContent = fmt(usd.free);
+        elFree.classList.remove('acct-flash');
+        void elFree.offsetWidth;
+        elFree.classList.add('acct-flash');
+      }
+      if (elCurrency) elCurrency.textContent = usd.currency;
+      if (elTs && data.ts) {
+        const d = new Date(data.ts * 1000);
+        elTs.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+    }
+
+    // 初始加载账户资金（引擎已写入 Redis 的数据）
+    fetch('/api/account').then(r => r.json()).then(data => {
+      if (data && data.balances && data.balances.length > 0) {
+        updateAccountPanel(data);
+      }
+    }).catch(() => { }); // 引擎未启动时静默忽略
+
     // ─── WebSocket 实时更新 ──────────────────────────────────
     let lastTickTime = 0;  // 记录最近一次 tick 的时间戳，防止 kline:1m: 时间回退
     function connectWS() {
@@ -1541,6 +1677,12 @@
       ws.onmessage = ({ data }) => {
         try {
           const { channel, data: payload } = JSON.parse(data);
+
+          // ── 账户资金实时推送（不带 symbol 后缀，必须在通用过滤前处理）──
+          if (channel === 'account:update') {
+            updateAccountPanel(payload);
+            return;
+          }
 
           // ── Symbol 过滤：只处理当前标的的消息，其他 symbol 的 tick/kline 直接丢弃 ──
           // server 会广播所有 4 个 symbol 的消息，不过滤会导致时间戳混乱

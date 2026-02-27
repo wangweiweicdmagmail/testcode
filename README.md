@@ -44,7 +44,7 @@
 | 回测/实盘通用接口 | ~800 行 |
 | 纳秒级时间戳对齐、多标的事件排序 | ~300 行 |
 
-**本项目实际编写的核心代码**：`strategy.py` ~450 行 + `order_actor.py` ~220 行，却获得了 3000+ 行才能实现的工业级可靠性。
+**本项目实际编写的核心代码**：`strategy.py` ~530 行 + `order_actor.py` ~220 行，却获得了 3000+ 行才能实现的工业级可靠性。
 
 **个人量化者视角**：这套架构已超过大多数个人量化基础设施的成熟度，具备真正的生产部署能力：
 - ✅ 解耦、事件驱动、状态分离
@@ -81,6 +81,7 @@ nautilus_ibkr_helloworld/
 | 实时K线 | IBKR → strategy.py → Redis PUBLISH → server.js → WebSocket → 浏览器 | 每分钟K线收盘 |
 | 指标轮询 | 浏览器 → HTTP GET /api/* → server.js → Redis GET | 每30秒 |
 | 订单状态 | 浏览器下单 → order_actor.py → IBKR → Redis PUBLISH → WebSocket → 语音/Toast | 每次订单回报 |
+| 账户余额 | IBKR reqAccountSummary → AccountState 事件 → strategy.py → Redis → WebSocket → 工具栏 | 约每3分钟 |
 
 > Redis 是三层之间唯一的共享状态，引擎 / server.js / 浏览器三者可独立重启，互不影响。
 
@@ -245,10 +246,12 @@ python order_sender.py --bracket  # 括号单（市价 + 止损 + 定时移动�
 | `position:{SYMBOL}`      | 仓位信息 |
 | `settings:{SYMBOL}`      | 策略开关 |
 | `prev_day:{SYMBOL}`      | 昨日围栏 `{high, low, close}`（引擎启动时由日K写入） |
+| `account:funds`          | 账户资金快照 `{account_id, balances:[{currency,total,free,locked}], ts}` |
 | `kline:1m:{SYMBOL}`      | PUBLISH：1m K 线收盘事件 |
 | `kline:5m:{SYMBOL}`      | PUBLISH：5m K 线收盘事件（含 nh_score） |
 | `kline:1m:tick:{SYMBOL}` | PUBLISH：Tick 实时更新 |
 | `order:update`           | PUBLISH：订单状态变更（语音/Toast 用） |
+| `account:update`         | PUBLISH：账户余额变更（工具栏实时刷新） |
 | `nh:update`              | PUBLISH（server.js→前端）：5m 新高事件 |
 
 ## ⚠️ 项目核心要求
@@ -316,3 +319,29 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 - 每根 K 线收盘时自动重算浮盈（支持做空方向）
 - 平仓推送 `{closed: true}` 自动清空面板
 
+## 账户资金实时展示
+
+引擎通过 `msgbus.subscribe(topic="events.account.*")` 监听 NautilusTrader AccountState 事件（IBKR 自动每约3分钟刷新）：
+
+```
+IBKR reqAccountSummary → AccountState 事件
+   → strategy.py _on_account_state()
+   → redis.set("account:funds", {...})
+   → redis.publish("account:update", {...})
+   → server.js psubscribe("account:*")
+   → WebSocket 广播 → 工具栏账户面板实时刷新
+```
+
+**工具栏显示字段**：Net Liq（净资产）/ Available（可用资金，绿色）/ Currency / Updated（更新时间）
+
+**Redis 数据格式**：
+```json
+{ "account_id": "INTERACTIVE_BROKERS-F10251881", "balances": [{ "currency": "USD", "total": 719.49, "free": 719.49, "locked": 0.00 }], "ts": 1709012345 }
+```
+
+**验证命令**：
+```bash
+redis-cli get account:funds
+# 手动注入测试前端（引擎未启动时）
+redis-cli set account:funds '{"account_id":"test","balances":[{"currency":"USD","total":150000,"free":98000,"locked":52000}],"ts":1709012345}'
+```

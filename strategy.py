@@ -306,6 +306,19 @@ class BarLoggerStrategy(Strategy):
             self.log.error(f"[Strategy] Redis 连接失败: {e}")
             self._redis = None
 
+        # ── 订阅账户余额更新事件（IBKR execution client 自动 reqAccountSummary）──
+        # topic="events.account.*" 匹配 events.account.{account_id}
+        try:
+            self.msgbus.subscribe(topic="events.account.*", handler=self._on_account_state)
+            self.log.info("[Strategy] ✓ 账户事件订阅成功 (events.account.*)")
+        except Exception as e:
+            self.log.warning(f"[Strategy] 账户事件订阅失败（引擎尚未就绪？）: {e}")
+
+        # 延迟 10s 后做一次初始账户余额同步（等待 execution client 完成账户摘要加载）
+        t = threading.Timer(10.0, self._sync_account_to_redis)
+        t.daemon = True
+        t.start()
+
         # ── 计算历史数据目标日期 ────────────────────────────────────────
         # 实盘模式：加载今日数据  回测模式：加载上一个交易日（或指定日期）数据
         import datetime as _dt_mod
@@ -420,6 +433,99 @@ class BarLoggerStrategy(Strategy):
             self._redis.close()
         self.log.info(f"[Strategy] 停止，共收到实时 K 线 {self._bar_count} 根")
 
+    # ── 账户余额事件回调（NautilusTrader msgbus 广播）─────────────────────────
+    def _on_account_state(self, event) -> None:
+        """
+        接收 NautilusTrader 账户余额更新事件 (AccountState)。
+        IBKR execution client 每次从 reqAccountSummary 拿到最新 AccountBalance 后
+        会发布此事件（约每 3 分钟一次），将余额写入 Redis 并通知前端。
+        """
+        try:
+            from nautilus_trader.model.identifiers import Venue
+            account_id_str = str(event.account_id) if hasattr(event, 'account_id') else "unknown"
+
+            balances_data = []
+            if hasattr(event, 'balances') and event.balances:
+                for bal in event.balances:
+                    currency = str(bal.currency)
+                    total  = float(bal.total.as_double())  if bal.total  else 0.0
+                    free   = float(bal.free.as_double())   if bal.free   else 0.0
+                    locked = float(bal.locked.as_double()) if bal.locked else 0.0
+                    balances_data.append({
+                        "currency": currency,
+                        "total":    round(total,  2),
+                        "free":     round(free,   2),
+                        "locked":   round(locked, 2),
+                    })
+
+            if not balances_data:
+                self.log.debug("[Account] AccountState 事件无余额数据，跳过")
+                return
+
+            self._write_account_to_redis(account_id_str, balances_data)
+        except Exception as e:
+            self.log.warning(f"[Account] _on_account_state 处理失败: {e}")
+
+    def _sync_account_to_redis(self) -> None:
+        """
+        初始化时主动从 cache 读取账户余额并写入 Redis（避免等待第一次事件推送）。
+        在 on_start() 里延迟 10s 执行，等待 execution client 完成账户摘要加载。
+        """
+        try:
+            from nautilus_trader.model.identifiers import Venue
+
+            # 通过 Venue 获取账户对象
+            account = self.cache.account_for_venue(Venue("IB"))
+            if account is None:
+                self.log.warning("[Account] cache.account_for_venue('IB') 返回 None，账户尚未注册")
+                return
+
+            account_id_str = str(account.id)
+            balances_data = []
+
+            # balances() 返回 dict[Currency, AccountBalance]
+            for currency, bal in account.balances().items():
+                balances_data.append({
+                    "currency": str(currency),
+                    "total":    round(float(bal.total.as_double()),  2),
+                    "free":     round(float(bal.free.as_double()),   2),
+                    "locked":   round(float(bal.locked.as_double()), 2),
+                })
+
+            if not balances_data:
+                self.log.warning("[Account] 账户余额为空（可能 account summary 尚未加载），跳过")
+                return
+
+            self._write_account_to_redis(account_id_str, balances_data)
+        except Exception as e:
+            self.log.warning(f"[Account] _sync_account_to_redis 失败: {e}")
+
+    def _write_account_to_redis(self, account_id_str: str, balances_data: list) -> None:
+        """将账户余额数据写入 Redis 并 PUBLISH 通知前端"""
+        if not self._redis:
+            return
+        import time
+        payload = {
+            "account_id": account_id_str,
+            "balances": balances_data,
+            "ts": int(time.time()),
+        }
+        try:
+            self._redis.set("account:funds", json.dumps(payload))
+            self._redis.publish("account:update", json.dumps(payload))
+            # 打印主要 USD 余额
+            usd = next((b for b in balances_data if b["currency"] == "USD"), None)
+            if usd:
+                self.log.info(
+                    f"[Account] 余额已同步 Redis  "
+                    f"total={usd['total']:,.2f}  free={usd['free']:,.2f}  "
+                    f"locked={usd['locked']:,.2f}  USD"
+                )
+            else:
+                self.log.info(f"[Account] 余额已同步 Redis  {balances_data}")
+        except Exception as e:
+            self.log.warning(f"[Account] Redis 写入失败: {e}")
+
     # ── 仓位事件回调：将真实 IBKR 仓位同步到 Redis ───────────────────────
     def on_position_opened(self, event) -> None:
         self._sync_position_to_redis(event.instrument_id)
@@ -498,7 +604,7 @@ class BarLoggerStrategy(Strategy):
         sym = data.bar_type.instrument_id.symbol.value
 
         # ─ 日K：瘶取昨日 H/L/C 写入 Redis prev_day:{sym} ──────────────────
-        if data.bar_type.bar_spec.aggregation == BarAggregation.DAY:
+        if data.bar_type.spec.aggregation == BarAggregation.DAY:
             o, h, lo, c = float(data.open), float(data.high), float(data.low), float(data.close)
             et = self._et_fake_utc(data.ts_event)
             self._hist_daily[sym].append({"time": et, "high": h, "low": lo, "close": c})
