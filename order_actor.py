@@ -148,6 +148,9 @@ class OrderGatewayActor(Strategy):
         # accountSummary 实时缓存：{account_id: {currency: {tag: float}}}
         # 由引擎已有的 accountSummary-{account_id} 事件实时写入
         self._account_summary_cache: dict = {}
+        # 待提交的止损单：{entry_client_order_id: (sl_order, sl_tasks_params)}
+        # 入场单成交后在 on_order_filled 里提交
+        self._pending_sl: dict = {}
 
     # ------------------------------------------------------------------
     # 引擎 IB client 注入（main.py 在 node.build() 后调用）
@@ -615,26 +618,24 @@ class OrderGatewayActor(Strategy):
             self._log_submitted(event, order.client_order_id.value)
 
         elif event.order_type == "BRACKET":
-            # 括号单：市价入场 + 止损单，通过 IBKR OCA(ocaGroup) 实现联动取消
-            # 注：OrderList + parent_order_id 在 NT Cython 扩展里是只读属性，不可用
+            # 正确的 BRACKET 实现：
+            # 1. 只提交入场单（市价）
+            # 2. 入场单成交后（on_order_filled）再提交止损单
+            # OCA 方案不可用：入场单成交会触发 OCA 取消止损单
             if event.stop_loss is None:
                 self.log.error("[Gateway] BRACKET 单必须提供 stop_loss")
                 return
 
-            # 生成唯一 OCA 组名，确保两笔单联动取消
-            oca_group = f"BKT-{int(time.time_ns() // 1_000_000)}"
-            oca_extra = {"ocaGroup": oca_group, "ocaType": 2}
-
-            # 入场单（市价）：FA 分配 + OCA 字段
+            # 入场单（市价）：FA 分配 tags
             entry_order = self.order_factory.market(
                 instrument_id=instrument_id,
                 order_side=order_side,
                 quantity=quantity,
                 time_in_force=TimeInForce.DAY,
-                tags=self._fa_tags(extra_fields=oca_extra),
+                tags=self._fa_tags(),
             )
 
-            # 止损单：同一 OCA 组，GTC
+            # 止损单参数：暂不提交，存入 _pending_sl 等入场单成交后提交
             sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
             sl_price = instrument.make_price(Decimal(str(event.stop_loss)))
             sl_order = self.order_factory.stop_market(
@@ -643,37 +644,60 @@ class OrderGatewayActor(Strategy):
                 quantity=quantity,
                 trigger_price=sl_price,
                 time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(extra_fields=oca_extra),
+                tags=self._fa_tags(),
             )
 
-            # 分别提交两笔单
+            # 存入待提交字典，键为入场单的 client_order_id
+            self._pending_sl[entry_order.client_order_id.value] = (
+                sl_order,
+                list(event.sl_steps),
+                event.sl_step_secs,
+                instrument,
+            )
+
+            # 只提交入场单
             self.submit_order(entry_order)
-            self.submit_order(sl_order)
 
             self.log.info(
-                f"[Gateway] BRACKET 已提交 | OCA={oca_group} | "
+                f"[Gateway] BRACKET 入场单已提交 | "
                 f"Entry={entry_order.client_order_id} {order_side.name} qty={quantity} {instrument_id} | "
-                f"SL={sl_order.client_order_id} @ {event.stop_loss} | "
-                f"Steps={event.sl_steps} every {event.sl_step_secs}s"
+                f"止损待入场单成交后提交 @ {event.stop_loss}"
             )
-
-            # 注册止损价定时修改任务
-            for i, new_sl in enumerate(event.sl_steps):
-                delay = event.sl_step_secs * (i + 1)
-                task = asyncio.ensure_future(
-                    self._schedule_sl_modify(
-                        sl_order_id=sl_order.client_order_id.value,
-                        instrument=instrument,
-                        new_trigger_price=Decimal(str(new_sl)),
-                        delay_secs=delay,
-                        step_index=i + 1,
-                    )
-                )
-                self._sl_tasks.append(task)
 
         else:
             self.log.error(f"[Gateway] 不支持的订单类型: {event.order_type}")
             return
+
+    def on_order_filled(self, event) -> None:
+        """
+        入场单成交后提交止损单（BRACKET 完成正确时序）。
+        """
+        coid = event.client_order_id.value
+        if coid not in self._pending_sl:
+            return
+
+        sl_order, sl_steps, sl_step_secs, instrument = self._pending_sl.pop(coid)
+
+        self.log.info(
+            f"[Gateway] BRACKET 入场单 {coid} 已成交，"
+            f"现在提交止损单 {sl_order.client_order_id} @ {sl_order.trigger_price}"
+        )
+
+        self.submit_order(sl_order)
+
+        # 止损价定时修改任务
+        for i, new_sl in enumerate(sl_steps):
+            delay = sl_step_secs * (i + 1)
+            task = asyncio.ensure_future(
+                self._schedule_sl_modify(
+                    sl_order_id=sl_order.client_order_id.value,
+                    instrument=instrument,
+                    new_trigger_price=Decimal(str(new_sl)),
+                    delay_secs=delay,
+                    step_index=i + 1,
+                )
+            )
+            self._sl_tasks.append(task)
 
     def _log_submitted(self, event: "ExternalOrderCommand", client_order_id: str) -> None:
         """统一打印单笔订单提交成功日志"""
