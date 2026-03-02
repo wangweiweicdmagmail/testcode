@@ -615,26 +615,26 @@ class OrderGatewayActor(Strategy):
             self._log_submitted(event, order.client_order_id.value)
 
         elif event.order_type == "BRACKET":
-            # IBKR 原生 Bracket 订单组：入场单（parent）+ 止损单（child）
-            # 使用 NT 原生 submit_order_list，它会自动处理：
-            #   - 所有单 transmit=False，最后一个 transmit=True
-            #   - 止损单 parent_order_id → IBKR parentId（通过 order_id_map 自动映射）
+            # 括号单：市价入场 + 止损单，通过 IBKR OCA(ocaGroup) 实现联动取消
+            # 注：OrderList + parent_order_id 在 NT Cython 扩展里是只读属性，不可用
             if event.stop_loss is None:
                 self.log.error("[Gateway] BRACKET 单必须提供 stop_loss")
                 return
 
-            # 入场单（市价）：FA 分配 tags
+            # 生成唯一 OCA 组名，确保两笔单联动取消
+            oca_group = f"BKT-{int(time.time_ns() // 1_000_000)}"
+            oca_extra = {"ocaGroup": oca_group, "ocaType": 2}
+
+            # 入场单（市价）：FA 分配 + OCA 字段
             entry_order = self.order_factory.market(
                 instrument_id=instrument_id,
                 order_side=order_side,
                 quantity=quantity,
                 time_in_force=TimeInForce.DAY,
-                tags=self._fa_tags(),
+                tags=self._fa_tags(extra_fields=oca_extra),
             )
 
-            # 止损子单：parent_order_id 设为入场单的 client_order_id
-            # NT _submit_order_list 会自动将其映射为 IBKR 整数 orderId
-            # 止损单不带 FA tags（IBKR 不允许对平仓单使用 FA 分配）
+            # 止损单：同一 OCA 组，GTC
             sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
             sl_price = instrument.make_price(Decimal(str(event.stop_loss)))
             sl_order = self.order_factory.stop_market(
@@ -643,25 +643,17 @@ class OrderGatewayActor(Strategy):
                 quantity=quantity,
                 trigger_price=sl_price,
                 time_in_force=TimeInForce.GTC,
-                parent_order_id=entry_order.client_order_id,
-                # 止损单不带 FA 分配 tags：
-                # IBKR 不允许对平仓单使用 faGroup/faMethod（会导致 code=202 取消）
-                tags=None,
+                tags=self._fa_tags(extra_fields=oca_extra),
             )
 
-            # 使用 NT 原生 OrderList 提交：
-            # _submit_order_list 会自动设置 transmit=False/True 和 parentId 整数映射
-            order_list_id = OrderListId(str(self._clock.timestamp_ns()))
-            order_list = OrderList(
-                order_list_id=order_list_id,
-                orders=[entry_order, sl_order],
-            )
-            self.submit_order_list(order_list)
+            # 分别提交两笔单
+            self.submit_order(entry_order)
+            self.submit_order(sl_order)
 
             self.log.info(
-                f"[Gateway] BRACKET OrderList 已提交 | "
+                f"[Gateway] BRACKET 已提交 | OCA={oca_group} | "
                 f"Entry={entry_order.client_order_id} {order_side.name} qty={quantity} {instrument_id} | "
-                f"SL={sl_order.client_order_id} @ {event.stop_loss} (parentId={entry_order.client_order_id}) | "
+                f"SL={sl_order.client_order_id} @ {event.stop_loss} | "
                 f"Steps={event.sl_steps} every {event.sl_step_secs}s"
             )
 
