@@ -668,36 +668,6 @@ class OrderGatewayActor(Strategy):
             self.log.error(f"[Gateway] 不支持的订单类型: {event.order_type}")
             return
 
-    def on_order_filled(self, event) -> None:
-        """
-        入场单成交后提交止损单（BRACKET 完成正确时序）。
-        """
-        coid = event.client_order_id.value
-        if coid not in self._pending_sl:
-            return
-
-        sl_order, sl_steps, sl_step_secs, instrument = self._pending_sl.pop(coid)
-
-        self.log.info(
-            f"[Gateway] BRACKET 入场单 {coid} 已成交，"
-            f"现在提交止损单 {sl_order.client_order_id} @ {sl_order.trigger_price}"
-        )
-
-        self.submit_order(sl_order)
-
-        # 止损价定时修改任务
-        for i, new_sl in enumerate(sl_steps):
-            delay = sl_step_secs * (i + 1)
-            task = asyncio.ensure_future(
-                self._schedule_sl_modify(
-                    sl_order_id=sl_order.client_order_id.value,
-                    instrument=instrument,
-                    new_trigger_price=Decimal(str(new_sl)),
-                    delay_secs=delay,
-                    step_index=i + 1,
-                )
-            )
-            self._sl_tasks.append(task)
 
     def _log_submitted(self, event: "ExternalOrderCommand", client_order_id: str) -> None:
         """统一打印单笔订单提交成功日志"""
@@ -828,6 +798,29 @@ class OrderGatewayActor(Strategy):
         self._pub_order("FILLED", event)
         # 成交后延迟 3s 同步账户余额（等 IBKR 更新保证金）
         self._trigger_account_sync(delay=3.0)
+
+        # BRACKET：入场单成交后自动提交止损单
+        coid = event.client_order_id.value
+        if coid in self._pending_sl:
+            sl_order, sl_steps, sl_step_secs, instrument = self._pending_sl.pop(coid)
+            self.log.info(
+                f"[Gateway] BRACKET 入场单 {coid} 已成交，"
+                f"提交止损单 {sl_order.client_order_id} @ {sl_order.trigger_price}"
+            )
+            self.submit_order(sl_order)
+            # 止损价定时修改任务
+            for i, new_sl in enumerate(sl_steps):
+                delay = sl_step_secs * (i + 1)
+                task = asyncio.ensure_future(
+                    self._schedule_sl_modify(
+                        sl_order_id=sl_order.client_order_id.value,
+                        instrument=instrument,
+                        new_trigger_price=Decimal(str(new_sl)),
+                        delay_secs=delay,
+                        step_index=i + 1,
+                    )
+                )
+                self._sl_tasks.append(task)
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
