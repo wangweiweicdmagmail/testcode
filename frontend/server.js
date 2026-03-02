@@ -322,6 +322,12 @@ app.get('/api/positions', async (req, res) => {
     res.json(data);
 });
 
+// GET /api/active-orders — 当前活跃订单（入场价 + 止损价），供前端恢复价格线
+app.get('/api/active-orders', async (req, res) => {
+    const data = await proxyToEngine('GET', '/active-orders', null, {});
+    res.json(data);
+});
+
 // POST /api/order/:symbol — 下单代理
 app.post('/api/order/:symbol', async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();

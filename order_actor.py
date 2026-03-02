@@ -599,6 +599,53 @@ class OrderGatewayActor(Strategy):
             self.log.warning(f"[Gateway] _async_get_positions 失败: {e}")
         return result
 
+    def get_active_orders(self) -> dict:
+        """
+        返回当前活跃的入场价和止损单信息，供前端恢复价格线显示。
+        格式：{symbol: {entry: {...}, stop_loss: {...}}}
+        """
+        if self._loop is None:
+            return {}
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_get_active_orders(), self._loop
+        )
+        try:
+            return future.result(timeout=3.0)
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_active_orders 失败: {e}")
+            return {}
+
+    async def _async_get_active_orders(self) -> dict:
+        """查询 cache 中 ACCEPTED 状态的订单和已打开的仓位，组合成前端可用的价格线数据"""
+        result = {}
+        try:
+            # 1. 已打开的仓位 → 入场价
+            for pos in self.cache.positions_open():
+                sym = pos.instrument_id.symbol.value
+                result.setdefault(sym, {})
+                result[sym]["entry"] = {
+                    "price": float(pos.avg_px_open),
+                    "side": "LONG" if pos.is_long else "SHORT",
+                    "quantity": float(pos.quantity),
+                }
+            # 2. ACCEPTED 状态的止损单（STOP_MARKET）
+            for order in self.cache.orders_open():
+                order_type = str(order.order_type).replace("OrderType.", "")
+                if order_type != "STOP_MARKET":
+                    continue
+                sym = order.instrument_id.symbol.value
+                result.setdefault(sym, {})
+                tp = getattr(order, "trigger_price", None)
+                result[sym]["stop_loss"] = {
+                    "price": float(tp) if tp else None,
+                    "side": str(order.side).replace("OrderSide.", ""),
+                    "quantity": float(order.quantity),
+                    "client_order_id": str(order.client_order_id),
+                }
+        except Exception as e:
+            self.log.warning(f"[Gateway] _async_get_active_orders 失败: {e}")
+        return result
+
 
     # ------------------------------------------------------------------
     # ★ 标准 MessageBus 消息处理器
@@ -769,12 +816,18 @@ class OrderGatewayActor(Strategy):
                 val = getattr(event, field, None)
                 if val is not None:
                     msg[field] = str(val)
-            # 尝试从 order cache 拿 side 和 symbol
+            # 尝试从 order cache 拿 side、symbol、order_type、quantity、trigger_price
             try:
                 order = self.cache.order(event.client_order_id)
                 if order:
                     msg["side"] = str(order.side).replace("OrderSide.", "")
                     msg["symbol"] = str(order.instrument_id).split(".")[0]
+                    msg["order_type"] = str(order.order_type).replace("OrderType.", "")
+                    msg["quantity"] = str(order.quantity)
+                    # 止损单有 trigger_price
+                    tp = getattr(order, "trigger_price", None)
+                    if tp is not None:
+                        msg["trigger_price"] = str(tp)
             except Exception:
                 pass
             if extra:
@@ -996,11 +1049,13 @@ class OrderGatewayActor(Strategy):
 
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                """GET /account  —— 账户余额；GET /positions —— 当前仓位"""
+                """GET /account —— 账户余额；GET /positions —— 当前仓位；GET /active-orders —— 活跃订单"""
                 if self.path == "/account":
                     self._send(200, actor.get_account_info())
                 elif self.path == "/positions":
                     self._send(200, actor.get_positions())
+                elif self.path == "/active-orders":
+                    self._send(200, actor.get_active_orders())
                 else:
                     self._send(404, {"error": f"未知路径: {self.path}"})
 

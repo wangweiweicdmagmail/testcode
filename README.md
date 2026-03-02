@@ -178,11 +178,23 @@ cd frontend && node server.js
 
 | 标记 | 外观 | 触发时机 |
 |------|------|---------|
-| 开多/开空 | 蓝/红色 ↑↓ 箭头 | `order:update` FILLED |
+| 开多/开空 | 蓝/红色 ↑↓ 箭头 | `order:update` FILLED（入场单） |
+| 止损平仓 | 橙色 ↑↓ 箭头 | `order:update` FILLED（止损单） |
 | 止损触发 | 黄色 ● 圆点 | `order:update` TRIGGERED |
 | 平仓 | 橙色 ● 圆点 | `position:update` closed |
 
 > 标记用 `orderMarkers` 全量数组统一管理，自动升序刷新，符合 LightweightCharts API 要求。
+
+**执行中订单价格线**（实时显示 + 页面刷新恢复）：
+
+| 价格线 | 颜色 | 线型 | 触发事件 | 消失条件 |
+|--------|------|------|---------|---------|
+| ▲ 多 / ▼ 空 @入场价 | 绿 / 红 实线 2px | Solid | `order:update` FILLED（MARKET） | 止损成交 / 手动平仓 |
+| ✖ 止损 @止损价 | 橙红 `#ff6b35` 虚线 1px | Dashed | `order:update` ACCEPTED（STOP_MARKET） | 止损成交 / 撤单 |
+
+- **页面刷新后自动恢复**：`GET /api/active-orders` 从引擎拉取当前持仓和止损单，重绘价格线
+- **实时更新**：WebSocket `order:update` 事件驱动，无需轮询
+- **仓位面板联动**：价格线更新时同步刷新仓位面板开仓价和止损价字段
 
 ### 四图总览（multi.html）
 

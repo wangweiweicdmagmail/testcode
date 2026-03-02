@@ -1211,6 +1211,75 @@
     let orderDir = 'BUY'; // 'BUY' | 'SELL'
     let isDragging = false;
 
+    // ─── 活跃订单价格线管理 ────────────────────────────────────
+    // 记录引擎活跃订单的价格线对象，用于更新/删除
+    let activeOrderLines = {
+      entryLine: null,   // 入场价 priceLine
+      slLine: null,      // 止损价 priceLine
+      entryData: null,   // { price, side, qty }
+      slData: null,      // { price, qty }
+    };
+
+    function setEntryLine(price, side, qty) {
+      // 先清旧线
+      if (activeOrderLines.entryLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.entryLine); } catch (e) { }
+        activeOrderLines.entryLine = null;
+      }
+      if (!price) return;
+      const isLong = side === 'BUY' || side === 'LONG';
+      const color = isLong ? '#26a69a' : '#ef5350';
+      activeOrderLines.entryLine = candleSeries.createPriceLine({
+        price,
+        color,
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: `${isLong ? '▲ 多' : '▼ 空'} @${price.toFixed(2)} x${qty}`,
+      });
+      activeOrderLines.entryData = { price, side, qty };
+      // 同步更新仓位面板止损字段（如已有 slData）
+      if (currentPosition) {
+        currentPosition.avg_px_open = price;
+        refreshPositionPanel(currentPosition);
+      }
+    }
+
+    function setSlLine(price, qty) {
+      if (activeOrderLines.slLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.slLine); } catch (e) { }
+        activeOrderLines.slLine = null;
+      }
+      if (!price) return;
+      activeOrderLines.slLine = candleSeries.createPriceLine({
+        price,
+        color: '#ff6b35',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `✖ 止损 @${price.toFixed(2)} x${qty}`,
+      });
+      activeOrderLines.slData = { price, qty };
+      // 同步更新面板止损价
+      if (currentPosition) {
+        currentPosition.stop_loss = price;
+        refreshPositionPanel(currentPosition);
+      }
+    }
+
+    function clearOrderLines() {
+      if (activeOrderLines.entryLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.entryLine); } catch (e) { }
+        activeOrderLines.entryLine = null;
+      }
+      if (activeOrderLines.slLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.slLine); } catch (e) { }
+        activeOrderLines.slLine = null;
+      }
+      activeOrderLines.entryData = null;
+      activeOrderLines.slData = null;
+    }
+
     // ─── 语音提醒模块 ─────────────────────────────────────
     // 语音默认开启（用户可手动关闭）
     let voiceEnabled = true;
@@ -1670,6 +1739,32 @@
       }
     }).catch(() => { }); // 引擎未启动时静默忽略
 
+    // 初始加载活跃订单（页面刷新后恢复入场价线和止损价线）
+    fetch('/api/active-orders').then(r => r.json()).then(activeOrders => {
+      const symData = activeOrders[SYMBOL];
+      if (!symData) return;
+      if (symData.entry) {
+        const { price, side, quantity } = symData.entry;
+        setEntryLine(price, side === 'LONG' ? 'BUY' : 'SELL', quantity);
+        // 若还没有 currentPosition，初始化它
+        if (!currentPosition) {
+          currentPosition = {
+            symbol: SYMBOL,
+            side: symData.entry.side,
+            avg_px_open: price,
+            quantity,
+            unrealized_pnl: 0,
+            stop_loss: symData.stop_loss?.price ?? null,
+          };
+          document.getElementById('position-panel').style.display = 'block';
+          refreshPositionPanel(currentPosition);
+        }
+      }
+      if (symData.stop_loss && symData.stop_loss.price) {
+        setSlLine(symData.stop_loss.price, symData.stop_loss.quantity);
+      }
+    }).catch(() => { }); // 引擎离线时静默忽略
+
     // ─── WebSocket 实时更新 ──────────────────────────────────
     let lastTickTime = 0;  // 记录最近一次 tick 的时间戳，防止 kline:1m: 时间回退
     function connectWS() {
@@ -1774,27 +1869,62 @@
           // ── 引擎订单状态回执（order_actor.py 通过 Redis 发布）──
           if (channel === 'order:update') {
             const o = payload;
+            // Symbol 过滤：只处理当前标的
+            if (o.symbol && o.symbol !== SYMBOL) return;
             const sym = o.symbol || SYMBOL;
-            const side = o.side === 'BUY' ? '做多' : '做空';
-            const id = (o.client_order_id || '').slice(-6); // 只显后6位
+            const sideLabel = o.side === 'BUY' ? '做多' : '做空';
+            const id = (o.client_order_id || '').slice(-6);
+            const orderType = o.order_type || '';
+            const qty = parseFloat(o.quantity || o.last_qty || 0);
+
             switch (o.status) {
               case 'ACCEPTED':
-                speak(`${sym} 订单已接受`, true);
-                showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                // 止损单接受 → 画止损价线
+                if (orderType === 'STOP_MARKET' && o.trigger_price) {
+                  const slP = parseFloat(o.trigger_price);
+                  setSlLine(slP, qty);
+                  showToast(`🛡 ${sym} 止损单已挂出 @${slP.toFixed(2)} x${qty}`, 'ok');
+                  speak(`${sym} 止损单已接受，价格 ${slP.toFixed(2)}`, true);
+                } else {
+                  speak(`${sym} 订单已接受`, true);
+                  showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                }
                 break;
               case 'FILLED': {
-                speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
-                showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
-                // 成交标记（蓝色/红色箭头）
+                if (orderType === 'MARKET' || orderType === '') {
+                  // 入场单成交 → 画入场价线
+                  const entryP = parseFloat(o.last_px);
+                  setEntryLine(entryP, o.side, qty);
+                  // 更新仓位面板
+                  if (!currentPosition) {
+                    currentPosition = {
+                      symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
+                      avg_px_open: entryP, quantity: qty,
+                      unrealized_pnl: 0, stop_loss: null,
+                    };
+                    document.getElementById('position-panel').style.display = 'block';
+                    refreshPositionPanel(currentPosition);
+                  }
+                  speak(`${sym} ${sideLabel}订单成交，成交价 ${o.last_px}`, true);
+                  showToast(`✅ ${sym} ${sideLabel}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                } else if (orderType === 'STOP_MARKET') {
+                  // 止损单触发成交 → 清除价格线，仓位平仓
+                  clearOrderLines();
+                  clearPositionUI();
+                  speak(`${sym} 止损触发成交，平仓成功`, true);
+                  showToast(`🔔 ${sym} 止损单成交 @${o.last_px}，仓位已平`, 'warn');
+                }
+                // 成交标记（箭头）
                 const fillTime = lastTickTime || currentBars[currentBars.length - 1]?.time;
                 if (fillTime) {
                   const isBuy = o.side === 'BUY';
+                  const isSlFill = orderType === 'STOP_MARKET';
                   orderMarkers.push({
                     time: fillTime,
                     position: isBuy ? 'belowBar' : 'aboveBar',
-                    color: isBuy ? '#2196f3' : '#ef5350',
+                    color: isSlFill ? '#f59e0b' : (isBuy ? '#2196f3' : '#ef5350'),
                     shape: isBuy ? 'arrowUp' : 'arrowDown',
-                    text: `${isBuy ? '开多' : '开空'} @${o.last_px}`,
+                    text: `${isSlFill ? '止损平' : (isBuy ? '开多' : '开空')} @${o.last_px}`,
                     size: 1,
                   });
                   refreshMarkers();
@@ -1814,9 +1944,9 @@
                 showToast(`❌ ${sym} 风控拒绝: ${o.reason || ''}`, 'warn');
                 break;
               case 'TRIGGERED': {
+                // 止损单触发（变为 market 执行，等待 FILLED）
                 speak(`${sym} 止损单已触发，注意`, true);
                 showToast(`🔔 ${sym} 止损单触发`, 'tip');
-                // 止损触发标记（黄色圆点）
                 const trigTime = lastTickTime || currentBars[currentBars.length - 1]?.time;
                 if (trigTime) {
                   orderMarkers.push({
@@ -1832,7 +1962,17 @@
                 break;
               }
               case 'CANCELED':
-                showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
+                // 止损单撤销 → 清价格线
+                if (orderType === 'STOP_MARKET') {
+                  if (activeOrderLines.slLine) {
+                    try { candleSeries.removePriceLine(activeOrderLines.slLine); } catch (e) { }
+                    activeOrderLines.slLine = null;
+                    activeOrderLines.slData = null;
+                  }
+                  showToast(`⛔ ${sym} 止损单已撤销 #${id}`, 'info');
+                } else {
+                  showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
+                }
                 break;
               case 'EXPIRED':
                 speak(`${sym} 订单已过期`, true);
