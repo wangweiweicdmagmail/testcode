@@ -106,7 +106,7 @@ IBG_HOST = "127.0.0.1"
 IBG_PORT = int(os.environ.get("IBG_PORT", "7496"))  # 实盘 TWS=7496 | 实盘 Gateway=4001 | 模拟 TWS=7497
 IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "2"))  # 多客户端并行时修改，避免冲突
 
-ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F19890576")  # FA 主账号
+ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
 
 # FA Group 配置（用于下单路由）
 FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
