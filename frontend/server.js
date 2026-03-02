@@ -384,8 +384,8 @@ redisSub.on("error", (err) => {
 });
 
 redisSub.on("ready", () => {
-    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:*`);
-    redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*").catch(console.error);
+    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:* / engine:*`);
+    redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*", "engine:*").catch(console.error);
 });
 
 redisSub.on("pmessage", (_pattern, channel, message) => {

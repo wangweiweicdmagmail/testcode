@@ -226,6 +226,11 @@ class OrderGatewayActor(Strategy):
         _poll_t.daemon = True
         _poll_t.start()
 
+        # 启动心跳线程（每 5s 向 Redis 发布 engine:heartbeat）
+        self._heartbeat_running = True
+        _hb_t = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        _hb_t.start()
+
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
         self.msgbus.unsubscribe(
@@ -245,6 +250,9 @@ class OrderGatewayActor(Strategy):
         if self._account_poll_timer and self._account_poll_timer.is_alive():
             self._account_poll_timer.cancel()
 
+        # 停止心跳
+        self._heartbeat_running = False
+
         if self._redis:
             self._redis.close()
 
@@ -254,6 +262,27 @@ class OrderGatewayActor(Strategy):
             ).start()
 
         self.log.info("[Gateway] OrderGatewayActor 已停止")
+
+    # ------------------------------------------------------------------
+    # 引擎心跳（每 5s 向 Redis 发布 engine:heartbeat 供前端显示状态）
+    # ------------------------------------------------------------------
+
+    def _heartbeat_loop(self) -> None:
+        """后台线程：每 5 秒发布一次心跳消息到 Redis"""
+        while self._heartbeat_running:
+            try:
+                if self._redis:
+                    self._redis.publish("engine:heartbeat", json.dumps({
+                        "ts": int(time.time()),
+                        "status": "alive",
+                    }))
+            except Exception:
+                pass
+            # 分段 sleep，使停止时能快速响应
+            for _ in range(50):  # 50 × 0.1s = 5s
+                if not self._heartbeat_running:
+                    return
+                time.sleep(0.1)
 
     # ------------------------------------------------------------------
     # 账户余额同步（FA Group 余额 → Redis）

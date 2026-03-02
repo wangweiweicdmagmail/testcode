@@ -989,6 +989,17 @@
         <button class="btn btn-open" id="btn-open">开仓</button>
         <button class="btn btn-close" id="btn-close">平仓</button>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
+        <!-- 引擎心跳指示器 -->
+        <div id="engine-heartbeat" title="引擎心跳" style="
+          display:flex;align-items:center;gap:5px;
+          font-size:12px;color:#787b86;">
+          <span id="hb-dot" style="
+            width:8px;height:8px;border-radius:50%;
+            background:#787b86;display:inline-block;
+            transition:background .5s;"></span>
+          <span id="hb-text">引擎 —</span>
+        </div>
+        <div style="width:1px;height:22px;background:#2a2e39"></div>
         <!-- 语音提醒开关 -->
         <button id="voice-toggle" title="语音提醒" style="
           background:none;border:1px solid #2a2e39;border-radius:4px;
@@ -1219,6 +1230,10 @@
       entryData: null,   // { price, side, qty }
       slData: null,      // { price, qty }
     };
+
+    // ─── 引擎心跳状态 ──────────────────────────────────────────
+    let lastHbTime = 0;       // 上次收到 engine:heartbeat 的时间戳（ms）
+    let engineOnline = false; // 引擎当前是否在线
 
     function setEntryLine(price, side, qty) {
       // 先清旧线
@@ -1772,6 +1787,23 @@
       ws.onmessage = ({ data }) => {
         try {
           const { channel, data: payload } = JSON.parse(data);
+
+          // ── 引擎心跳（engine:heartbeat）──────────────────────────────
+          if (channel === 'engine:heartbeat') {
+            const now = Date.now();
+            const wasOnline = engineOnline;
+            lastHbTime = now;
+            engineOnline = true;
+            const dot = document.getElementById('hb-dot');
+            const txt = document.getElementById('hb-text');
+            if (dot) dot.style.background = '#26a69a';
+            if (txt) txt.textContent = '引擎 在线';
+            if (!wasOnline) {
+              speak('引擎已上线', true);
+              showToast('✅ 引擎已上线', 'ok');
+            }
+            return;
+          }
 
           // ── 账户资金实时推送（不带 symbol 后缀，必须在通用过滤前处理）──
           if (channel === 'account:update') {
@@ -2411,6 +2443,26 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
     loadData();
     loadIndicators();
     connectWS();
+
+    // ─── 引擎心跳超时检查（每 5s 检查一次，超过 15s 无心跳 → 判定下线）──
+    setInterval(() => {
+      if (!lastHbTime) return; // 从未收到过心跳，不判断
+      const gap = Date.now() - lastHbTime;
+      const dot = document.getElementById('hb-dot');
+      const txt = document.getElementById('hb-text');
+      if (gap > 15000 && engineOnline) {
+        // 超时 → 引擎下线
+        engineOnline = false;
+        if (dot) dot.style.background = '#ef5350';
+        if (txt) txt.textContent = '引擎 离线';
+        speak('警告，引擎已离线', true);
+        showToast('⚠️ 引擎已离线！', 'warn');
+      } else if (gap <= 15000 && engineOnline) {
+        // 正常 → 更新秒数显示
+        const sec = Math.floor(gap / 1000);
+        if (txt) txt.textContent = `引擎 ${sec}s`;
+      }
+    }, 5000);
 
     // ─── 30s 一致性巡检：对比 active-orders API 与本地状态 ──────────────
     // 兜底机制：漏事件、引擎重启、TWS 手动操作后自动修复价格线
