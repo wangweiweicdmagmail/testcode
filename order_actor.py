@@ -1166,6 +1166,31 @@ class OrderGatewayActor(Strategy):
                     self._send(200, actor.get_positions())
                 elif self.path == "/active-orders":
                     self._send(200, actor.get_active_orders())
+                elif self.path == "/debug-orders":
+                    # 调试：打印 cache 里所有订单和持仓状态
+                    try:
+                        orders_info = []
+                        for o in actor.cache.orders():
+                            orders_info.append({
+                                "client_order_id": str(o.client_order_id),
+                                "order_type": str(o.order_type).replace("OrderType.", ""),
+                                "status": str(o.status).replace("OrderStatus.", ""),
+                                "symbol": str(o.instrument_id).split(".")[0],
+                                "side": str(o.side).replace("OrderSide.", ""),
+                                "trigger_price": str(getattr(o, "trigger_price", None)),
+                                "quantity": str(o.quantity),
+                            })
+                        positions_info = []
+                        for p in actor.cache.positions_open():
+                            positions_info.append({
+                                "symbol": p.instrument_id.symbol.value,
+                                "side": "LONG" if p.is_long else "SHORT",
+                                "qty": float(p.quantity),
+                                "avg_px": float(p.avg_px_open),
+                            })
+                        self._send(200, {"orders": orders_info, "positions": positions_info})
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
                 else:
                     self._send(404, {"error": f"未知路径: {self.path}"})
 
