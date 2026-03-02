@@ -445,10 +445,65 @@ class OrderGatewayActor(Strategy):
             self.log.warning(f"[Account] Redis 写入失败: {e}")
 
     def _trigger_account_sync(self, delay: float = 3.0) -> None:
-        """延迟 delay 秒后触发一次账户余额同步（订单事件后调用）"""
-        t = threading.Timer(delay, self._sync_account_to_redis)
+        """
+        订单事件后触发一次账户余额刷新。
+
+        不读旧缓存，而是重新发起 reqAccountSummary(fa_group) 请求，
+        等 10s 收集 IBKR 最新数据后写入 Redis。
+        避免：成交/撤单后余额未更新的问题。
+        """
+        def _do_refresh():
+            if self._ib_client is None:
+                return
+            fa_group = self.config.fa_group
+            if not fa_group:
+                return
+            try:
+                from ibapi.account_summary_tags import AccountSummaryTags
+                req_id = self._ib_client._next_req_id()
+                query_cache: dict = {}
+                target_req_id = req_id
+                original_process = self._ib_client.process_account_summary
+
+                async def _patched(*, req_id, account_id, tag, value, currency):
+                    if req_id == target_req_id and currency and tag:
+                        if account_id not in query_cache:
+                            query_cache[account_id] = {}
+                        if currency not in query_cache[account_id]:
+                            query_cache[account_id][currency] = {}
+                        try:
+                            query_cache[account_id][currency][tag] = float(value)
+                        except (ValueError, TypeError):
+                            pass
+                    await original_process(req_id=req_id, account_id=account_id,
+                                           tag=tag, value=value, currency=currency)
+
+                self._ib_client.process_account_summary = _patched
+                self._ib_client._eclient.reqAccountSummary(req_id, fa_group, AccountSummaryTags.AllTags)
+                self.log.debug(f"[Account] 订单事件后刷新账户余额 req_id={req_id}，等待 10s")
+
+                def _finish():
+                    self._ib_client.process_account_summary = original_process
+                    try:
+                        self._ib_client._eclient.cancelAccountSummary(req_id)
+                    except Exception:
+                        pass
+                    if query_cache:
+                        self._account_summary_cache = query_cache
+                    self._sync_account_to_redis()
+
+                t2 = threading.Timer(10.0, _finish)
+                t2.daemon = True
+                t2.start()
+            except Exception as e:
+                self.log.warning(f"[Account] _trigger_account_sync 失败: {e}")
+                # fallback：直接读旧缓存
+                self._sync_account_to_redis()
+
+        t = threading.Timer(delay, _do_refresh)
         t.daemon = True
         t.start()
+
 
     # ------------------------------------------------------------------
     # 账户 & 仓位查询（供 HTTP GET /account 和 /positions 调用）
