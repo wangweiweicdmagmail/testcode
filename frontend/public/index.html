@@ -1465,49 +1465,30 @@
       if (!position) return;
       currentPosition = position;
 
-      // 统一字段：真实数据优先，兜底旧格式
+      // 统一字段：真实数据优先，兼底旧格式
       const entryPrice = position.avg_px_open ?? position.entry_price;
       const stopLoss = position.stop_loss;
       const qty = position.quantity;
       const side = position.side || (position.entry_price ? 'LONG' : null);
-      const entryTime = position.entry_time;      // 旧格式才有
       const isLong = side !== 'SHORT';
 
       if (!entryPrice) return;
 
-      // 开仓价线（蓝色虚线）
-      candleSeries.createPriceLine({
-        price: entryPrice,
-        color: "#2196f3",
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `开仓 ${entryPrice.toFixed ? entryPrice.toFixed(2) : entryPrice}`,
-      });
-
-      // 止损价线（红色虚线，无止损时不画）
-      if (stopLoss) {
-        candleSeries.createPriceLine({
-          price: stopLoss,
-          color: "#ef5350",
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: `止损 ${stopLoss}`,
-        });
+      // 开仓价线：改用 setEntryLine（避免与 order:update FILLED 重复画线）
+      if (!activeOrderLines.entryLine) {
+        setEntryLine(
+          typeof entryPrice === 'number' ? entryPrice : parseFloat(entryPrice),
+          isLong ? 'BUY' : 'SELL',
+          typeof qty === 'number' ? qty : parseFloat(qty || 0)
+        );
       }
 
-      // 开仓 Marker（旧格式有 entryTime 时才画，实时格式通过 order:update FILLED 事件添加）
-      if (entryTime) {
-        orderMarkers.push({
-          time: entryTime,
-          position: isLong ? "belowBar" : "aboveBar",
-          color: "#2196f3",
-          shape: isLong ? "arrowUp" : "arrowDown",
-          text: `${isLong ? 'BUY' : 'SELL'} @${entryPrice}`,
-          size: 1,
-        });
-        refreshMarkers();
+      // 止损价线：改用 setSlLine
+      if (stopLoss && !activeOrderLines.slLine) {
+        setSlLine(
+          typeof stopLoss === 'number' ? stopLoss : parseFloat(stopLoss),
+          typeof qty === 'number' ? qty : parseFloat(qty || 0)
+        );
       }
 
       // 面板更新
@@ -1856,6 +1837,11 @@
                   setSlLine(slP, qty);
                   showToast(`🛡 ${sym} 止损单已挂出 @${slP.toFixed(2)} x${qty}`, 'ok');
                   speak(`${sym} 止损单已接受，价格 ${slP.toFixed(2)}`, true);
+                } else if (orderType === 'STOP_MARKET') {
+                  // 收到 STOP_MARKET ACCEPTED 但没有 trigger_price，记录日志供调试
+                  console.warn('[order:update] STOP_MARKET ACCEPTED 但 trigger_price 为空', o);
+                  speak(`${sym} 止损单已接受`, true);
+                  showToast(`✅ ${sym} 止损单已接受 #${id}`, 'ok');
                 } else {
                   speak(`${sym} 订单已接受`, true);
                   showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
@@ -1886,11 +1872,15 @@
                 if (fillTime) {
                   const isBuy = o.side === 'BUY';
                   const isSlFill = orderType === 'STOP_MARKET';
+                  // 止损单平仓：做多仓 SELL 止损→ aboveBar+arrowDown；做空仓 BUY 止损→ belowBar+arrowUp
+                  // 开仓单：做多 BUY → belowBar+arrowUp；做空 SELL → aboveBar+arrowDown
+                  const markerPos = isBuy ? 'belowBar' : 'aboveBar';
+                  const markerShape = isBuy ? 'arrowUp' : 'arrowDown';
                   orderMarkers.push({
                     time: fillTime,
-                    position: isBuy ? 'belowBar' : 'aboveBar',
+                    position: markerPos,
                     color: isSlFill ? '#f59e0b' : (isBuy ? '#2196f3' : '#ef5350'),
-                    shape: isBuy ? 'arrowUp' : 'arrowDown',
+                    shape: markerShape,
                     text: `${isSlFill ? '止损平' : (isBuy ? '开多' : '开空')} @${o.last_px}`,
                     size: 1,
                   });
