@@ -861,9 +861,9 @@ class OrderGatewayActor(Strategy):
             try:
                 order = self.cache.order(event.client_order_id)
                 if order:
-                    msg["side"] = str(order.side).replace("OrderSide.", "")
+                    msg["side"] = order.side.name   # BUY / SELL（.name 而非 str()，避免取到整数值）
                     msg["symbol"] = str(order.instrument_id).split(".")[0]
-                    msg["order_type"] = str(order.order_type).replace("OrderType.", "")
+                    msg["order_type"] = order.order_type.name  # MARKET / STOP_MARKET 等
                     msg["quantity"] = str(order.quantity)
                     # 止损单有 trigger_price
                     tp = getattr(order, "trigger_price", None)
