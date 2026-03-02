@@ -44,7 +44,7 @@
 | 回测/实盘通用接口 | ~800 行 |
 | 纳秒级时间戳对齐、多标的事件排序 | ~300 行 |
 
-**本项目实际编写的核心代码**：`strategy.py` ~530 行 + `order_actor.py` ~220 行，却获得了 3000+ 行才能实现的工业级可靠性。
+**本项目实际编写的核心代码**：`strategy.py` ~430 行 + `order_actor.py` ~400 行，却获得了 3000+ 行才能实现的工业级可靠性。
 
 **个人量化者视角**：这套架构已超过大多数个人量化基础设施的成熟度，具备真正的生产部署能力：
 - ✅ 解耦、事件驱动、状态分离
@@ -321,11 +321,19 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 
 ## 账户资金实时展示
 
-引擎通过 `msgbus.subscribe(topic="events.account.*")` 监听 NautilusTrader AccountState 事件（IBKR 自动每约3分钟刷新）：
+账户余额查询由 `OrderGatewayActor` 统一管理，复用引擎已有的 IBKR 连接查询 FA Group 聚合余额：
 
 ```
-IBKR reqAccountSummary → AccountState 事件
-   → strategy.py _on_account_state()
+主程序 main.py 将 IB exec client 注入 OrderGatewayActor
+   → on_start() 延迟 30s 后首次同步（等待引擎充分初始化）
+   → 定期轮询（默认每 3 分钟）兜底保活
+   → 订单成交/取消等事件后延迟 2-3s 主动触发同步（余额实时变化）
+
+_sync_account_to_redis():
+   ├─ 优先：eclient.reqAccountSummary(req_id, FA_GROUP, AllTags)
+   │       注册每个子账户 accountSummary-{id} 事件，等待 12s 收集并聚合
+   └─ Fallback：cache.account_for_venue("IB") 读主账户数据
+
    → redis.set("account:funds", {...})
    → redis.publish("account:update", {...})
    → server.js psubscribe("account:*")
@@ -334,14 +342,20 @@ IBKR reqAccountSummary → AccountState 事件
 
 **工具栏显示字段**：Net Liq（净资产）/ Available（可用资金，绿色）/ Currency / Updated（更新时间）
 
+**FA Group 配置**（`main.py`）：
+```python
+FA_GROUP      = os.environ.get("IB_FA_GROUP",  "dt_test")  # FA Group 名称
+FA_ACCOUNT_ID = os.environ.get("IB_FA_ACCOUNT_ID", "")      # 子账户 ID，如 "DU123456"（可选）
+```
+
 **Redis 数据格式**：
 ```json
-{ "account_id": "INTERACTIVE_BROKERS-F10251881", "balances": [{ "currency": "USD", "total": 719.49, "free": 719.49, "locked": 0.00 }], "ts": 1709012345 }
+{ "account_id": "dt_test", "balances": [{ "currency": "USD", "total": 719.49, "free": 719.49, "locked": 0.00 }], "ts": 1709012345 }
 ```
 
 **验证命令**：
 ```bash
 redis-cli get account:funds
 # 手动注入测试前端（引擎未启动时）
-redis-cli set account:funds '{"account_id":"test","balances":[{"currency":"USD","total":150000,"free":98000,"locked":52000}],"ts":1709012345}'
+redis-cli set account:funds '{"account_id":"dt_test","balances":[{"currency":"USD","total":150000,"free":98000,"locked":52000}],"ts":1709012345}'
 ```

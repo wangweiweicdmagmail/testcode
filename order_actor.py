@@ -25,6 +25,7 @@ OrderGatewayActor — 使用 NautilusTrader 标准 MessageBus 消息架构的订
 import asyncio
 import json
 import time
+import queue
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -134,6 +135,24 @@ class OrderGatewayActor(Strategy):
         self._sl_tasks: list[asyncio.Task] = []  # P5: 保存 task 引用，避免被 GC 或引擎停止时静默取消
         self._redis: "_redis_lib.Redis | None" = None  # Redis 确认客户端
 
+        # 引擎 IB client 引用（由 main.py 在 node.build() 后注入）
+        self._ib_client = None
+        # 账户余额定期轮询（充当兆底：订单事件已覆盖大部分情屦1）
+        self._account_poll_timer: threading.Timer | None = None
+        self._account_poll_running: bool = False
+        self._account_poll_interval: int = 120  # 定期轮询间隔（秒）
+
+    # ------------------------------------------------------------------
+    # 引擎 IB client 注入（main.py 在 node.build() 后调用）
+    # ------------------------------------------------------------------
+
+    def set_ib_client(self, ib_client) -> None:
+        """接收引擎的 InteractiveBrokersClient 引用，复用已有 TWS 连接"""
+        self._ib_client = ib_client
+        # node.build() 阶段 self.log 尚未初始化，用 print 避免异常
+        print("[Gateway] IB client 已注入 OrderGatewayActor，FA Group 余额将使用引擎连接")
+
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
@@ -186,6 +205,18 @@ class OrderGatewayActor(Strategy):
             import traceback
             self.log.error(traceback.format_exc())
 
+        # 延迟 10s 做初始账户余额同步（等待 IB client 注入 + accountSummary 加载完成）
+        _t = threading.Timer(30.0, self._sync_account_to_redis)  # 延迟 30s 等引擎充分初始化
+
+        _t.daemon = True
+        _t.start()
+
+        # 启动定期轮询（自人 15s 后开始，公充当兆底）
+        self._account_poll_running = True
+        _poll_t = threading.Timer(15.0, self._start_account_poll)
+        _poll_t.daemon = True
+        _poll_t.start()
+
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
         self.msgbus.unsubscribe(
@@ -200,12 +231,185 @@ class OrderGatewayActor(Strategy):
                 self.log.warning(f"[Gateway] 止损修改 task 已取消: {t}")
         self._sl_tasks.clear()
 
+        # 停止账户余额定期轮询
+        self._account_poll_running = False
+        if self._account_poll_timer and self._account_poll_timer.is_alive():
+            self._account_poll_timer.cancel()
+
+        if self._redis:
+            self._redis.close()
+
         if self._http_server:
             threading.Thread(
                 target=self._http_server.shutdown, daemon=True
             ).start()
 
         self.log.info("[Gateway] OrderGatewayActor 已停止")
+
+    # ------------------------------------------------------------------
+    # 账户余额同步（FA Group 余额 → Redis）
+    # ------------------------------------------------------------------
+
+    def _start_account_poll(self) -> None:
+        """账户余额定期轮询（兜底补偿，订单事件已覆盖大部分情况）"""
+        if not self._account_poll_running:
+            return
+        try:
+            self._sync_account_to_redis()
+        except Exception as e:
+            self.log.warning(f"[Account] 定期轮询异常: {e}")
+        finally:
+            if self._account_poll_running:
+                self._account_poll_timer = threading.Timer(
+                    self._account_poll_interval, self._start_account_poll
+                )
+                self._account_poll_timer.daemon = True
+                self._account_poll_timer.start()
+
+    def _sync_account_to_redis(self) -> None:
+        """
+        查询 FA Group（dt_test）账户余额并写入 Redis。
+
+        优先通过引擎已有 IB 连接调用 reqAccountSummary(FA_GROUP)。
+        fallback：通过 cache.account_for_venue 读取主账户聚合数据。
+        """
+        fa_group = self.config.fa_group
+        try:
+            # ── 方法 0：复用引擎 IB 连接查询 FA Group 余额 ──
+            if self._ib_client is not None and fa_group:
+                try:
+                    eclient = self._ib_client._eclient
+                    req_id  = self._ib_client._next_req_id()
+
+                    # 从 ib_client.accounts() 获取所有 managed sub-account IDs
+                    sub_accounts = self._ib_client.accounts()
+                    if not sub_accounts:
+                        raise ValueError("accounts() 返回空集合")
+                    self.log.info(f"[Account] accounts()={sub_accounts}  req_id={req_id}  fa_group={fa_group}")
+
+                    # {currency: {tag: float}} 累加所有子账户数据
+                    summary: dict = {}
+
+                    def _make_handler(aid: str):
+                        """为每个子账户创建回调（闭包防 aid 引用泄漏）"""
+                        def _on_summary(tag: str, value: str, currency: str) -> None:
+                            self.log.debug(f"[Account][cb] aid={aid} tag={tag} val={value} cur={currency}")
+                            if not currency:
+                                return
+                            if currency not in summary:
+                                summary[currency] = {}
+                            try:
+                                # 累加数值型字段（FA Group = 所有子账户汇总）
+                                existing = float(summary[currency].get(tag, 0.0))
+                                summary[currency][tag] = existing + float(value)
+                            except (ValueError, TypeError):
+                                summary[currency][tag] = value
+                        return _on_summary
+
+                    # 注册所有子账户的 accountSummary 事件回调
+                    # （事件名为 accountSummary-{account_id}，对应 process_account_summary 的路由）
+                    registered = []
+                    for aid in sub_accounts:
+                        event_name = f"accountSummary-{aid}"
+                        self._ib_client.subscribe_event(event_name, _make_handler(aid))
+                        registered.append(event_name)
+
+                    # 发起 FA Group 查询请求
+                    from ibapi.account_summary_tags import AccountSummaryTags
+                    eclient.reqAccountSummary(req_id, fa_group, AccountSummaryTags.AllTags)
+
+                    # 等待 12s 收集数据
+                    # accountSummaryEnd 在 wrapper.py 中不触发任何处理函数，用 sleep 代替
+                    # TWS 响应 reqAccountSummary 可能需要更长时间（引擎初始化时 bar 数据拥挤）
+                    import time as _time
+                    _time.sleep(12.0)
+
+                    # 取消请求 + 取消注册事件
+                    try:
+                        eclient.cancelAccountSummary(req_id)
+                    except Exception:
+                        pass
+                    for ename in registered:
+                        try:
+                            self._ib_client.unsubscribe_event(ename)
+                        except Exception:
+                            pass
+
+                    if summary:
+                        balances = []
+                        for currency, tags in summary.items():
+                            if not currency:
+                                continue
+                            net_liq   = tags.get("NetLiquidation",    0.0)
+                            avail     = tags.get("FullAvailableFunds", 0.0)
+                            init_mar  = tags.get("FullInitMarginReq",  0.0)
+                            maint_mar = tags.get("FullMaintMarginReq", 0.0)
+                            balances.append({
+                                "currency": currency,
+                                "total":  round(float(net_liq), 2),
+                                "free":   round(float(avail),   2),
+                                "locked": round(init_mar + maint_mar, 2),
+                            })
+                        if balances:
+                            self.log.info(f"[Account] ✓ FA Group={fa_group} 余额查询成功（引擎连接）")
+                            self._write_account_to_redis(fa_group, balances)
+                            return
+                        else:
+                            self.log.warning(f"[Account] FA Group={fa_group} 收集到空数据，fallback")
+                    else:
+                        self.log.warning(f"[Account] FA Group={fa_group} 5s 内无数据，fallback")
+                except Exception as e:
+                    self.log.warning(f"[Account] FA Group 查询异常: {e}，fallback")
+
+
+
+            # ── Fallback：cache.account_for_venue（主账户聚合数据）──
+            from nautilus_trader.model.identifiers import Venue
+            account = self.cache.account_for_venue(Venue("IB"))
+            if account is None:
+                self.log.warning("[Account] cache.account_for_venue('IB') 返回 None")
+                return
+            balances = []
+            for currency, bal in account.balances().items():
+                balances.append({
+                    "currency": str(currency),
+                    "total":    round(float(bal.total.as_double()),  2),
+                    "free":     round(float(bal.free.as_double()),   2),
+                    "locked":   round(float(bal.locked.as_double()), 2),
+                })
+            if balances:
+                account_id = str(account.id)
+                self.log.info(f"[Account] Fallback 余额  account={account_id}")
+                self._write_account_to_redis(account_id, balances)
+        except Exception as e:
+            self.log.warning(f"[Account] _sync_account_to_redis 失败: {e}")
+
+    def _write_account_to_redis(self, account_id: str, balances: list) -> None:
+        """将账户余额写入 Redis account:funds 并 PUBLISH account:update"""
+        if not self._redis:
+            return
+        payload = {
+            "account_id": account_id,
+            "balances": balances,
+            "ts": int(time.time()),
+        }
+        try:
+            self._redis.set("account:funds", json.dumps(payload))
+            self._redis.publish("account:update", json.dumps(payload))
+            usd = next((b for b in balances if b["currency"] == "USD"), None)
+            if usd:
+                self.log.info(
+                    f"[Account] 余额已同步 Redis  "
+                    f"total={usd['total']:,.2f}  free={usd['free']:,.2f}  USD"
+                )
+        except Exception as e:
+            self.log.warning(f"[Account] Redis 写入失败: {e}")
+
+    def _trigger_account_sync(self, delay: float = 3.0) -> None:
+        """延迟 delay 秒后触发一次账户余额同步（订单事件后调用）"""
+        t = threading.Timer(delay, self._sync_account_to_redis)
+        t.daemon = True
+        t.start()
 
     # ------------------------------------------------------------------
     # 账户 & 仓位查询（供 HTTP GET /account 和 /positions 调用）
@@ -561,6 +765,8 @@ class OrderGatewayActor(Strategy):
             f"佣金={event.commission}"
         )
         self._pub_order("FILLED", event)
+        # 成交后延迟 3s 同步账户余额（等 IBKR 更新保证金）
+        self._trigger_account_sync(delay=3.0)
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
@@ -574,6 +780,8 @@ class OrderGatewayActor(Strategy):
             f"剩余={event.leaves_qty}"
         )
         self._pub_order("PARTIALLY_FILLED", event)
+        # 部分成交后也更新余额
+        self._trigger_account_sync(delay=3.0)
 
     def on_order_canceled(self, event) -> None:
         """订单已取消"""
@@ -583,6 +791,8 @@ class OrderGatewayActor(Strategy):
             f"VenueOrderId={event.venue_order_id}"
         )
         self._pub_order("CANCELED", event)
+        # 撤单后更新余额（释放资金）
+        self._trigger_account_sync(delay=2.0)
 
     def on_order_expired(self, event) -> None:
         """订单已过期（DAY 单收市未成交）"""

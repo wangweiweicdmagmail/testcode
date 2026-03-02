@@ -108,9 +108,16 @@ IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "2"))  # 多客户端并行�
 
 ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F19890576")  # FA 主账号
 
-# FA Group 配置
+# FA Group 配置（用于下单路由）
 FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
 FA_METHOD = os.environ.get("IB_FA_METHOD", "NetLiq")   # EqualQuantity | AvailableEquity | NetLiq | PctChange
+
+# FA 子账户真实 IB ID（用于账户余额读取）
+# 说明：dt_test 是 FA Group 名称，IBKR API 以真实子账户 ID（如 DU123456）推送 AccountState 事件
+# 引擎通过 reqAccountSummary("All") 接收所有子账户数据，并以 accountSummary:{ID} 存入 cache
+# 配置此项后，strategy 将过滤事件流中的目标账户 + 优先读取该账户的 cache 数据
+# 如不填写，则使用主账户聚合数据（所有子账户余额之和）
+FA_ACCOUNT_ID = os.environ.get("IB_FA_ACCOUNT_ID", "")  # 如 "DU123456"，与 dt_test group 对应
 
 # K 线订阅合约（P6: 多标的）
 BAR_INSTRUMENT_ID = "AAPL.NASDAQ"   # 主合约（兼容旧配置）
@@ -218,6 +225,20 @@ node.trader.add_strategy(exit_manager)    # 注册独立止盈模块
 node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)
 node.add_exec_client_factory(IB, InteractiveBrokersLiveExecClientFactory)
 node.build()
+
+# ── 将引擎的 IB client 注入给 OrderGatewayActor，复用已有 TWS 连接查询 FA Group 余额 ──
+try:
+    from nautilus_trader.model.identifiers import ClientId
+    _exec_engine = node.trader._exec_engine
+    _ib_exec_client = _exec_engine._clients.get(ClientId("INTERACTIVE_BROKERS"))
+    if _ib_exec_client is not None and hasattr(_ib_exec_client, "_client"):
+        gateway_actor.set_ib_client(_ib_exec_client._client)
+        print("  ✓ IB client 已注入 OrderGatewayActor，FA Group 余额将使用引擎连接查询")
+    else:
+        print("  ⚠️ 未找到 IB exec client，账户余额将 fallback 到主账户聚合数据")
+except Exception as _e:
+    print(f"  ⚠️ IB client 注入失败: {_e}")
+
 
 if __name__ == "__main__":
     try:
