@@ -965,6 +965,75 @@ class OrderGatewayActor(Strategy):
         )
         self._pub_order("EXPIRED", event)
 
+    # ------------------------------------------------------------------
+    # 仓位生命周期回调（NautilusTrader 标准接口）
+    # 无论是系统下单还是 TWS 手动操作，只要仓位变化就会触发
+    # ------------------------------------------------------------------
+
+    def on_position_opened(self, event) -> None:
+        """仓位开仓（新建仓位时触发）"""
+        try:
+            pos = self.cache.position(event.position_id)
+            if pos is None:
+                return
+            sym = pos.instrument_id.symbol.value
+            self.log.info(
+                f"[Position] ✅ OPENED  {sym}  "
+                f"side={'LONG' if pos.is_long else 'SHORT'}  "
+                f"qty={pos.quantity}  avg_px={pos.avg_px_open}"
+            )
+            if self._redis:
+                self._redis.publish("order:update", json.dumps({
+                    "status": "POSITION_OPENED",
+                    "symbol": sym,
+                    "side": "LONG" if pos.is_long else "SHORT",
+                    "quantity": str(pos.quantity),
+                    "avg_px_open": str(pos.avg_px_open),
+                    "ts": int(time.time()),
+                }, ensure_ascii=False))
+        except Exception as e:
+            self.log.warning(f"[Position] on_position_opened 处理异常: {e}")
+
+    def on_position_changed(self, event) -> None:
+        """仓位变化（加仓、部分平仓等）"""
+        try:
+            pos = self.cache.position(event.position_id)
+            if pos is None:
+                return
+            sym = pos.instrument_id.symbol.value
+            self.log.info(f"[Position] 🔄 CHANGED  {sym}  qty={pos.quantity}")
+            if self._redis:
+                self._redis.publish("order:update", json.dumps({
+                    "status": "POSITION_CHANGED",
+                    "symbol": sym,
+                    "side": "LONG" if pos.is_long else "SHORT",
+                    "quantity": str(pos.quantity),
+                    "avg_px_open": str(pos.avg_px_open),
+                    "ts": int(time.time()),
+                }, ensure_ascii=False))
+        except Exception as e:
+            self.log.warning(f"[Position] on_position_changed 处理异常: {e}")
+
+    def on_position_closed(self, event) -> None:
+        """仓位已平（无论来源——系统止损/手动平仓/止盈都触发）"""
+        try:
+            sym = "UNKNOWN"
+            try:
+                sym = str(event.instrument_id).split(".")[0]
+            except Exception:
+                pass
+            self.log.info(f"[Position] 🏁 CLOSED  {sym}  仓位已平仓（来源：引擎/TWS 均触发）")
+            if self._redis:
+                self._redis.publish("order:update", json.dumps({
+                    "status": "POSITION_CLOSED",
+                    "symbol": sym,
+                    "ts": int(time.time()),
+                }, ensure_ascii=False))
+            # 平仓后触发余额更新
+            self._trigger_account_sync(delay=3.0)
+        except Exception as e:
+            self.log.warning(f"[Position] on_position_closed 处理异常: {e}")
+
     async def _schedule_sl_modify(
         self,
         sl_order_id: str,
