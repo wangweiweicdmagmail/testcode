@@ -357,22 +357,59 @@ class BarLoggerStrategy(Strategy):
             f"ST({self.config.st_period},{self.config.st_mult})  EMA{self.config.ema_period}"
         )
 
+        # ──【修复】等待合约加载（针对 IBKR secdefnj 慢的情况） ──
+        import time as _time
+        wait_start = _time.time()
+        while True:
+            missing = [str(iid) for iid in instrument_ids if self.cache.instrument(iid) is None]
+            if not missing:
+                break
+            if _time.time() - wait_start > 300:  # 最多等 5 分钟
+                self.log.error(f"[Strategy] ✗ 合约加载超时（5分钟上限），部分合约将缺失: {missing}")
+                break
+            self.log.info(f"[Strategy] ... 等待合约从 IBKR 加载中: {missing}")
+            _time.sleep(10.0)
+
+        # ──【异步初始化】将加载合约和订阅逻辑移出 on_start，防止阻塞引擎线程 ──
+        init_thread = threading.Thread(target=self._async_init, daemon=True)
+        init_thread.start()
+        self.log.info("[Strategy] 异步初始化线程已启动 (Awaiting instruments...)")
+
+    def _async_init(self) -> None:
+        """异步执行合约加载、历史拉取和实时订阅"""
+        instrument_ids = self._all_instrument_ids()
+        self.log.info(f"[Strategy][Async] 开始异步初始化 {len(instrument_ids)} 个标的")
+
+        # 1. 循环等待合约进入 cache
+        import time as _time
+        wait_start = _time.time()
+        while True:
+            missing = [str(iid) for iid in instrument_ids if self.cache.instrument(iid) is None]
+            if not missing:
+                self.log.info("[Strategy][Async] ✓ 所有合约已加载")
+                break
+            if _time.time() - wait_start > 300:  # 最多等 5 分钟
+                self.log.error(f"[Strategy][Async] ✗ 合约加载超时（5分钟上限），部分合约将缺失: {missing}")
+                break
+            _time.sleep(5.0)
+
+        # 2. 对每个就绪的合约执行初始化
         for iid in instrument_ids:
             sym = iid.symbol.value
             instrument = self.cache.instrument(iid)
             if instrument is None:
-                self.log.error(f"[Strategy] 合约未加载: {iid}")
                 continue
 
-            # 初始化状态机
-            self._st_m1[sym]     = _STState(self.config.st_period, self.config.st_mult)
-            self._ema_m1[sym]    = _EMAState(self.config.ema_period)
-            self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult)
-            self._ema_m5[sym]    = _EMAState(self.config.ema_period)
-            self._m5_bucket[sym] = _M5Bucket()
-            self.log.info(f"[Strategy] {sym}: 状态机初始化完成（ST M1/M5 + EMA21 M1/M5 + M5 聚合桶）")
+            # 初始化状态机（如果之前没初始化过）
+            if sym not in self._st_m1:
+                self._st_m1[sym]     = _STState(self.config.st_period, self.config.st_mult)
+                self._ema_m1[sym]    = _EMAState(self.config.ema_period)
+                self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult)
+                self._ema_m5[sym]    = _EMAState(self.config.ema_period)
+                self._m5_bucket[sym] = _M5Bucket()
+                self.log.info(f"[Strategy][Async] {sym}: 状态机初始化完成")
 
-            # 构造 BarType
+            # 构造 BarType 并请求历史数据
             bar_type = BarType(
                 iid,
                 BarSpecification(
@@ -382,46 +419,38 @@ class BarLoggerStrategy(Strategy):
                 ),
                 AggregationSource.EXTERNAL,
             )
+            self._bar_types[sym] = bar_type
 
-            # 向 IBKR 拉取历史 K 线
-            self._bar_types[sym] = bar_type   # 存储，刷写完成后视模式决定是否订阅实时
-            self.log.info(
-                f"[Strategy] {sym}: → request_bars() 起点 {hist_start_utc.strftime('%Y-%m-%d %H:%M UTC')}"
-            )
+            # 获取历史起点（今日 ET 日期已在 on_start 计算）
+            target_str = self._today_et_date
+            target_date = datetime.strptime(target_str, "%Y-%m-%d").date()
+            hist_start_utc = datetime(
+                target_date.year, target_date.month, target_date.day,
+                4, 0, 0, tzinfo=ZoneInfo("America/New_York")
+            ).astimezone(timezone.utc)
+
+            self.log.info(f"[Strategy][Async] {sym}: → request_bars(M1/DAY)")
             self.request_bars(bar_type, start=hist_start_utc)
 
-            # 额外请求日K（取昨日 H/L/C 围栏）
+            # 请求日K
             daily_bar_type = BarType(
                 iid,
-                BarSpecification(
-                    step=1,
-                    aggregation=BarAggregation.DAY,
-                    price_type=PriceType.LAST,
-                ),
+                BarSpecification(step=1, aggregation=BarAggregation.DAY, price_type=PriceType.LAST),
                 AggregationSource.EXTERNAL,
             )
-            # 拉取最近 5 个交易日的日K，确保能拿到昨日（周一可拉到上周五）
-            daily_start = hist_start_utc - timedelta(days=7)
-            self.request_bars(daily_bar_type, start=daily_start)
-            self.log.info(f"[Strategy] {sym}: → request_bars(DAY) 起点 {daily_start.strftime('%Y-%m-%d UTC')}")
+            self.request_bars(daily_bar_type, start=hist_start_utc - timedelta(days=7))
 
-            # 实盘模式才订阅 Tick（回测无需实时 tick）
+            # 非回测模式订阅 Tick
             if not self.config.backtest_mode:
                 try:
                     self.subscribe_quote_ticks(iid)
-                    self.log.info(f"[Strategy] {sym}: ✓ 订阅 QuoteTick（实盘）")
                 except Exception as e:
-                    self.log.warning(f"[Strategy] {sym}: ✗ QuoteTick 订阅失败 — {e}")
+                    self.log.warning(f"[Strategy][Async] {sym}: ✗ QuoteTick 订阅失败: {e}")
 
-            # 安排 Timer：15s 后刷写历史数据（实盘还会订阅实时）
-            delay = 15.0
-            t = threading.Timer(delay, self._flush_history_for, args=(sym,))
+            # 设置 15s 后刷写历史并订阅实时
+            t = threading.Timer(15.0, self._flush_history_for, args=(sym,))
             t.daemon = True
             t.start()
-            self.log.info(
-                f"[Strategy] {sym}: ✓ Timer 已设置 "
-                f"({delay:.0f}s 后刷写历史{'→不订阅实时' if self.config.backtest_mode else '→订阅实时'})"
-            )
 
     def on_stop(self) -> None:
         # 完全转交给 OrderGatewayActor 管理，strategy 不再负责账户余额
@@ -565,6 +594,10 @@ class BarLoggerStrategy(Strategy):
         }
         self._hist_m1[sym].append(bar_dict)
 
+        # ──【增量更新】如果初始历史已刷完，则后续进来的历史 bar 直接更新 Redis（用于轮询模式） ──
+        if self._hist_flushed.get(sym):
+            self._inc_update_redis(sym, bar_dict)
+
         # 每 50 根打一次进度日志
         n += 1
         if n % 50 == 0:
@@ -680,32 +713,80 @@ class BarLoggerStrategy(Strategy):
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:5m Redis 写入失败: {e}")
 
         # ── 步骤4：订阅实时 K 线（仅实盘模式）──────────────────────────
-        # 回测模式：数据已写入 Redis，不需要实时订阅，数据回放完毕
-        # 实盘模式：历史数据写完后才订阅实时 bar，确保数据顺序正确
         if self.config.backtest_mode:
-            self.log.info(
-                f"[FLUSH] {sym}: ✓ 回测完成，数据已写入 Redis（不订阅实时）"
-            )
+            self.log.info(f"[FLUSH] {sym}: ✓ 回测完成")
         else:
             bar_type = self._bar_types.get(sym)
             if bar_type:
                 self.subscribe_bars(bar_type)
-                self.log.info(
-                    f"[FLUSH] {sym}: ✓ 订阅实时 M1 K 线（历史预热完成）"
-                )
+                self.log.info(f"[FLUSH] {sym}: ✓ 已订阅实时 M1 (Source: EXTERNAL)")
+                # ──【兜底】启动每 60s 轮询拉取历史数据，防止 IBKR 实时流断路 ──
+                self._schedule_poll(sym)
             else:
-                self.log.error(f"[FLUSH] {sym}: ✗ bar_type 未记录，无法订阅实时")
+                self.log.error(f"[FLUSH] {sym}: ✗ 无法订阅实时")
+
+    def _schedule_poll(self, sym: str) -> None:
+        """安排下一次历史数据轮询（60s 后）"""
+        t = threading.Timer(60.0, self._poll_history, args=(sym,))
+        t.daemon = True
+        t.start()
+
+    def _poll_history(self, sym: str) -> None:
+        """主动拉取最近 2 分钟历史数据作为实时流的兜底"""
+        if self.config.backtest_mode: return
+        bar_type = self._bar_types.get(sym)
+        if not bar_type: return
+        
+        # 请求最近 45 分钟，覆盖 IBKR 服务器常见的滞后（30min 左右）
+        start_utc = self.clock.utc_now() - timedelta(minutes=45)
+        self.log.info(f"[POLL] {sym}: 拉取最近 45min 数据 (Start={start_utc})...")
+        self.request_bars(bar_type, start=start_utc)
+        
+        # 递归安排下一次
+        self._schedule_poll(sym)
+
+    def _inc_update_redis(self, sym: str, bar_dict: dict) -> None:
+        """增量更新 Redis（去重 + M1 写入 + M5 聚合 + PUBLISH）"""
+        if not self._redis: return
+        try:
+            key_m1 = f"bars:1m:{sym}"
+            # 1. 去重检查：只处理比 Redis 中最后一根更晚的 bar
+            last_json = self._redis.execute_command("LINDEX", key_m1, -1)
+            if last_json:
+                last_bar = json.loads(last_json)
+                if bar_dict["time"] <= last_bar["time"]:
+                    return  # 已存在
+
+            # 2. 写入 M1
+            data_json = json.dumps(bar_dict)
+            self._redis.rpush(key_m1, data_json)
+            self._redis.ltrim(key_m1, -MAX_BARS, -1)
+            self._redis.publish(f"kline:1m:{sym}", data_json)
+            self.log.info(f"[INC-UPDATE] {sym}: M1 增量更新 (Time={bar_dict['time']} C={bar_dict['close']})")
+
+            # 3. 驱动 M5 聚合
+            m5_out = self._m5_bucket[sym].push(bar_dict)
+            if m5_out:
+                o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
+                st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
+                ema21_5 = self._ema_m5[sym].update(c5)
+                m5_bar = {
+                    **m5_out, "symbol": sym, "ema21": ema21_5,
+                    "st_value": st_val5, "st_dir": st_dir5, "st_upper": st_up5, "st_lower": st_lo5,
+                }
+                m5_json = json.dumps(m5_bar)
+                key_m5 = f"bars:5m:{sym}"
+                self._redis.rpush(key_m5, m5_json)
+                self._redis.ltrim(key_m5, -MAX_BARS, -1)
+                self._redis.publish(f"kline:5m:{sym}", m5_json)
+                self.log.info(f"[INC-UPDATE] {sym}: M5 聚合完成 (C={c5:.2f})")
+        except Exception as e:
+            self.log.error(f"[INC-UPDATE] {sym}: 失败 - {e}")
 
     # ── 实时 K 线收盘（P1）────────────────────────────────────
     def on_bar(self, bar: Bar) -> None:
         """
         实时 1分钟 K 线收盘回调（subscribe_bars 订阅后触发）。
-        居然流程：
-          1. 取消当前未完成 tick bar（该分钟已完结）
-          2. 计算 M1 ST/EMA 指标
-          3. 尝试 M5 聚合（满 5 分钟输出一根 M5 bar）
-          4. 将 M1 bar 写入 Redis（防重复时间戳）
-          5. PUBLISH kline:1m:{sym}（前端 WebSocket 世订阅）
         """
         self._bar_count += 1
         sym = bar.bar_type.instrument_id.symbol.value

@@ -174,7 +174,7 @@ config_node = TradingNodeConfig(
         time_bars_timestamp_on_close=False,
         validate_data_sequence=True,
     ),
-    timeout_connection=90.0,
+    timeout_connection=120.0,
     timeout_reconciliation=5.0,
     timeout_portfolio=5.0,
     timeout_disconnection=5.0,

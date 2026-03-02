@@ -137,10 +137,12 @@ class OrderGatewayActor(Strategy):
 
         # 引擎 IB client 引用（由 main.py 在 node.build() 后注入）
         self._ib_client = None
-        # 账户余额定期轮询（充当兆底：订单事件已覆盖大部分情屦1）
+        # 账户余额定期轮询（充当兜底）
         self._account_poll_timer: threading.Timer | None = None
         self._account_poll_running: bool = False
         self._account_poll_interval: int = 120  # 定期轮询间隔（秒）
+        # 防并发锁：确保同一时间只有一个 reqAccountSummary 在执行
+        self._account_query_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 引擎 IB client 注入（main.py 在 node.build() 后调用）
@@ -205,13 +207,8 @@ class OrderGatewayActor(Strategy):
             import traceback
             self.log.error(traceback.format_exc())
 
-        # 延迟 10s 做初始账户余额同步（等待 IB client 注入 + accountSummary 加载完成）
-        _t = threading.Timer(30.0, self._sync_account_to_redis)  # 延迟 30s 等引擎充分初始化
-
-        _t.daemon = True
-        _t.start()
-
-        # 启动定期轮询（自人 15s 后开始，公充当兆底）
+        # 只启动一个定期轮询（15s 后开始首次查询，之后每 120s 一次）
+        # 不再启动额外的 30s 初始同步 Timer，避免两个并发请求触发 Error 322
         self._account_poll_running = True
         _poll_t = threading.Timer(15.0, self._start_account_poll)
         _poll_t.daemon = True
@@ -274,6 +271,10 @@ class OrderGatewayActor(Strategy):
         fallback：通过 cache.account_for_venue 读取主账户聚合数据。
         """
         fa_group = self.config.fa_group
+        # ── 防并发锁：同一时间只允许一个 reqAccountSummary 执行 ──
+        if not self._account_query_lock.acquire(blocking=False):
+            self.log.warning("[Account] 上一次查询仍在执行中，跳过本次");
+            return
         try:
             # ── 方法 0：复用引擎 IB 连接查询 FA Group 余额 ──
             if self._ib_client is not None and fa_group:
@@ -281,59 +282,76 @@ class OrderGatewayActor(Strategy):
                     eclient = self._ib_client._eclient
                     req_id  = self._ib_client._next_req_id()
 
-                    # 从 ib_client.accounts() 获取所有 managed sub-account IDs
-                    sub_accounts = self._ib_client.accounts()
-                    if not sub_accounts:
-                        raise ValueError("accounts() 返回空集合")
-                    self.log.info(f"[Account] accounts()={sub_accounts}  req_id={req_id}  fa_group={fa_group}")
+                    self.log.info(f"[Account] 开始查询 FA Group={fa_group}  req_id={req_id}")
 
                     # {currency: {tag: float}} 累加所有子账户数据
                     summary: dict = {}
+                    import threading as _threading
+                    summary_lock = _threading.Lock()
 
-                    def _make_handler(aid: str):
-                        """为每个子账户创建回调（闭包防 aid 引用泄漏）"""
-                        def _on_summary(tag: str, value: str, currency: str) -> None:
-                            self.log.debug(f"[Account][cb] aid={aid} tag={tag} val={value} cur={currency}")
-                            if not currency:
-                                return
+                    # ── catch-all 累加器：接受任何子账号 ID ──
+                    def _catch_all_handler(tag: str, value: str, currency: str) -> None:
+                        if not currency:
+                            return
+                        with summary_lock:
                             if currency not in summary:
                                 summary[currency] = {}
                             try:
-                                # 累加数值型字段（FA Group = 所有子账户汇总）
                                 existing = float(summary[currency].get(tag, 0.0))
                                 summary[currency][tag] = existing + float(value)
                             except (ValueError, TypeError):
                                 summary[currency][tag] = value
-                        return _on_summary
+                        self.log.debug(f"[Account][catch-all] tag={tag} val={value} cur={currency}")
 
-                    # 注册所有子账户的 accountSummary 事件回调
-                    # （事件名为 accountSummary-{account_id}，对应 process_account_summary 的路由）
-                    registered = []
-                    for aid in sub_accounts:
-                        event_name = f"accountSummary-{aid}"
-                        self._ib_client.subscribe_event(event_name, _make_handler(aid))
-                        registered.append(event_name)
+                    # ── 临时劫持 _event_subscriptions，对所有 accountSummary-* 返回 catch-all ──
+                    event_subs = self._ib_client._event_subscriptions
+                    _SENTINEL = "__fa_group_catchall__"
+                    original_get = dict.get  # 引用内置方法
 
-                    # 发起 FA Group 查询请求
-                    from ibapi.account_summary_tags import AccountSummaryTags
-                    eclient.reqAccountSummary(req_id, fa_group, AccountSummaryTags.AllTags)
+                    class _CatchAllDict(dict):
+                        """临时替换 _event_subscriptions：对 accountSummary-* 统一返回 catch-all handler"""
+                        def get(self, key, default=None):
+                            if key.startswith("accountSummary-"):
+                                return _catch_all_handler
+                            return super().get(key, default)
 
-                    # 等待 12s 收集数据
-                    # accountSummaryEnd 在 wrapper.py 中不触发任何处理函数，用 sleep 代替
-                    # TWS 响应 reqAccountSummary 可能需要更长时间（引擎初始化时 bar 数据拥挤）
-                    import time as _time
-                    _time.sleep(12.0)
+                    # 替换为 catch-all dict（保留原有内容）
+                    catch_all_dict = _CatchAllDict(event_subs)
+                    self._ib_client._event_subscriptions = catch_all_dict
 
-                    # 取消请求 + 取消注册事件
-                    try:
-                        eclient.cancelAccountSummary(req_id)
-                    except Exception:
-                        pass
-                    for ename in registered:
+                    # 发起 FA Group 查询请求（先强制取消上一个未结束的请求，避免 Error 322）
+                    if hasattr(self, "_last_account_summary_req_id"):
                         try:
-                            self._ib_client.unsubscribe_event(ename)
+                            eclient.cancelAccountSummary(self._last_account_summary_req_id)
+                            import time as _pre_time
+                            _pre_time.sleep(0.5)  # 给 TWS 处理取消请求的时间
                         except Exception:
                             pass
+
+                    from ibapi.account_summary_tags import AccountSummaryTags
+                    eclient.reqAccountSummary(req_id, fa_group, AccountSummaryTags.AllTags)
+                    self._last_account_summary_req_id = req_id  # 保存以备下次清理
+                    self.log.info(f"[Account] reqAccountSummary 已发送，等待数据中...")
+
+                    # 等待 15s 收集数据，但每 1s 检测一次是否已有足够数据
+                    import time as _time
+                    for _ in range(15):
+                        _time.sleep(1.0)
+                        with summary_lock:
+                            usd = summary.get("USD", {})
+                            if usd.get("NetLiquidation") and usd.get("FullAvailableFunds"):
+                                self.log.info("[Account] 数据已收集完毕，提前结束等待")
+                                break
+
+                    # 立即取消请求（避免长期占用 TWS AccountSummary slot）
+                    try:
+                        eclient.cancelAccountSummary(req_id)
+                        _time.sleep(0.3)  # 确保取消消息发送完成
+                    except Exception:
+                        pass
+
+                    # 恢复原始 _event_subscriptions（解除 catch-all 劫持）
+                    self._ib_client._event_subscriptions = dict(catch_all_dict)
 
                     if summary:
                         balances = []
@@ -357,17 +375,24 @@ class OrderGatewayActor(Strategy):
                         else:
                             self.log.warning(f"[Account] FA Group={fa_group} 收集到空数据，fallback")
                     else:
-                        self.log.warning(f"[Account] FA Group={fa_group} 5s 内无数据，fallback")
+                        self.log.warning(f"[Account] FA Group={fa_group} 15s 内无数据，fallback")
                 except Exception as e:
+                    import traceback
                     self.log.warning(f"[Account] FA Group 查询异常: {e}，fallback")
-
-
+                    self.log.warning(traceback.format_exc())
+                    # 确保恢复原始 dict（即使异常也要解除劫持）
+                    try:
+                        if isinstance(self._ib_client._event_subscriptions, type(catch_all_dict)):
+                            self._ib_client._event_subscriptions = dict(self._ib_client._event_subscriptions)
+                    except Exception:
+                        pass
 
             # ── Fallback：cache.account_for_venue（主账户聚合数据）──
             from nautilus_trader.model.identifiers import Venue
-            account = self.cache.account_for_venue(Venue("IB"))
+            # 注意：NautilusTrader IB 适配器使用 "INTERACTIVE_BROKERS" 而非 "IB"
+            account = self.cache.account_for_venue(Venue("INTERACTIVE_BROKERS"))
             if account is None:
-                self.log.warning("[Account] cache.account_for_venue('IB') 返回 None")
+                self.log.warning("[Account] cache.account_for_venue('INTERACTIVE_BROKERS') 返回 None")
                 return
             balances = []
             for currency, bal in account.balances().items():
@@ -381,8 +406,12 @@ class OrderGatewayActor(Strategy):
                 account_id = str(account.id)
                 self.log.info(f"[Account] Fallback 余额  account={account_id}")
                 self._write_account_to_redis(account_id, balances)
+
         except Exception as e:
             self.log.warning(f"[Account] _sync_account_to_redis 失败: {e}")
+        finally:
+            # 无论成功/失败/return 都释放锁，确保下次轮询可以顺利获取
+            self._account_query_lock.release()
 
     def _write_account_to_redis(self, account_id: str, balances: list) -> None:
         """将账户余额写入 Redis account:funds 并 PUBLISH account:update"""
