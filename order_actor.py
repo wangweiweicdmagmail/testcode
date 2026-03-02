@@ -645,8 +645,10 @@ class OrderGatewayActor(Strategy):
             return {}
 
     async def _async_get_active_orders(self) -> dict:
-        """查询 cache 中 ACCEPTED 状态的订单和已打开的仓位，组合成前端可用的价格线数据"""
+        """查询 cache 中活跃的止损单和已打开的仓位，组合成前端可用的价格线数据"""
         result = {}
+        # 终态（不再活跃）
+        TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
         try:
             # 1. 已打开的仓位 → 入场价
             for pos in self.cache.positions_open():
@@ -657,22 +659,32 @@ class OrderGatewayActor(Strategy):
                     "side": "LONG" if pos.is_long else "SHORT",
                     "quantity": float(pos.quantity),
                 }
-            # 2. ACCEPTED 状态的止损单（STOP_MARKET）
-            for order in self.cache.orders_open():
+            # 2. 使用 orders() 全量遍历，过滤活跃的 STOP_MARKET 订单
+            #    （orders_open() 可能不含 SUBMITTED/PENDING_NEW 状态的 IBKR 止损单）
+            for order in self.cache.orders():
                 order_type = str(order.order_type).replace("OrderType.", "")
                 if order_type != "STOP_MARKET":
                     continue
+                order_status = str(order.status).replace("OrderStatus.", "")
+                if order_status in TERMINAL_STATUS:
+                    continue  # 跳过终态订单
                 sym = order.instrument_id.symbol.value
                 result.setdefault(sym, {})
                 tp = getattr(order, "trigger_price", None)
+                self.log.debug(
+                    f"[Gateway] 活跃止损单 {sym}: status={order_status} "
+                    f"trigger_price={tp} order_type={order_type}"
+                )
                 result[sym]["stop_loss"] = {
                     "price": float(tp) if tp else None,
                     "side": str(order.side).replace("OrderSide.", ""),
                     "quantity": float(order.quantity),
                     "client_order_id": str(order.client_order_id),
+                    "status": order_status,
                 }
         except Exception as e:
             self.log.warning(f"[Gateway] _async_get_active_orders 失败: {e}")
+        self.log.debug(f"[Gateway] active_orders 返回: {result}")
         return result
 
 
