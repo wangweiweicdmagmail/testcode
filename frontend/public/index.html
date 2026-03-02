@@ -1832,21 +1832,29 @@
             const qty = parseFloat(o.quantity || o.last_qty || 0);
             switch (o.status) {
               case 'ACCEPTED':
+              case 'UPDATED': {
+                // IBKR 止损单：UPDATED（含 trigger_price）和 ACCEPTED 都要处理止损线
                 if (orderType === 'STOP_MARKET' && o.trigger_price) {
                   const slP = parseFloat(o.trigger_price);
-                  setSlLine(slP, qty);
-                  showToast(`🛡 ${sym} 止损单已挂出 @${slP.toFixed(2)} x${qty}`, 'ok');
-                  speak(`${sym} 止损单已接受，价格 ${slP.toFixed(2)}`, true);
+                  if (slP > 0) {
+                    setSlLine(slP, qty);
+                    if (o.status === 'ACCEPTED') {
+                      speak(`${sym} 止损单已接受，价格 ${slP.toFixed(2)}`, true);
+                      showToast(`🛡 ${sym} 止损单已挂出 @${slP.toFixed(2)} x${qty}`, 'ok');
+                    }
+                  }
                 } else if (orderType === 'STOP_MARKET') {
-                  // 收到 STOP_MARKET ACCEPTED 但没有 trigger_price，记录日志供调试
-                  console.warn('[order:update] STOP_MARKET ACCEPTED 但 trigger_price 为空', o);
-                  speak(`${sym} 止损单已接受`, true);
-                  showToast(`✅ ${sym} 止损单已接受 #${id}`, 'ok');
-                } else {
+                  console.warn('[order:update] STOP_MARKET ACCEPTED/UPDATED 但 trigger_price 为空', o);
+                  if (o.status === 'ACCEPTED') {
+                    speak(`${sym} 止损单已接受`, true);
+                    showToast(`✅ ${sym} 止损单已接受 #${id}`, 'ok');
+                  }
+                } else if (o.status === 'ACCEPTED') {
                   speak(`${sym} 订单已接受`, true);
                   showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
                 }
                 break;
+              }
               case 'FILLED': {
                 if (orderType === 'MARKET' || orderType === '') {
                   const entryP = parseFloat(o.last_px);

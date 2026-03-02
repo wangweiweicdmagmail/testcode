@@ -874,6 +874,9 @@ class OrderGatewayActor(Strategy):
             if extra:
                 msg.update(extra)
             self._redis.publish("order:update", json.dumps(msg, ensure_ascii=False))
+            # 对 ACCEPTED/UPDATED 级别打印完整消息供调试
+            if status in ("ACCEPTED", "UPDATED"):
+                self.log.info(f"[Gateway] 发布 order:update {status}: {msg}")
         except Exception as e:
             self.log.warning(f"[Gateway] Redis publish order:update 失败: {e}")
 
@@ -923,6 +926,9 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        # IBKR 止损单通常在 ACCEPTED 之前先推一个 UPDATED 事件（含 trigger_price）
+        # 发布 UPDATED 消息，前端可据此更新止损价线
+        self._pub_order("UPDATED", event)
 
     def on_order_triggered(self, event) -> None:
         """止损单触发（stop price 已触碰，转为市价单执行）"""
