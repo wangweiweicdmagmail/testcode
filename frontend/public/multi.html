@@ -883,6 +883,12 @@
                     lineStyle: LightweightCharts.LineStyle.Dashed,
                     axisLabelVisible: true, title: `止损 ${stopLoss}`,
                 });
+                // 止损线已显示，同步启用橙色药丸拖动
+                setTimeout(() => {
+                    if (state[symbol]?.ctx && !state[symbol].ctx.orderMode) {
+                        enterModifyMode(state[symbol].ctx, stopLoss);
+                    }
+                }, 200);
             }
 
             // 开仓 Marker（旧格式有 entryTime 时才画，实时格式通过 order:update FILLED 事件添加）
@@ -1087,10 +1093,19 @@
                     if (ctx.orderMode || ctx.modifyMode) snapHandle(ctx);
                 });
 
-                // 加载完成后：若有持仓且止损价，自动进入 modifyMode
-                if (position?.stop_loss) {
-                    setTimeout(() => enterModifyMode(ctx, position.stop_loss), 100);
-                }
+                // 页面加载完成后：尝试从引擎获取活跃止损单，用于恢复药丸（即使页面刷新却持仓）
+                try {
+                    const aoRes = await fetch('/api/active-orders');
+                    const ao = await aoRes.json();
+                    const slPx = ao[symbol]?.stop_loss?.price;
+                    if (slPx && state[symbol]?.ctx) {
+                        setTimeout(() => {
+                            if (!state[symbol].ctx.orderMode) {
+                                enterModifyMode(state[symbol].ctx, slPx);
+                            }
+                        }, 300);
+                    }
+                } catch (_) { /* 引擎离线时静默忘记 */ }
 
             } catch (e) {
                 const el = document.getElementById(`loading-${symbol}`);
