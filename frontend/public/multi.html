@@ -878,17 +878,12 @@
 
             // 止损价线（红色虚线，无止损时不画）
             if (stopLoss) {
-                candleSeries.createPriceLine({
+                state[symbol].slPriceLine = candleSeries.createPriceLine({
                     price: stopLoss, color: '#ef5350', lineWidth: 1,
                     lineStyle: LightweightCharts.LineStyle.Dashed,
                     axisLabelVisible: true, title: `止损 ${stopLoss}`,
                 });
-                // 止损线已显示，同步启用橙色药丸拖动
-                setTimeout(() => {
-                    if (state[symbol]?.ctx && !state[symbol].ctx.orderMode) {
-                        enterModifyMode(state[symbol].ctx, stopLoss);
-                    }
-                }, 200);
+                // 注意：不自动进入 modifyMode，等用户点击止损线标签
             }
 
             // 开仓 Marker（旧格式有 entryTime 时才画，实时格式通过 order:update FILLED 事件添加）
@@ -1093,19 +1088,20 @@
                     if (ctx.orderMode || ctx.modifyMode) snapHandle(ctx);
                 });
 
-                // 页面加载完成后：尝试从引擎获取活跃止损单，用于恢复药丸（即使页面刷新却持仓）
-                try {
-                    const aoRes = await fetch('/api/active-orders');
-                    const ao = await aoRes.json();
-                    const slPx = ao[symbol]?.stop_loss?.price;
-                    if (slPx && state[symbol]?.ctx) {
-                        setTimeout(() => {
-                            if (!state[symbol].ctx.orderMode) {
-                                enterModifyMode(state[symbol].ctx, slPx);
-                            }
-                        }, 300);
+                // 点击止损价格线标签（在止损价🧲像素范围内）→ 显示药丸
+                s.chart.subscribeClick(param => {
+                    if (!param.point || ctx.orderMode || ctx.modifyMode) return;
+                    const slP = state[symbol]?.position?.stop_loss;
+                    if (!slP) return;
+                    const clickedPrice = ctx.cs.coordinateToPrice(param.point.y);
+                    if (clickedPrice === null) return;
+                    const tolerance = Math.abs(
+                        (ctx.cs.coordinateToPrice(0) - ctx.cs.coordinateToPrice(4)) || slP * 0.004
+                    );
+                    if (Math.abs(clickedPrice - slP) <= tolerance) {
+                        enterModifyMode(ctx, slP);
                     }
-                } catch (_) { /* 引擎离线时静默忘记 */ }
+                });
 
             } catch (e) {
                 const el = document.getElementById(`loading-${symbol}`);
@@ -1178,37 +1174,64 @@
             handleEl.style.top = containerY + 'px';
             activeDrag.slPrice = parseFloat(price.toFixed(2));
             updateHandlePriceLabel(activeDrag);
-            updateOrderPanel(activeDrag);
+            if (activeDrag.modifyMode) {
+                // modifyMode：创建或更新临时橙色跟踪线
+                if (!activeDrag.modifyTempLine) {
+                    activeDrag.modifyTempLine = activeDrag.cs.createPriceLine({
+                        price: activeDrag.slPrice, color: '#ff9800', lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true, title: '→ 新止损',
+                    });
+                } else {
+                    activeDrag.modifyTempLine.applyOptions({
+                        price: activeDrag.slPrice,
+                        title: `→ ${activeDrag.slPrice.toFixed(2)}`,
+                    });
+                }
+            } else {
+                updateOrderPanel(activeDrag);
+            }
         });
 
         document.addEventListener('mouseup', () => {
             if (!activeDrag) return;
             const ctx = activeDrag;
-            snapHandle(ctx);
-            document.body.style.cursor = '';
             activeDrag = null;
+            document.body.style.cursor = '';
 
-            // modifyMode：松手后调用引擎修改止损单
+            // modifyMode：移除临时线 + 捯手后消失药丸 + 调 API
             if (ctx.modifyMode && ctx.slPrice) {
+                if (ctx.modifyTempLine) {
+                    try { ctx.cs.removePriceLine(ctx.modifyTempLine); } catch (_) { }
+                    ctx.modifyTempLine = null;
+                }
+                const newPrice = ctx.slPrice;
+                exitModifyMode(ctx);  // 药丸立即消失
                 fetch(`/api/modify-stop/${ctx.sym}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ price: ctx.slPrice }),
+                    body: JSON.stringify({ price: newPrice }),
                 }).then(r => r.json()).then(result => {
                     if (!result.ok) {
                         speak(`${ctx.sym} 止损修改失败`, true);
                         showToast(`⚠️ ${ctx.sym} 止损修改失败: ${result.error}`, 'warn');
                     } else {
-                        showToast(`✅ ${ctx.sym} 止损已修改为 ${ctx.slPrice.toFixed(2)}`, 'ok');
-                        // 更新当前仓位信息中的止损价，供面板展示
-                        if (state[ctx.sym]?.position) {
-                            state[ctx.sym].position.stop_loss = ctx.slPrice;
-                            document.getElementById(`p-sl-${ctx.sym}`).textContent = ctx.slPrice.toFixed(2);
+                        // 成功：把原止损线移到新价格
+                        if (state[ctx.sym]?.slPriceLine) {
+                            state[ctx.sym].slPriceLine.applyOptions({
+                                price: newPrice,
+                                title: `止损 ${newPrice.toFixed(2)}`,
+                            });
                         }
+                        if (state[ctx.sym]?.position) {
+                            state[ctx.sym].position.stop_loss = newPrice;
+                            document.getElementById(`p-sl-${ctx.sym}`).textContent = newPrice.toFixed(2);
+                        }
+                        showToast(`✅ ${ctx.sym} 止损已修改为 ${newPrice.toFixed(2)}`, 'ok');
                     }
-                }).catch(e => {
-                    showToast(`网络错误: ${e.message}`, 'warn');
-                });
+                }).catch(e => showToast(`网络错误: ${e.message}`, 'warn'));
+            } else {
+                snapHandle(ctx);
             }
         });
 

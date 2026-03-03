@@ -1293,10 +1293,7 @@
         currentPosition.stop_loss = price;
         refreshPositionPanel(currentPosition);
       }
-      // 止损线已就位，自动进入 modifyMode（延迟等图表初始化）
-      if (!orderMode) {
-        setTimeout(() => enterModifyMode(price), 200);
-      }
+      // 注意：不自动进入 modifyMode，等用户点击止损线标签
     }
 
     function clearOrderLines() {
@@ -2250,71 +2247,114 @@
       slHandle.classList.remove('active');
       dragCapture.classList.remove('active');
       orderPanel.classList.remove('active');
-      // 开仓后如有止损单，自动切回 modifyMode
-      if (activeOrderLines.slData?.price) {
-        setTimeout(() => enterModifyMode(activeOrderLines.slData.price), 300);
-      }
+      // 注意：不自动切 modifyMode，等用户点击止损线标签
     }
+
+    // modifyMode 拖动时的临时价格线（橙色，跟随药丸）
+    let modifyTempLine = null;
 
     // 拖动开始
     slHandle.addEventListener('mousedown', e => {
       if (!orderMode && !modifyMode) return;
       isDragging = true;
-      document.body.style.cursor = 'ns-resize';  // 全局鼠标改为调整光标
+      document.body.style.cursor = 'ns-resize';
       dragCapture.classList.add('active');
+      // modifyMode：创建临时橙色跟踪线（原止损线保持不动）
+      if (modifyMode && !modifyTempLine) {
+        modifyTempLine = candleSeries.createPriceLine({
+          price: slPrice,
+          color: '#ff9800',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: '→ 新止损',
+        });
+      }
       e.preventDefault();
     });
 
-    // 拖动移动：鸠标 Y 是相对页面的，需要转换为相对 chart-container 的 Y
+    // 拖动移动
     document.addEventListener('mousemove', e => {
       if (!isDragging) return;
       const cRect = containerEl.getBoundingClientRect();
-      const containerY = e.clientY - cRect.top;     // 相对 chart-container
+      const containerY = e.clientY - cRect.top;
       const eRect = chartEl.getBoundingClientRect();
-      const chartY = e.clientY - eRect.top;          // 相对 chartEl（用于 coordinateToPrice）
+      const chartY = e.clientY - eRect.top;
       const price = candleSeries.coordinateToPrice(chartY);
       if (price === null) return;
       if (orderMode) {
-        applySL(price, containerY);  // 开仓模式：拖动大小直接用 container Y
+        applySL(price, containerY);
       } else if (modifyMode) {
         slPrice = parseFloat(price.toFixed(2));
         slPriceVal.textContent = slPrice.toFixed(2);
         slHandle.style.top = containerY + 'px';
+        // 临时线跟随药丸
+        if (modifyTempLine) {
+          modifyTempLine.applyOptions({ price: slPrice, title: `→ ${slPrice.toFixed(2)}` });
+        }
       }
     });
 
-    // 拖动结束：用 priceToCoordinate 做一次精确校对对齐止损线
+    // 拖动结束
     document.addEventListener('mouseup', () => {
       if (!isDragging) return;
       isDragging = false;
       document.body.style.cursor = '';
       dragCapture.classList.remove('active');
-      updateHandlePosition();  // 精确回算一次，确保控件与止损线对齐
+      updateHandlePosition();
 
-      // modifyMode：松手后调引擎修改止损单
+      // modifyMode：松手 → 移除临时线 + 调引擎修改止损
       if (modifyMode && slPrice) {
+        // 先移除临时线
+        if (modifyTempLine) {
+          try { candleSeries.removePriceLine(modifyTempLine); } catch (_) { }
+          modifyTempLine = null;
+        }
+        const newPrice = slPrice;
+        exitModifyMode();  // 拖动结束，药丸立即消失
         fetch(`/api/modify-stop/${SYMBOL}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ price: slPrice }),
+          body: JSON.stringify({ price: newPrice }),
         }).then(r => r.json()).then(result => {
           if (!result.ok) {
             speak(`${SYMBOL} 止损修改失败`, true);
             showToast(`⚠️ ${SYMBOL} 止损修改失败: ${result.error}`, 'warn');
           } else {
-            showToast(`✅ ${SYMBOL} 止损已修改为 ${slPrice.toFixed(2)}`, 'ok');
-            // 修改止损线标题
+            // 成功：把原止损线移到新价格
             if (activeOrderLines.slLine) {
-              activeOrderLines.slLine.applyOptions({ title: `✖ 止损 @${slPrice.toFixed(2)}` });
+              activeOrderLines.slLine.applyOptions({
+                price: newPrice,
+                title: `✖ 止损 @${newPrice.toFixed(2)}`,
+              });
             }
+            activeOrderLines.slData = { ...activeOrderLines.slData, price: newPrice };
             if (currentPosition) {
-              currentPosition.stop_loss = slPrice;
-              document.getElementById('p-sl').textContent = slPrice.toFixed(2);
+              currentPosition.stop_loss = newPrice;
+              document.getElementById('p-sl').textContent = newPrice.toFixed(2);
             }
+            showToast(`✅ ${SYMBOL} 止损已修改为 ${newPrice.toFixed(2)}`, 'ok');
           }
         }).catch(e => showToast(`网络错误: ${e.message}`, 'warn'));
       }
     });
+
+    // 点击止损价格线标签（价格轴附近）→ 显示药丸
+    chart.subscribeClick(param => {
+      if (!param.point || orderMode || modifyMode) return;
+      const slP = activeOrderLines.slData?.price;
+      if (!slP) return;
+      const clickedPrice = candleSeries.coordinateToPrice(param.point.y);
+      if (clickedPrice === null) return;
+      // 容差：3个像素对应的价格范围
+      const tolerance = Math.abs(
+        (candleSeries.coordinateToPrice(0) - candleSeries.coordinateToPrice(3)) || slP * 0.003
+      );
+      if (Math.abs(clickedPrice - slP) <= tolerance) {
+        enterModifyMode(slP);
+      }
+    });
+
 
     // 止损价只能通过拖动控件调整，不开放键盘输入
 
