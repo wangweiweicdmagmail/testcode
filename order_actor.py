@@ -1010,6 +1010,84 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.error(f"[Gateway] 设置发布失败: {e}")
 
+    async def _async_close_position(self, symbol: str) -> dict:
+        """
+        在引擎事件循环中执行真正的平仓操作：
+        1. 找到该标的的开放仓位
+        2. 取消所有活跃止损单（STOP_MARKET）
+        3. 提交反向市价单平仓
+        """
+        try:
+            # 找到对应 instrument_id（支持 AAPL / AAPL.NASDAQ 两种格式）
+            target_pos = None
+            for pos in self.cache.positions_open():
+                sym = pos.instrument_id.symbol.value
+                if sym == symbol:
+                    target_pos = pos
+                    break
+
+            if target_pos is None:
+                self.log.warning(f"[Close] 未找到 {symbol} 的开放仓位")
+                return {"error": f"未找到 {symbol} 的开放仓位"}
+
+            instrument_id = target_pos.instrument_id
+            instrument = self.cache.instrument(instrument_id)
+            if instrument is None:
+                return {"error": f"合约 {instrument_id} 未加载"}
+
+            quantity = target_pos.quantity
+            close_side = OrderSide.SELL if target_pos.is_long else OrderSide.BUY
+            side_str = "SELL" if target_pos.is_long else "BUY"
+
+            self.log.info(
+                f"[Close] 平仓 {symbol}  "
+                f"side={side_str}  qty={quantity}  "
+                f"avg_px={target_pos.avg_px_open}"
+            )
+
+            # 1. 取消所有该标的的活跃止损单
+            TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
+            canceled_count = 0
+            for order in self.cache.orders():
+                if order.instrument_id != instrument_id:
+                    continue
+                order_status = getattr(order.status, "name", str(order.status))
+                type_name = getattr(order.order_type, "name", str(order.order_type))
+                if order_status in TERMINAL_STATUS:
+                    continue
+                if type_name == "STOP_MARKET":
+                    self.log.info(f"[Close] 取消止损单 {order.client_order_id}")
+                    self.cancel_order(order)
+                    canceled_count += 1
+
+            # 2. 提交反向市价单
+            close_order = self.order_factory.market(
+                instrument_id=instrument_id,
+                order_side=close_side,
+                quantity=quantity,
+                time_in_force=TimeInForce.DAY,
+                tags=self._fa_tags(),
+            )
+            self.submit_order(close_order)
+
+            self.log.info(
+                f"[Close] ✅ 平仓单已提交  "
+                f"ClientOrderId={close_order.client_order_id}  "
+                f"side={side_str}  qty={quantity}  {instrument_id}  "
+                f"已取消止损单数量={canceled_count}"
+            )
+            return {
+                "status": "accepted",
+                "symbol": symbol,
+                "side": side_str,
+                "qty": str(quantity),
+                "client_order_id": str(close_order.client_order_id),
+                "canceled_stop_orders": canceled_count,
+            }
+        except Exception as e:
+            self.log.error(f"[Close] 平仓失败: {e}")
+            return {"error": str(e)}
+
     def _start_http_server(self) -> None:
         """在守护线程中启动 HTTP 网关"""
         loop = self._loop
@@ -1069,6 +1147,28 @@ class OrderGatewayActor(Strategy):
                         self._send(200, {"status": "ok"})
                     except Exception as e:
                         self._send(400, {"error": str(e)})
+                    return
+
+                if self.path.startswith("/close"):
+                    # POST /close  body: {"symbol": "QQQ"}
+                    # 或 POST /close/QQQ（从路径中取）
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n)) if n > 0 else {}
+                        # 支持路径参数 /close/QQQ 和 body {"symbol": "QQQ"} 两种方式
+                        path_parts = self.path.strip("/").split("/")
+                        symbol = path_parts[1].upper() if len(path_parts) > 1 else data.get("symbol", "").upper()
+                        if not symbol:
+                            self._send(400, {"error": "缺少 symbol"})
+                            return
+                        future = asyncio.run_coroutine_threadsafe(
+                            actor._async_close_position(symbol), loop
+                        )
+                        result = future.result(timeout=5.0)
+                        code = 400 if "error" in result else 200
+                        self._send(code, result)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
                     return
 
                 if self.path != "/order":

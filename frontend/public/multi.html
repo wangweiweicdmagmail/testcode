@@ -1094,10 +1094,32 @@
 
             // 平仓
             document.getElementById(`btn-close-${symbol}`).addEventListener('click', async () => {
-                if (!confirm(`确认平仓 ${symbol}？`)) return;
-                await fetch(`/api/position/${symbol}`, { method: 'DELETE' });
-                location.reload();
+                if (!confirm(`确认平仓 ${symbol}？\n\n引擎将自动取消止损单并提交反向市价单。`)) return;
+                const btn = document.getElementById(`btn-close-${symbol}`);
+                btn.disabled = true;
+                btn.textContent = '平仓中…';
+                try {
+                    const resp = await fetch(`/api/position/${symbol}`, { method: 'DELETE' });
+                    const result = await resp.json();
+                    if (result.warning) {
+                        speak(`${symbol} 平仓警告，请在 TWS 检查仓位`, true);
+                        alert(`⚠️ ${result.warning}`);
+                        location.reload();
+                    } else if (result.engine?.error) {
+                        speak(`${symbol} 平仓失败`, true);
+                        alert(`❌ 平仓失败: ${result.engine.error}`);
+                    } else {
+                        speak(`${symbol} 平仓指令已发出`, true);
+                        // 不刷新页面，等 WebSocket position:update 事件自动清空 UI
+                    }
+                } catch (e) {
+                    alert(`网络错误: ${e.message}`);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = '平仓';
+                }
             });
+
 
             // ST 跟踪止盈
             document.getElementById(`st-toggle-${symbol}`).addEventListener('change', async e => {

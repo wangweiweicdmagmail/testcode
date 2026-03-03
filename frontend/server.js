@@ -253,12 +253,34 @@ app.post("/api/position/:symbol", async (req, res) => {
     res.json({ ok: true, position: pos });
 });
 
-// DELETE /api/position/:symbol — 平仓（删除 Redis 仓位）
+// DELETE /api/position/:symbol — 平仓（先调引擎 POST /close，成功后再删 Redis 仓位记录）
 app.delete("/api/position/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
-    await redis.del(`position:${symbol}`);
-    res.json({ ok: true });
+    const instrumentId = SYMBOL_MAP[symbol];
+
+    // 1. 调引擎平仓（反向市价单 + 取消止损单）
+    let engineResult = null;
+    if (instrumentId) {
+        engineResult = await proxyToEngine('POST', '/close', { symbol }, { engine_offline: true });
+    }
+
+    if (engineResult && !engineResult.engine_offline && !engineResult.error) {
+        // 引擎平仓成功 → 删 Redis 仓位记录
+        await redis.del(`position:${symbol}`);
+        console.log(`✅ 平仓成功 [${symbol}]: ${JSON.stringify(engineResult)}`);
+        res.json({ ok: true, engine: engineResult });
+    } else {
+        // 引擎离线或失败 → 仅删 Redis，提示用户
+        await redis.del(`position:${symbol}`);
+        const reason = engineResult?.error || '引擎未启动或未持仓';
+        console.warn(`⚠️  平仓降级 [${symbol}]: ${reason}，仅删除 Redis 记录`);
+        res.json({
+            ok: true,
+            warning: `引擎平仓失败（${reason}），已清除 Redis 仓位记录，请在 TWS 手动平仓`,
+        });
+    }
 });
+
 
 
 // ── 引擎代理路由（转发到 order_actor :8888）─────────────────────────────
