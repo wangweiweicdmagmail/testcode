@@ -167,6 +167,7 @@ class ExitManager(Strategy):
         TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
 
         stop_order = None
+        # ─ 先从 cache 查找 ──────────────────────────────────────────
         for order in self.cache.orders():
             if order.instrument_id != instrument_id:
                 continue
@@ -177,6 +178,33 @@ class ExitManager(Strategy):
             if type_name == "STOP_MARKET":
                 stop_order = order
                 break
+
+        # ─ cache 找不到：尝试 Redis fallback ─────────────────────────
+        # 引擎重启后 IBKR 会推回 ACCEPTED 事件填充 cache，但有时序延迟
+        if stop_order is None and self._redis:
+            try:
+                stored = self._redis.get(f"order:stop:{sym}")
+                if stored:
+                    data = json.loads(stored)
+                    coid_str = data.get("client_order_id", "")
+                    if coid_str:
+                        from nautilus_trader.model.identifiers import ClientOrderId
+                        coid = ClientOrderId(coid_str)
+                        cached = self.cache.order(coid)
+                        if cached:
+                            status_name = getattr(cached.status, "name", str(cached.status))
+                            if status_name not in TERMINAL_STATUS:
+                                stop_order = cached
+                                self.log.info(
+                                    f"[ExitManager] {sym}: 通过 Redis fallback 找到止损单: {coid_str}"
+                                )
+                        else:
+                            self.log.warning(
+                                f"[ExitManager] {sym}: Redis 有记录 ({coid_str}) 但 cache 无此订单，"
+                                f"等待 IBKR 推回后重试"
+                            )
+            except Exception as e:
+                self.log.warning(f"[ExitManager] {sym}: Redis fallback 失败: {e}")
 
         if stop_order is None:
             self.log.warning(f"[ExitManager] {sym}: 未找到活跃 STOP_MARKET 单，跳过修改")
@@ -203,6 +231,7 @@ class ExitManager(Strategy):
             self._update_redis_sl(sym, new_sl)
         except Exception as e:
             self.log.error(f"[ExitManager] {sym}: modify_order 失败: {e}")
+
 
     # ── Redis 辅助 ─────────────────────────────────────────────────────
     def _get_current_sl(self, sym: str) -> float | None:

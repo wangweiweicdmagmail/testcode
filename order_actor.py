@@ -712,6 +712,12 @@ class OrderGatewayActor(Strategy):
                     f"VenueOrderId={event.venue_order_id}  "
                     f"trigger_price={tp}"
                 )
+                # ── 方案A：持久化止损单 ID 到 Redis ───────────────────────
+                # 引擎重启后 IBKR 会重新推送 ACCEPTED 事件，届时 cache 中重新有该订单
+                # 同时也确保手动拖动止损（_async_modify_stop）能在重启后找到正确订单
+                if order:
+                    sym = order.instrument_id.symbol.value
+                    self._persist_stop_order(sym, str(event.client_order_id), tp)
             else:
                 self.log.info(
                     f"[Order] ✅ ACCEPTED  "
@@ -725,6 +731,35 @@ class OrderGatewayActor(Strategy):
                 f"VenueOrderId={event.venue_order_id}"
             )
         self._pub_order("ACCEPTED", event)
+
+    def _persist_stop_order(self, sym: str, client_order_id: str, trigger_price) -> None:
+        """将止损单 ID 写入 Redis order:stop:{sym}，供引擎重启后恢复。"""
+        if not self._redis:
+            return
+        try:
+            data = {
+                "client_order_id": client_order_id,
+                "trigger_price": str(trigger_price) if trigger_price else None,
+                "symbol": sym,
+            }
+            self._redis.set(f"order:stop:{sym}", json.dumps(data))
+            self.log.info(f"[SL] 止损单 ID 已持久化到 Redis: order:stop:{sym} = {client_order_id}")
+        except Exception as e:
+            self.log.warning(f"[SL] 持久化止损单 ID 失败: {e}")
+
+    def _clear_stop_order(self, sym: str, client_order_id: str) -> None:
+        """止损单终结（成交/撤单/过期）时清除 Redis 记录。"""
+        if not self._redis:
+            return
+        try:
+            stored = self._redis.get(f"order:stop:{sym}")
+            if stored:
+                data = json.loads(stored)
+                if data.get("client_order_id") == client_order_id:
+                    self._redis.delete(f"order:stop:{sym}")
+                    self.log.info(f"[SL] 止损单已终结，清除 Redis 记录: order:stop:{sym}")
+        except Exception as e:
+            self.log.warning(f"[SL] 清除止损单 Redis 记录失败: {e}")
 
     def on_order_pending_update(self, event) -> None:
         """改单请求已发出，等待交易所响应"""
@@ -843,6 +878,10 @@ class OrderGatewayActor(Strategy):
                     f"ClientOrderId={event.client_order_id}  "
                     f"VenueOrderId={event.venue_order_id}"
                 )
+                # 止损单终结，清除 Redis 持久化记录
+                if order:
+                    sym = order.instrument_id.symbol.value
+                    self._clear_stop_order(sym, str(event.client_order_id))
             else:
                 self.log.info(
                     f"[Order] ⛔ CANCELED  "
@@ -865,6 +904,13 @@ class OrderGatewayActor(Strategy):
             f"ClientOrderId={event.client_order_id}  "
             f"VenueOrderId={event.venue_order_id}"
         )
+        # 过期也属于终结状态，清除 Redis 记录
+        try:
+            order = self.cache.order(event.client_order_id)
+            if order and getattr(order.order_type, "name", "") == "STOP_MARKET":
+                self._clear_stop_order(order.instrument_id.symbol.value, str(event.client_order_id))
+        except Exception:
+            pass
         self._pub_order("EXPIRED", event)
 
     # ------------------------------------------------------------------
@@ -1091,13 +1137,15 @@ class OrderGatewayActor(Strategy):
     async def _async_modify_stop(self, symbol: str, new_price: float) -> dict:
         """
         在引擎事件循环中修改该标的的活跃止损单触发价。
-        找到 STOP_MARKET 单后调用 modify_order()。
+        先查 cache.orders()，找不到时从 Redis order:stop:{sym} 取 client_order_id 再查。
+        引擎重启后 IBKR 会重将止损单推入 cache，因此 Redis fallback 很可靠。
         """
         try:
             TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
             target_order = None
             target_instrument = None
 
+            # ─ 先从 cache 查找 ──────────────────────────────────
             for order in self.cache.orders():
                 sym = order.instrument_id.symbol.value
                 if sym != symbol:
@@ -1110,6 +1158,34 @@ class OrderGatewayActor(Strategy):
                     target_order = order
                     target_instrument = self.cache.instrument(order.instrument_id)
                     break
+
+            # ─ cache 找不到：尝试 Redis fallback ─────────────────
+            # 引擎重启后 IBKR 不一定立即推充 cache，可能需要等待一个心跳
+            if target_order is None and self._redis:
+                try:
+                    stored = self._redis.get(f"order:stop:{symbol}")
+                    if stored:
+                        data = json.loads(stored)
+                        coid_str = data.get("client_order_id", "")
+                        if coid_str:
+                            from nautilus_trader.model.identifiers import ClientOrderId
+                            coid = ClientOrderId(coid_str)
+                            cached = self.cache.order(coid)
+                            if cached:
+                                status_name = getattr(cached.status, "name", str(cached.status))
+                                if status_name not in TERMINAL_STATUS:
+                                    target_order = cached
+                                    target_instrument = self.cache.instrument(cached.instrument_id)
+                                    self.log.info(
+                                        f"[ModifySL] 通过 Redis fallback 找到订单: {coid_str}"
+                                    )
+                            else:
+                                self.log.warning(
+                                    f"[ModifySL] Redis 有记录 ({coid_str}) 但 cache 尝无此订单。"
+                                    f"引擎刷新后再试。"
+                                )
+                except Exception as e:
+                    self.log.warning(f"[ModifySL] Redis fallback 失败: {e}")
 
             if target_order is None:
                 self.log.warning(f"[ModifySL] 未找到 {symbol} 的活跃止损单")
