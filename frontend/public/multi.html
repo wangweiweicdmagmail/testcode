@@ -1370,8 +1370,17 @@
                         const id = (o.client_order_id || '').slice(-6);
                         switch (o.status) {
                             case 'ACCEPTED':
-                                speak(`${sym} 订单已接受`, true);
-                                showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                                // 止损单被接受时（STOP_MARKET + trigger_price），进入 modifyMode
+                                if (o.order_type === 'STOP_MARKET' && o.trigger_price) {
+                                    const slPrice = parseFloat(o.trigger_price);
+                                    if (state[sym]?.ctx) {
+                                        enterModifyMode(state[sym].ctx, slPrice);
+                                    }
+                                    showToast(`✅ ${sym} 止损单已接受 @ ${slPrice.toFixed(2)}`, 'ok');
+                                } else {
+                                    speak(`${sym} 订单已接受`, true);
+                                    showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
+                                }
                                 break;
                             case 'FILLED': {
                                 // 判断是开仓还是平仓：若当前有持仓且成交方向与持仓方向相反 → 平仓
