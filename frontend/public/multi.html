@@ -1417,18 +1417,34 @@
                         const id = (o.client_order_id || '').slice(-6);
                         switch (o.status) {
                             case 'ACCEPTED':
-                                // 止损单被接受时（STOP_MARKET + trigger_price），进入 modifyMode
+                            case 'UPDATED': {
+                                // 止损单被接受/修改时（STOP_MARKET + trigger_price）→ 更新止损线
                                 if (o.order_type === 'STOP_MARKET' && o.trigger_price) {
                                     const slPrice = parseFloat(o.trigger_price);
-                                    if (state[sym]?.ctx) {
-                                        enterModifyMode(state[sym].ctx, slPrice);
+                                    // 更新图表止损价格线
+                                    if (state[sym]?.slPriceLine) {
+                                        state[sym].slPriceLine.applyOptions({
+                                            price: slPrice,
+                                            title: `止损 ${slPrice.toFixed(2)}`,
+                                        });
                                     }
-                                    showToast(`✅ ${sym} 止损单已接受 @ ${slPrice.toFixed(2)}`, 'ok');
-                                } else {
+                                    if (state[sym]?.position) {
+                                        state[sym].position.stop_loss = slPrice;
+                                        const slEl = document.getElementById(`p-sl-${sym}`);
+                                        if (slEl) slEl.textContent = slPrice.toFixed(2);
+                                    }
+                                    if (o.status === 'ACCEPTED') {
+                                        showToast(`✅ ${sym} 止损单已接受 @ ${slPrice.toFixed(2)}`, 'ok');
+                                    } else {
+                                        showToast(`🔄 ${sym} 止损价已更新 → ${slPrice.toFixed(2)}`, 'ok');
+                                    }
+                                } else if (o.status === 'ACCEPTED') {
                                     speak(`${sym} 订单已接受`, true);
                                     showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
                                 }
                                 break;
+                            }
+
                             case 'FILLED': {
                                 // 判断是开仓还是平仓：若当前有持仓且成交方向与持仓方向相反 → 平仓
                                 const fillSym = sym;

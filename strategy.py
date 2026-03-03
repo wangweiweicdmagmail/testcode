@@ -922,7 +922,8 @@ class BarLoggerStrategy(Strategy):
             )
 
             # ★ 发布内部事件供 ExitManager 止盈逻辑使用
-            bar_dict_with_id = {**bar_dict, "instrument_id": str(self.config.instrument_id)}
+            # 使用当前 bar 所属的真实 instrument_id（修复多标的时硬编码主合约的问题）
+            bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
             self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
         except Exception as e:
             self.log.error(f"[BAR] {sym}: ✗ Redis 写入失败: {e}")
