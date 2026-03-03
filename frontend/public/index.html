@@ -588,6 +588,18 @@
       box-shadow: 0 0 0 4px rgba(239, 83, 80, .35);
     }
 
+    /* 持仓期间止损修改模式：橙色常亮 */
+    #sl-handle.modify {
+      display: flex;
+      background: #ff9800;
+      box-shadow: 0 2px 10px rgba(255, 152, 0, .55);
+      animation: none;
+    }
+
+    #sl-handle.modify:hover {
+      box-shadow: 0 0 0 4px rgba(255, 152, 0, .35), 0 2px 10px rgba(255, 152, 0, .55);
+    }
+
     #sl-handle .sl-icon {
       flex-shrink: 0;
       opacity: .9;
@@ -1217,6 +1229,7 @@
 
     // 拖动开仓模式状态
     let orderMode = false;
+    let modifyMode = false;   // 持仓期间：拖动修改止损价
     let slPrice = null;  // 当前止损价
     let slPriceLine = null;  // LWC priceLine 对象
     let orderDir = 'BUY'; // 'BUY' | 'SELL'
@@ -1280,6 +1293,10 @@
         currentPosition.stop_loss = price;
         refreshPositionPanel(currentPosition);
       }
+      // 止损线已就位，自动进入 modifyMode（延迟等图表初始化）
+      if (!orderMode) {
+        setTimeout(() => enterModifyMode(price), 200);
+      }
     }
 
     function clearOrderLines() {
@@ -1293,6 +1310,8 @@
       }
       activeOrderLines.entryData = null;
       activeOrderLines.slData = null;
+      // 清除止损线时退出 modifyMode
+      exitModifyMode();
     }
 
     // ─── 语音提醒模块 ─────────────────────────────────────
@@ -2137,12 +2156,31 @@
 
     // 更新拖动把手的 Y 坐标（单元素直接定位）
     function updateHandlePosition() {
-      if (!orderMode || slPrice === null) return;
-      const y = candleSeries.priceToCoordinate(slPrice);  // 相对 chartEl
+      if (!orderMode && !modifyMode) return;
+      const px = slPrice;
+      if (px === null) return;
+      const y = candleSeries.priceToCoordinate(px);  // 相对 chartEl
       if (y === null) return;
       const offset = getChartOffset();
       slHandle.style.top = (y + offset) + 'px';  // 转换为相对 chart-container
+      slPriceVal.textContent = px.toFixed(2);
+    }
+
+    // 进入止损修改模式（持仓期间橙色药丸）
+    function enterModifyMode(px) {
+      if (orderMode) return;  // 开仓模式优先
+      modifyMode = true;
+      slPrice = parseFloat(px);
+      slHandle.classList.remove('active');
+      slHandle.classList.add('modify');
       slPriceVal.textContent = slPrice.toFixed(2);
+      updateHandlePosition();
+    }
+
+    // 退出止损修改模式
+    function exitModifyMode() {
+      modifyMode = false;
+      slHandle.classList.remove('modify');
     }
 
     // 更新 LWC priceLine 和面板的止损值
@@ -2212,18 +2250,22 @@
       slHandle.classList.remove('active');
       dragCapture.classList.remove('active');
       orderPanel.classList.remove('active');
+      // 开仓后如有止损单，自动切回 modifyMode
+      if (activeOrderLines.slData?.price) {
+        setTimeout(() => enterModifyMode(activeOrderLines.slData.price), 300);
+      }
     }
 
     // 拖动开始
     slHandle.addEventListener('mousedown', e => {
-      if (!orderMode) return;
+      if (!orderMode && !modifyMode) return;
       isDragging = true;
       document.body.style.cursor = 'ns-resize';  // 全局鼠标改为调整光标
       dragCapture.classList.add('active');
       e.preventDefault();
     });
 
-    // 拖动移动：鼠标 Y 是相对页面的，需要转换为相对 chart-container 的 Y
+    // 拖动移动：鸠标 Y 是相对页面的，需要转换为相对 chart-container 的 Y
     document.addEventListener('mousemove', e => {
       if (!isDragging) return;
       const cRect = containerEl.getBoundingClientRect();
@@ -2232,7 +2274,13 @@
       const chartY = e.clientY - eRect.top;          // 相对 chartEl（用于 coordinateToPrice）
       const price = candleSeries.coordinateToPrice(chartY);
       if (price === null) return;
-      applySL(price, containerY);  // 拖动大小直接用 container Y，不做回算
+      if (orderMode) {
+        applySL(price, containerY);  // 开仓模式：拖动大小直接用 container Y
+      } else if (modifyMode) {
+        slPrice = parseFloat(price.toFixed(2));
+        slPriceVal.textContent = slPrice.toFixed(2);
+        slHandle.style.top = containerY + 'px';
+      }
     });
 
     // 拖动结束：用 priceToCoordinate 做一次精确校对对齐止损线
@@ -2242,6 +2290,30 @@
       document.body.style.cursor = '';
       dragCapture.classList.remove('active');
       updateHandlePosition();  // 精确回算一次，确保控件与止损线对齐
+
+      // modifyMode：松手后调引擎修改止损单
+      if (modifyMode && slPrice) {
+        fetch(`/api/modify-stop/${SYMBOL}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ price: slPrice }),
+        }).then(r => r.json()).then(result => {
+          if (!result.ok) {
+            speak(`${SYMBOL} 止损修改失败`, true);
+            showToast(`⚠️ ${SYMBOL} 止损修改失败: ${result.error}`, 'warn');
+          } else {
+            showToast(`✅ ${SYMBOL} 止损已修改为 ${slPrice.toFixed(2)}`, 'ok');
+            // 修改止损线标题
+            if (activeOrderLines.slLine) {
+              activeOrderLines.slLine.applyOptions({ title: `✖ 止损 @${slPrice.toFixed(2)}` });
+            }
+            if (currentPosition) {
+              currentPosition.stop_loss = slPrice;
+              document.getElementById('p-sl').textContent = slPrice.toFixed(2);
+            }
+          }
+        }).catch(e => showToast(`网络错误: ${e.message}`, 'warn'));
+      }
     });
 
     // 止损价只能通过拖动控件调整，不开放键盘输入
