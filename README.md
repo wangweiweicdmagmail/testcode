@@ -183,10 +183,10 @@ cd frontend && node server.js
 
 | 标记 | 外观 | 触发时机 |
 |------|------|---------|
-| 开多/开空 | 蓝/红色 ↑↓ 箭头 | `order:update` FILLED（入场单） |
-| 止损平仓 | 橙色 ↑↓ 箭头 | `order:update` FILLED（止损单） |
+| 开多/开空 | 蓝/红色 ↑↓ 箭头 | `order:update` FILLED（开仓单，与持仓同向） |
+| 平仓 | 橙色 ● 圆点 | `order:update` FILLED（平仓单，与持仓反向） |
 | 止损触发 | 黄色 ● 圆点 | `order:update` TRIGGERED |
-| 平仓 | 橙色 ● 圆点 | `position:update` closed |
+| 平仓（仓位事件） | 橙色 ● 圆点 | `position:update` closed |
 
 > 标记用 `orderMarkers` 全量数组统一管理，自动升序刷新，符合 LightweightCharts API 要求。
 

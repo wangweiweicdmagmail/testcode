@@ -1306,22 +1306,47 @@
                                 showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
                                 break;
                             case 'FILLED': {
-                                speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
-                                showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
-                                // 成交标记（蓝色/红色箭头）
+                                // 判断是开仓还是平仓：若当前有持仓且成交方向与持仓方向相反 → 平仓
                                 const fillSym = sym;
+                                const curPos = state[fillSym]?.position;
+                                const isBuy = o.side === 'BUY';
+                                const isClose = curPos
+                                    ? (curPos.side === 'LONG' && !isBuy) || (curPos.side === 'SHORT' && isBuy)
+                                    : false;
+
+                                if (isClose) {
+                                    speak(`${sym} 平仓成交，成交价 ${o.last_px}`, true);
+                                    showToast(`✅ ${sym} 平仓成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                                } else {
+                                    speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
+                                    showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                                }
+
+                                // 成交标记
                                 if (state[fillSym]) {
                                     const ft = state[fillSym].lastTickTime;
                                     if (ft) {
-                                        const isBuy = o.side === 'BUY';
-                                        state[fillSym].orderMarkers.push({
-                                            time: ft,
-                                            position: isBuy ? 'belowBar' : 'aboveBar',
-                                            color: isBuy ? '#2196f3' : '#ef5350',
-                                            shape: isBuy ? 'arrowUp' : 'arrowDown',
-                                            text: `${isBuy ? '开多' : '开空'} @${o.last_px}`,
-                                            size: 1,
-                                        });
+                                        if (isClose) {
+                                            // 平仓：橙色圆点
+                                            state[fillSym].orderMarkers.push({
+                                                time: ft,
+                                                position: isBuy ? 'belowBar' : 'aboveBar',
+                                                color: '#ff9800',
+                                                shape: 'circle',
+                                                text: `平仓 @${o.last_px}`,
+                                                size: 0.8,
+                                            });
+                                        } else {
+                                            // 开仓：蓝/红箭头
+                                            state[fillSym].orderMarkers.push({
+                                                time: ft,
+                                                position: isBuy ? 'belowBar' : 'aboveBar',
+                                                color: isBuy ? '#2196f3' : '#ef5350',
+                                                shape: isBuy ? 'arrowUp' : 'arrowDown',
+                                                text: `${isBuy ? '开多' : '开空'} @${o.last_px}`,
+                                                size: 1,
+                                            });
+                                        }
                                         refreshMarkers(fillSym);
                                     }
                                 }
