@@ -869,7 +869,7 @@
             state[symbol].position = position;
 
             // 开仓价线（蓝色虚线）
-            candleSeries.createPriceLine({
+            state[symbol].entryPriceLine = candleSeries.createPriceLine({
                 price: entryPrice, color: '#2196f3', lineWidth: 1,
                 lineStyle: LightweightCharts.LineStyle.Dashed,
                 axisLabelVisible: true,
@@ -936,8 +936,25 @@
             } else { pnlPctEl.textContent = ''; }
         }
 
+        // 清除图表价格线（开仓线 + 止损线）
+        function clearChartLines(symbol) {
+            const cs = state[symbol]?.candleSeries;
+            if (!cs) return;
+            if (state[symbol].entryPriceLine) {
+                try { cs.removePriceLine(state[symbol].entryPriceLine); } catch (_) { }
+                state[symbol].entryPriceLine = null;
+            }
+            if (state[symbol].slPriceLine) {
+                try { cs.removePriceLine(state[symbol].slPriceLine); } catch (_) { }
+                state[symbol].slPriceLine = null;
+            }
+            // 同时退出 modifyMode
+            if (state[symbol]?.ctx) exitModifyMode(state[symbol].ctx);
+        }
+
         function clearPositionUI(symbol) {
             state[symbol].position = null;
+            clearChartLines(symbol);  // 同时清除图表价格线
             document.getElementById(`pos-panel-${symbol}`).style.display = 'none';
             document.getElementById(`p-entry-${symbol}`).textContent = '—';
             document.getElementById(`p-sl-${symbol}`).textContent = '—';
@@ -1384,16 +1401,12 @@
                                     refreshMarkers(posSym);
                                 }
                                 clearPositionUI(posSym);
-                                // 平仓后退出 modifyMode
-                                if (state[posSym].ctx) exitModifyMode(state[posSym].ctx);
+                                // clearPositionUI 已内含 exitModifyMode
                                 speak(`${posSym} 仓位已平仓`, true);
                             } else {
                                 const isNew = !state[posSym].position;
                                 addPositionLines(posSym, payload);
-                                // 有止损价时自动进入 modifyMode
-                                if (payload.stop_loss && state[posSym].ctx) {
-                                    enterModifyMode(state[posSym].ctx, payload.stop_loss);
-                                }
+                                // 注意：不自动 enterModifyMode，等用户点击止损线
                                 if (isNew) speak(`${posSym} ${payload.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
                             }
                         }
