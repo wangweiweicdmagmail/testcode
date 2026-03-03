@@ -96,9 +96,10 @@ cd frontend && node server.js
 | POST | `/api/modify-stop/:symbol` | 修改止损价（代理引擎 + 更新 Redis position.stop_loss） |
 | POST | `/api/settings/:symbol` | 策略开关，同步到引擎 |
 
-## 已知未完成
+## 已实现功能汇总
 
-- **平仓按钮**（`multi.html` → DELETE `/api/position/:symbol`）：前端确认框 ✅，Node.js 路由 ✅，**引擎 `POST /close` ❌ 待实现**。目前按钮只删 Redis 记录，不提交 IBKR 平仓指令。临时方案：在 TWS 手动平仓。
+- **平仓按钮** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
+- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸出现 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；成功后原价格线移到新位置，止损成交/平仓后价格线自动清除
 
 ## Redis 数据结构
 

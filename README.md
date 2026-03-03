@@ -241,12 +241,25 @@ cd frontend && node server.js
 
 ### 平仓操作（四图总览）
 
-点击 **「平仓」** 按钮后弹出确认框，确认后调用 `DELETE /api/position/:symbol`。
+点击 **「平仓」** 按钮后弹出确认框，确认后调用 `DELETE /api/position/:symbol` → `POST /close`（引擎端）：
 
-> [!WARNING]
-> **当前版本（待完善）**：该路由仅删除 Redis 中的 `position:{symbol}` 记录，**不向 IBKR 提交实际平仓指令**。
-> 完整平仓逻辑（引擎端 `POST /close` ← server.js ← 前端）尚在实现中。
-> 手动平仓请直接在 TWS 中操作。
+1. 引擎取消关联止损单
+2. 提交反向市价单平仓
+3. 前端通过 WebSocket `position:update` 接收平仓通知，自动清除价格线和仓位面板
+
+> [!NOTE]
+> 引擎离线时回退为仅清除 Redis 记录，并警告用户手动在 TWS 中平仓。
+
+### 持仓止损价修改（单图 & 四图）
+
+开仓后，可实时拖动修改已提交给 IBKR 的止损单触发价：
+
+1. **点击止损价格线** 附近区域 → 橙色药丸出现在止损价位置
+2. 上下拖动药丸 → 橙色临时跟踪线跟随移动，原止损价格线保持不动
+3. **松手** → 临时线消失、药丸消失，`POST /api/modify-stop/:symbol` 修改 IBKR 止损单
+4. 修改成功 → 原止损价格线移动到新价格，Toast 提示修改结果
+
+> 止损成交或手动平仓后，价格线自动从图表上消失。
 
 ## 发送测试订单
 
@@ -318,7 +331,8 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 | GET | `/debug-orders` | 调试：打印 cache 中全部订单和持仓 |
 | POST | `/order` | 下单（MARKET / LIMIT / BRACKET） |
 | POST | `/settings` | 策略开关（st_trail 跟踪止盈） |
-| POST | `/close` | **（待实现）** 平仓：反向市价单 + 取消止损 |
+| POST | `/close` | 平仓：取消止损单 + 反向市价单 |
+| POST | `/modify-stop` | 修改活跃止损单触发价（body: `{symbol, price}`） |
 
 ### Node.js 服务端（`server.js` 端口 3000）
 
@@ -331,7 +345,8 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 | GET | `/api/active-orders` | 活跃订单（代理引擎） |
 | POST | `/api/order/:symbol` | 下单（代理引擎） |
 | POST | `/api/position/:symbol` | 手动写入仓位记录（旧式，调试用） |
-| DELETE | `/api/position/:symbol` | 平仓（**待完善**：目前仅删 Redis 记录，不向 IBKR 平仓） |
+| DELETE | `/api/position/:symbol` | 平仓（调引擎 `POST /close`，引擎离线时仅清 Redis） |
+| POST | `/api/modify-stop/:symbol` | 修改止损价（代理引擎 + 更新 Redis `position.stop_loss`） |
 | POST | `/api/settings/:symbol` | 更新策略开关，同步到引擎 |
 
 ## 常见问题
