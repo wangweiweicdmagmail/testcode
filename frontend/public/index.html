@@ -2442,13 +2442,13 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
     loadIndicators();
     connectWS();
 
-    // ─── 引擎心跳超时检查（每 5s 检查一次，超过 15s 无心跳 → 判定下线）──
+    // ─── 引擎心跳超时检查（每 5s 检查一次，超过 30s 无心跳 → 判定下线）──
     setInterval(() => {
       if (!lastHbTime) return; // 从未收到过心跳，不判断
       const gap = Date.now() - lastHbTime;
       const dot = document.getElementById('hb-dot');
       const txt = document.getElementById('hb-text');
-      if (gap > 15000 && engineOnline) {
+      if (gap > 30000 && engineOnline) {
         // 超时 → 引擎下线
         engineOnline = false;
         if (dot) dot.style.background = '#ef5350';
@@ -2471,14 +2471,15 @@ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
         const hasEntry = !!symData.entry;
         const hasSl = !!(symData.stop_loss?.price);
 
-        // 服务器无仓位但本地有价格线 → 清除（外部平仓/漏事件）
+        // 服务器无仓位但本地有入场线 → 清除（外部平仓/漏事件）
         if (!hasEntry && activeOrderLines.entryLine) {
           console.log('[巡检] 仓位已消失，清除价格线');
           clearOrderLines();
           clearPositionUI();
         }
-        // 服务器无止损但本地有止损线 → 清除止损线
-        else if (hasEntry && !hasSl && activeOrderLines.slLine) {
+        // 服务器无止损但本地有止损线 → 清除止损线（不依赖是否有仓位）
+        // 覆盖场景：IBKR 手动取消、引擎重启对账绕过 on_order_canceled handler 等
+        if (!hasSl && activeOrderLines.slLine) {
           console.log('[巡检] 止损单已消失，清除止损线');
           try { candleSeries.removePriceLine(activeOrderLines.slLine); } catch (e) { }
           activeOrderLines.slLine = null;

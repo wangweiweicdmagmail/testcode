@@ -134,34 +134,11 @@ class OrderGatewayActor(Strategy):
         super().__init__(config)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._http_server: HTTPServer | None = None
-        self._sl_tasks: list[asyncio.Task] = []  # P5: 保存 task 引用，避免被 GC 或引擎停止时静默取消
-        self._redis: "_redis_lib.Redis | None" = None  # Redis 确认客户端
-
-        # 引擎 IB client 引用（由 main.py 在 node.build() 后注入）
-        self._ib_client = None
-        # 账户余额定期轮询（充当兆底：订单事件已覆盖大部分情屦1）
-        self._account_poll_timer: threading.Timer | None = None
-        self._account_poll_running: bool = False
-        self._account_poll_interval: int = 120  # 定期轮询间隔（秒）
-        # 防止并发 reqAccountSummary（IBKR code=322 限制同时只能有1个请求）
-        self._account_sync_lock = threading.Lock()
-        # accountSummary 实时缓存：{account_id: {currency: {tag: float}}}
-        # 由引擎已有的 accountSummary-{account_id} 事件实时写入
-        self._account_summary_cache: dict = {}
+        self._sl_tasks: list[asyncio.Task] = []  # 保存 task 引用，避免被 GC 或引擎停止时静默取消
+        self._redis: "_redis_lib.Redis | None" = None  # Redis 推送客户端
         # 待提交的止损单：{entry_client_order_id: (sl_order, sl_tasks_params)}
         # 入场单成交后在 on_order_filled 里提交
         self._pending_sl: dict = {}
-
-    # ------------------------------------------------------------------
-    # 引擎 IB client 注入（main.py 在 node.build() 后调用）
-    # ------------------------------------------------------------------
-
-    def set_ib_client(self, ib_client) -> None:
-        """接收引擎的 InteractiveBrokersClient 引用，复用已有 TWS 连接"""
-        self._ib_client = ib_client
-        # node.build() 阶段 self.log 尚未初始化，用 print 避免异常
-        print("[Gateway] IB client 已注入 OrderGatewayActor，FA Group 余额将使用引擎连接")
-
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -176,7 +153,7 @@ class OrderGatewayActor(Strategy):
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
                 self._loop = asyncio.get_event_loop()
-            
+
             self.log.info(f"[Gateway] 成功获取事件循环: {self._loop}")
 
             # Redis 客户端（用于向前端推送订单状态通知）
@@ -215,17 +192,6 @@ class OrderGatewayActor(Strategy):
             import traceback
             self.log.error(traceback.format_exc())
 
-        # 延迟 30s 注册 accountSummary 事件（等待 IB client 注入 + TWS 完成初始化）
-        _t = threading.Timer(30.0, self._register_account_summary_events)
-        _t.daemon = True
-        _t.start()
-
-        # 启动定期写入 Redis（待事件注册后 60s 开始，之后每 120s）
-        self._account_poll_running = True
-        _poll_t = threading.Timer(60.0, self._start_account_poll)
-        _poll_t.daemon = True
-        _poll_t.start()
-
         # 启动心跳线程（每 5s 向 Redis 发布 engine:heartbeat）
         self._heartbeat_running = True
         _hb_t = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -238,17 +204,12 @@ class OrderGatewayActor(Strategy):
             handler=self.on_external_order_command,
         )
 
-        # P5: 取消未完成的止损修改计划
+        # 取消未完成的止损修改计划
         for t in self._sl_tasks:
             if not t.done():
                 t.cancel()
                 self.log.warning(f"[Gateway] 止损修改 task 已取消: {t}")
         self._sl_tasks.clear()
-
-        # 停止账户余额定期轮询
-        self._account_poll_running = False
-        if self._account_poll_timer and self._account_poll_timer.is_alive():
-            self._account_poll_timer.cancel()
 
         # 停止心跳
         self._heartbeat_running = False
@@ -286,171 +247,39 @@ class OrderGatewayActor(Strategy):
 
     # ------------------------------------------------------------------
     # 账户余额同步（FA Group 余额 → Redis）
+    # 使用引擎标准回调 on_account_state，IB 每次推送账户数据后自动触发
     # ------------------------------------------------------------------
 
-    def _start_account_poll(self) -> None:
-        """账户余额定期轮询（兜底补偿，订单事件已覆盖大部分情况）"""
-        if not self._account_poll_running:
-            return
+    def on_account_state(self, event) -> None:
+        """
+        引擎标准回调：IB 推送 accountSummary 数据后自动触发（约每 3 分钟一次）。
+        FA Group 场景下 IB 服务端已在服务器端做聚合，主账号收到的是各子账户余额总和。
+        直接从引擎 Cache 读取，写入 Redis 即可，无需自己发 reqAccountSummary。
+        """
         try:
-            self._sync_account_to_redis()
-        except Exception as e:
-            self.log.warning(f"[Account] 定期轮询异常: {e}")
-        finally:
-            if self._account_poll_running:
-                self._account_poll_timer = threading.Timer(
-                    self._account_poll_interval, self._start_account_poll
-                )
-                self._account_poll_timer.daemon = True
-                self._account_poll_timer.start()
-
-    def _register_account_summary_events(self) -> None:
-        """
-        查询 FA Group 账户余额：
-
-        直接 patch self._ib_client.process_account_summary 实例方法，
-        按 req_id 精确过滤只收 reqAccountSummary(fa_group) 这次请求的响应，
-        完全隔离引擎 subscribe_account_summary("All") 的持续推送干扰。
-        """
-        if self._ib_client is None:
-            self.log.warning("[Account] IB client 未注入，延迟 10s 再试")
-            t = threading.Timer(10.0, self._register_account_summary_events)
-            t.daemon = True
-            t.start()
-            return
-
-        fa_group = self.config.fa_group
-        if not fa_group:
-            self.log.error("[Account] fa_group 未配置，无法查询账户余额")
-            return
-
-        group_name = fa_group  # 直接用 FA Group 名称（dt_test）
-
-        try:
-            from ibapi.account_summary_tags import AccountSummaryTags
-
-            req_id = self._ib_client._next_req_id()
-
-            # 独立缓存：只存本次查询返回的账户数据（按 req_id 过滤）
-            query_cache: dict = {}
-            target_req_id = req_id  # 闭包捕获
-
-            # 保存原始实例方法
-            original_process = self._ib_client.process_account_summary
-
-            async def _patched_process(*, req_id, account_id, tag, value, currency):
-                # 只收本次 req_id 对应的数据
-                if req_id == target_req_id and currency and tag:
-                    if account_id not in query_cache:
-                        query_cache[account_id] = {}
-                    if currency not in query_cache[account_id]:
-                        query_cache[account_id][currency] = {}
-                    try:
-                        query_cache[account_id][currency][tag] = float(value)
-                    except (ValueError, TypeError):
-                        pass
-                # 始终调用原始方法，不破坏引擎内部逻辑
-                await original_process(req_id=req_id, account_id=account_id,
-                                       tag=tag, value=value, currency=currency)
-
-            # 安装 patch
-            self._ib_client.process_account_summary = _patched_process
-
-            # 发起查询
-            self._ib_client._eclient.reqAccountSummary(req_id, group_name, AccountSummaryTags.AllTags)
-            self.log.info(f"[Account] 已触发 reqAccountSummary({group_name}) req_id={req_id}，等待 20s 收集数据")
-
-            def _finish():
-                # 卸载 patch，恢复原始方法
-                self._ib_client.process_account_summary = original_process
-                try:
-                    self._ib_client._eclient.cancelAccountSummary(req_id)
-                    self.log.info(f"[Account] cancelAccountSummary req_id={req_id}，共 {len(query_cache)} 个账户响应")
-                except Exception as ce:
-                    self.log.warning(f"[Account] cancelAccountSummary 异常: {ce}")
-                # 将本次查询结果存入缓存，再写入 Redis
-                self._account_summary_cache = query_cache
-                self._sync_account_to_redis()
-
-            t = threading.Timer(20.0, _finish)
-            t.daemon = True
-            t.start()
-
-        except Exception as e:
-            self.log.warning(f"[Account] reqAccountSummary 触发失败: {e}，延迟 10s 后用 fallback")
-            t = threading.Timer(10.0, self._sync_account_to_redis)
-            t.daemon = True
-            t.start()
-
-    def _sync_account_to_redis(self) -> None:
-        """
-        将 _account_summary_cache 里累加的子账户数据汇总后写入 Redis。
-
-        \u6570据来源：引擎已有的 subscribe_account_summary("All") 实时推送（不会再发 reqAccountSummary）。
-        """
-        if not self._account_sync_lock.acquire(blocking=False):
-            self.log.debug("[Account] 账户余额同步已在进行中，跳过本次")
-            return
-        try:
-            cache = self._account_summary_cache
-            if cache:
-                # 按货币累加所有子账户的 NetLiquidation / FullAvailableFunds
-                totals: dict = {}   # {currency: {tag: float}}
-                for aid, currencies in cache.items():
-                    for currency, tags in currencies.items():
-                        if currency not in totals:
-                            totals[currency] = {}
-                        for tag, val in tags.items():
-                            totals[currency][tag] = totals[currency].get(tag, 0.0) + val
-
-                balances = []
-                for currency, tags in totals.items():
-                    net_liq  = tags.get("NetLiquidation",    0.0)
-                    avail    = tags.get("FullAvailableFunds", 0.0)
-                    init_mar = tags.get("FullInitMarginReq",  0.0)
-                    maint_mar= tags.get("FullMaintMarginReq", 0.0)
-                    if net_liq > 0 or avail > 0:
-                        balances.append({
-                            "currency": currency,
-                            "total":  round(net_liq,  2),
-                            "free":   round(avail,    2),
-                            "locked": round(init_mar + maint_mar, 2),
-                        })
-
-                if balances:
-                    fa_group = self.config.fa_group or "FA"
-                    self.log.info(
-                        f"[Account] ✓ FA Group={fa_group} 余额查询成功（{len(cache)} 个子账户汇总）"
-                    )
-                    self._write_account_to_redis(fa_group, balances)
-                    return
-                else:
-                    self.log.warning("[Account] 缓存数据有效为零，fallback")
-            else:
-                self.log.warning("[Account] _account_summary_cache 为空，待 TWS 推送数据...fallback")
-
-            # Fallback：cache.account_for_venue
             from nautilus_trader.model.identifiers import Venue
             account = self.cache.account_for_venue(Venue("IB"))
             if account is None:
-                self.log.warning("[Account] cache.account_for_venue('IB') 返回 None")
+                self.log.debug("[Account] on_account_state: cache 暂无账户数据，跳过")
                 return
             balances = []
             for currency, bal in account.balances().items():
-                balances.append({
-                    "currency": str(currency),
-                    "total":    round(float(bal.total.as_double()),  2),
-                    "free":     round(float(bal.free.as_double()),   2),
-                    "locked":   round(float(bal.locked.as_double()), 2),
-                })
+                total  = float(bal.total.as_double())
+                free   = float(bal.free.as_double())
+                locked = float(bal.locked.as_double())
+                if total > 0 or free > 0:
+                    balances.append({
+                        "currency": str(currency),
+                        "total":    round(total,  2),
+                        "free":     round(free,   2),
+                        "locked":   round(locked, 2),
+                    })
             if balances:
-                account_id = str(account.id)
-                self.log.info(f"[Account] Fallback 余额  account={account_id}")
-                self._write_account_to_redis(account_id, balances)
+                fa_group = self.config.fa_group or str(account.id)
+                self._write_account_to_redis(fa_group, balances)
         except Exception as e:
-            self.log.warning(f"[Account] _sync_account_to_redis 失败: {e}")
-        finally:
-            self._account_sync_lock.release()
+            self.log.warning(f"[Account] on_account_state 处理异常: {e}")
+
 
     def _write_account_to_redis(self, account_id: str, balances: list) -> None:
         """将账户余额写入 Redis account:funds 并 PUBLISH account:update"""
@@ -472,66 +301,6 @@ class OrderGatewayActor(Strategy):
                 )
         except Exception as e:
             self.log.warning(f"[Account] Redis 写入失败: {e}")
-
-    def _trigger_account_sync(self, delay: float = 3.0) -> None:
-        """
-        订单事件后触发一次账户余额刷新。
-
-        不读旧缓存，而是重新发起 reqAccountSummary(fa_group) 请求，
-        等 10s 收集 IBKR 最新数据后写入 Redis。
-        避免：成交/撤单后余额未更新的问题。
-        """
-        def _do_refresh():
-            if self._ib_client is None:
-                return
-            fa_group = self.config.fa_group
-            if not fa_group:
-                return
-            try:
-                from ibapi.account_summary_tags import AccountSummaryTags
-                req_id = self._ib_client._next_req_id()
-                query_cache: dict = {}
-                target_req_id = req_id
-                original_process = self._ib_client.process_account_summary
-
-                async def _patched(*, req_id, account_id, tag, value, currency):
-                    if req_id == target_req_id and currency and tag:
-                        if account_id not in query_cache:
-                            query_cache[account_id] = {}
-                        if currency not in query_cache[account_id]:
-                            query_cache[account_id][currency] = {}
-                        try:
-                            query_cache[account_id][currency][tag] = float(value)
-                        except (ValueError, TypeError):
-                            pass
-                    await original_process(req_id=req_id, account_id=account_id,
-                                           tag=tag, value=value, currency=currency)
-
-                self._ib_client.process_account_summary = _patched
-                self._ib_client._eclient.reqAccountSummary(req_id, fa_group, AccountSummaryTags.AllTags)
-                self.log.debug(f"[Account] 订单事件后刷新账户余额 req_id={req_id}，等待 10s")
-
-                def _finish():
-                    self._ib_client.process_account_summary = original_process
-                    try:
-                        self._ib_client._eclient.cancelAccountSummary(req_id)
-                    except Exception:
-                        pass
-                    if query_cache:
-                        self._account_summary_cache = query_cache
-                    self._sync_account_to_redis()
-
-                t2 = threading.Timer(10.0, _finish)
-                t2.daemon = True
-                t2.start()
-            except Exception as e:
-                self.log.warning(f"[Account] _trigger_account_sync 失败: {e}")
-                # fallback：直接读旧缓存
-                self._sync_account_to_redis()
-
-        t = threading.Timer(delay, _do_refresh)
-        t.daemon = True
-        t.start()
 
 
     # ------------------------------------------------------------------
@@ -651,40 +420,66 @@ class OrderGatewayActor(Strategy):
         TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
         try:
             # 1. 已打开的仓位 → 入场价
-            for pos in self.cache.positions_open():
+            open_positions = list(self.cache.positions_open())
+            self.log.info(f"[SL诊断] positions_open 数量={len(open_positions)}")
+            for pos in open_positions:
                 sym = pos.instrument_id.symbol.value
+                # ★ 二次校验：用 portfolio.net_position 确认净仓位不为 0
+                # portfolio 比 cache 更实时，能更快感知 TWS 外部平仓
+                try:
+                    net_qty = self.portfolio.net_position(pos.instrument_id)
+                    if net_qty == 0:
+                        self.log.warning(
+                            f"[SL诊断] ⚠️ {sym} cache 有仓位但 portfolio.net_position=0，"
+                            f"可能已被外部平仓，跳过入场线显示"
+                        )
+                        continue
+                except Exception:
+                    pass  # 若 portfolio 查询失败，仍显示 cache 数据
                 result.setdefault(sym, {})
                 result[sym]["entry"] = {
                     "price": float(pos.avg_px_open),
                     "side": "LONG" if pos.is_long else "SHORT",
                     "quantity": float(pos.quantity),
                 }
-            # 2. 使用 orders() 全量遍历，过滤活跃的 STOP_MARKET 订单
-            #    （orders_open() 可能不含 SUBMITTED/PENDING_NEW 状态的 IBKR 止损单）
-            for order in self.cache.orders():
-                order_type = str(order.order_type).replace("OrderType.", "")
-                if order_type != "STOP_MARKET":
-                    continue
-                order_status = str(order.status).replace("OrderStatus.", "")
-                if order_status in TERMINAL_STATUS:
-                    continue  # 跳过终态订单
-                sym = order.instrument_id.symbol.value
-                result.setdefault(sym, {})
-                tp = getattr(order, "trigger_price", None)
-                self.log.debug(
-                    f"[Gateway] 活跃止损单 {sym}: status={order_status} "
-                    f"trigger_price={tp} order_type={order_type}"
+                self.log.info(f"[SL诊断] 开仓仓位 {sym}: side={result[sym]['entry']['side']} avg_px={pos.avg_px_open}")
+            # 2. 使用 orders() 全量遍历，打印每个订单的实际 order_type，定位匹配失败原因
+            all_orders = list(self.cache.orders())
+            self.log.info(f"[SL诊断] cache.orders() 总数={len(all_orders)}")
+            for order in all_orders:
+                raw_type_str = str(order.order_type)
+                type_name = getattr(order.order_type, "name", raw_type_str)
+                # 用 .name 获取状态和方向（Cython 枚举 str() 返回整数序号）
+                order_status = getattr(order.status, "name", str(order.status))
+                order_side = getattr(order.side, "name", str(order.side))
+                self.log.info(
+                    f"[SL诊断]   订单 {order.client_order_id}: "
+                    f"type.name={type_name!r}  status.name={order_status!r}  side.name={order_side!r}"
                 )
+                if type_name != "STOP_MARKET":
+                    continue
+                if order_status in TERMINAL_STATUS:
+                    self.log.info(f"[SL诊断]   └→ STOP_MARKET 终态，跳过")
+                    continue
+                tp = getattr(order, "trigger_price", None)
+                sym = order.instrument_id.symbol.value
+                self.log.info(
+                    f"[SL诊断] ✅ 活跃 STOP_MARKET {sym}: "
+                    f"status={order_status} trigger_price={tp} "
+                    f"client_order_id={order.client_order_id} qty={order.quantity}"
+                )
+                result.setdefault(sym, {})
                 result[sym]["stop_loss"] = {
                     "price": float(tp) if tp else None,
-                    "side": str(order.side).replace("OrderSide.", ""),
+                    "side": order_side,             # 已用 .name
                     "quantity": float(order.quantity),
                     "client_order_id": str(order.client_order_id),
-                    "status": order_status,
+                    "status": order_status,         # 已用 .name
                 }
+                self.log.info(f"[SL诊断]   └→ 写入 result[{sym}]['stop_loss'] price={float(tp) if tp else None}")
         except Exception as e:
             self.log.warning(f"[Gateway] _async_get_active_orders 失败: {e}")
-        self.log.debug(f"[Gateway] active_orders 返回: {result}")
+        self.log.info(f"[SL诊断] active_orders 返回: {result}")
         return result
 
 
@@ -874,8 +669,8 @@ class OrderGatewayActor(Strategy):
             if extra:
                 msg.update(extra)
             self._redis.publish("order:update", json.dumps(msg, ensure_ascii=False))
-            # 对 ACCEPTED/UPDATED 级别打印完整消息供调试
-            if status in ("ACCEPTED", "UPDATED"):
+            # 对重要状态打印完整消息供调试
+            if status in ("ACCEPTED", "UPDATED", "CANCELED", "FILLED", "TRIGGERED"):
                 self.log.info(f"[Gateway] 发布 order:update {status}: {msg}")
         except Exception as e:
             self.log.warning(f"[Gateway] Redis publish order:update 失败: {e}")
@@ -905,11 +700,30 @@ class OrderGatewayActor(Strategy):
 
     def on_order_accepted(self, event) -> None:
         """订单被交易所接受（已进入撮合队列，等待成交）"""
-        self.log.info(
-            f"[Order] ✅ ACCEPTED  "
-            f"ClientOrderId={event.client_order_id}  "
-            f"VenueOrderId={event.venue_order_id}"
-        )
+        # 尝试从 cache 取到该订单的详细信息加入日志
+        try:
+            order = self.cache.order(event.client_order_id)
+            order_type = str(order.order_type).replace("OrderType.", "") if order else "UNKNOWN"
+            tp = getattr(order, "trigger_price", None) if order else None
+            if order_type == "STOP_MARKET":
+                self.log.info(
+                    f"[SL] ✅ 止损单 ACCEPTED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}  "
+                    f"trigger_price={tp}"
+                )
+            else:
+                self.log.info(
+                    f"[Order] ✅ ACCEPTED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}"
+                )
+        except Exception:
+            self.log.info(
+                f"[Order] ✅ ACCEPTED  "
+                f"ClientOrderId={event.client_order_id}  "
+                f"VenueOrderId={event.venue_order_id}"
+            )
         self._pub_order("ACCEPTED", event)
 
     def on_order_pending_update(self, event) -> None:
@@ -921,11 +735,33 @@ class OrderGatewayActor(Strategy):
 
     def on_order_updated(self, event) -> None:
         """改单成功（止损价移动等）"""
-        self.log.info(
-            f"[Order] ✅ UPDATED  "
-            f"ClientOrderId={event.client_order_id}  "
-            f"VenueOrderId={event.venue_order_id}"
-        )
+        # 尝试从 cache 取 trigger_price
+        try:
+            order = self.cache.order(event.client_order_id)
+            order_type = str(order.order_type).replace("OrderType.", "") if order else "UNKNOWN"
+            tp = getattr(order, "trigger_price", None) if order else None
+            new_price = getattr(event, "price", None)
+            new_tp = getattr(event, "trigger_price", None)
+            if order_type == "STOP_MARKET":
+                self.log.info(
+                    f"[SL] ✅ 止损单 UPDATED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}  "
+                    f"event.trigger_price={new_tp}  cache.trigger_price={tp}"
+                )
+            else:
+                self.log.info(
+                    f"[Order] ✅ UPDATED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}  "
+                    f"price={new_price}"
+                )
+        except Exception:
+            self.log.info(
+                f"[Order] ✅ UPDATED  "
+                f"ClientOrderId={event.client_order_id}  "
+                f"VenueOrderId={event.venue_order_id}"
+            )
         # IBKR 止损单通常在 ACCEPTED 之前先推一个 UPDATED 事件（含 trigger_price）
         # 发布 UPDATED 消息，前端可据此更新止损价线
         self._pub_order("UPDATED", event)
@@ -951,21 +787,24 @@ class OrderGatewayActor(Strategy):
             f"佣金={event.commission}"
         )
         self._pub_order("FILLED", event)
-        # 成交后延迟 3s 同步账户余额（等 IBKR 更新保证金）
-        self._trigger_account_sync(delay=3.0)
 
         # BRACKET：入场单成交后自动提交止损单
         coid = event.client_order_id.value
         if coid in self._pending_sl:
             sl_order, sl_steps, sl_step_secs, instrument = self._pending_sl.pop(coid)
             self.log.info(
-                f"[Gateway] BRACKET 入场单 {coid} 已成交，"
-                f"提交止损单 {sl_order.client_order_id} @ {sl_order.trigger_price}"
+                f"[SL] BRACKET 入场单 {coid} 已成交，"
+                f"正在提交止损单 {sl_order.client_order_id} "
+                f"@ trigger_price={sl_order.trigger_price}  "
+                f"qty={sl_order.quantity}  止损设置步={sl_steps}  "
+                f"设置间隔={sl_step_secs}s"
             )
             self.submit_order(sl_order)
+            self.log.info(f"[SL] submit_order 已调用，止损单={sl_order.client_order_id}")
             # 止损价定时修改任务
             for i, new_sl in enumerate(sl_steps):
                 delay = sl_step_secs * (i + 1)
+                self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
                 task = asyncio.ensure_future(
                     self._schedule_sl_modify(
                         sl_order_id=sl_order.client_order_id.value,
@@ -976,6 +815,8 @@ class OrderGatewayActor(Strategy):
                     )
                 )
                 self._sl_tasks.append(task)
+        else:
+            self.log.info(f"[SL] 成交单 {coid} 不在 _pending_sl 中（非 BRACKET 入场单或已处理）")
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
@@ -989,19 +830,33 @@ class OrderGatewayActor(Strategy):
             f"剩余={event.leaves_qty}"
         )
         self._pub_order("PARTIALLY_FILLED", event)
-        # 部分成交后也更新余额
-        self._trigger_account_sync(delay=3.0)
 
     def on_order_canceled(self, event) -> None:
         """订单已取消"""
-        self.log.info(
-            f"[Order] ⛔ CANCELED  "
-            f"ClientOrderId={event.client_order_id}  "
-            f"VenueOrderId={event.venue_order_id}"
-        )
+        # 尝试从 cache 读取 order_type，判断是否止损单取消
+        try:
+            order = self.cache.order(event.client_order_id)
+            order_type = getattr(order.order_type, "name", "UNKNOWN") if order else "UNKNOWN"
+            if order_type == "STOP_MARKET":
+                self.log.warning(
+                    f"[SL] ⛔ 止损单 CANCELED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}"
+                )
+            else:
+                self.log.info(
+                    f"[Order] ⛔ CANCELED  "
+                    f"ClientOrderId={event.client_order_id}  "
+                    f"VenueOrderId={event.venue_order_id}  "
+                    f"order_type={order_type}"
+                )
+        except Exception:
+            self.log.info(
+                f"[Order] ⛔ CANCELED  "
+                f"ClientOrderId={event.client_order_id}  "
+                f"VenueOrderId={event.venue_order_id}"
+            )
         self._pub_order("CANCELED", event)
-        # 撤单后更新余额（释放资金）
-        self._trigger_account_sync(delay=2.0)
 
     def on_order_expired(self, event) -> None:
         """订单已过期（DAY 单收市未成交）"""
@@ -1076,8 +931,6 @@ class OrderGatewayActor(Strategy):
                     "symbol": sym,
                     "ts": int(time.time()),
                 }, ensure_ascii=False))
-            # 平仓后触发余额更新
-            self._trigger_account_sync(delay=3.0)
         except Exception as e:
             self.log.warning(f"[Position] on_position_closed 处理异常: {e}")
 

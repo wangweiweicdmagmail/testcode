@@ -43,7 +43,7 @@ class ExitManager(Strategy):
 
         bar = event.bar
         # 获取当前标的的持仓
-        instrument_id = InstrumentId.from_str(bar["instrument_id"] if "instrument_id" in bar else f"{sym}.NASDAQ") # 兼容处理
+        instrument_id = InstrumentId.from_str(bar["instrument_id"])
         positions = self.cache.positions_open(instrument_id)
         
         if not positions:

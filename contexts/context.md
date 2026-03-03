@@ -1,20 +1,111 @@
-# 项目核心上下文 (Context)
+# 鹦鹉螺引擎 IBKR — 项目上下文
+
+## ⚠️ 时区（必读，禁止再犯）
+
+| 时区 | UTC 偏移 | 备注 |
+|------|---------|------|
+| 上海 / 北京（CST） | UTC+8 | 系统显示的本地时间 |
+| 纽约（ET 夏令时 EDT） | UTC-4 | 美股交易时段 3-11月 |
+| 纽约（ET 冬令时 EST） | UTC-5 | 美股交易时段 11-3月 |
+
+**换算公式（夏令时）：**
+- 北京时间 → 纽约时间：`北京时间 - 12小时`
+- 例：北京 23:20 = 纽约 11:20（完全在交易时段内）
+
+**美股交易时段（纽约时间）：**
+- 盘前：04:00 – 09:29
+- 正市：09:30 – 16:00
+- 盘后：16:00 – 20:00
+
+**北京时间对应：**
+- 夏令时正市：北京 21:30 – 次日 04:00
+- 冬令时正市：北京 22:30 – 次日 05:00
+
+> [!CAUTION]
+> AI 助手看到的系统时间是北京时间。凡是涉及美股是否在交易的判断，必须先换算为纽约时间再做结论，禁止直接用北京时间判断。
+
+---
 
 ## 项目概述
-本项目是一个基于 **NautilusTrader** 框架连接 **Interactive Brokers (IBKR)** 的实盘交易系统。它主要用于个人量化交易基础设施，提供从数据获取、指标计算、订单执行到前端可视化的完整链路。
 
-## 架构特点
-- **三层架构解耦**：
-  - 数据源/执行层：基于 NautilusTrader 和 IBKR
-  - 共享状态层：Redis
-  - 展示层：Node.js WebSocket + 浏览器端 Dashboard
-- **核心组件**：
-  - `main.py`: 主程序，配置并启动 TradingNode
-  - `strategy.py`: 核心策略模块，负责 1m K 线处理、SuperTrend/EMA 指标计算及 Redis 写入
-  - `order_actor.py`: HTTP 下单网关，处理订单生命周期
-  - `frontend/`: 实时可视化及交互面板
+- **项目名称**：鹦鹉螺引擎（Nautilus Trader × IBKR）
+- **目的**：连接 Interactive Brokers 进行美股实盘量化交易
+- **架构**：三层（引擎 Python → Redis → 前端 Node.js）
 
-## 开发约定
-- **语言**：所有解释、分析、建议使用**中文**。代码相关（变量名、函数名、文件路径）保留英文。
-- **配置**：系统支持 `live` (实盘) 和 `backtest` (回测) 模式。
-- **数据源**：一切数据源需来自 IBKR，无外部数据源依赖。
+## 核心组件
+
+| 文件 | 职责 |
+|------|------|
+| `main.py` | 入口，配置并启动 TradingNode |
+| `strategy.py` | 核心策略：K线聚合、指标计算（SuperTrend/EMA）、写 Redis |
+| `order_actor.py` | HTTP 下单网关（端口 8888），订单生命周期管理 |
+| `exit_manager.py` | 独立止盈管理器，监听 bar.collected 事件 |
+| `events.py` | 自定义 MessageBus 事件类 |
+| `frontend/server.js` | Node.js WebSocket 服务器，展示 K 线和指标 |
+
+## 账户配置
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `IB_ACCOUNT_ID` | FA 主账号 | `F10251881` |
+| `IB_FA_GROUP` | FA Group 名称 | `dt_test` |
+| `IB_FA_METHOD` | 分配方法 | `NetLiq` |
+| `IBG_PORT` | TWS/Gateway 端口 | `7496`（实盘 TWS） |
+| `IBG_CLIENT_ID` | API 客户端 ID | `2` |
+
+## 启动命令
+
+```bash
+# 实盘
+cd /Users/weiweiwang/testcode/nautilus_ibkr_helloworld
+python main.py
+
+# 回测
+python main.py --mode backtest
+
+# 前端
+cd frontend && node server.js
+```
+
+## HTTP 端点
+
+### 引擎端（order_actor.py 端口 8888）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/account` | 账户余额（FA Group 聚合） |
+| GET | `/positions` | 当前开放仓位 |
+| GET | `/active-orders` | 活跃止损单 + 入场价（供前端恢复价格线） |
+| GET | `/debug-orders` | 调试：打印 cache 中所有订单和持仓 |
+| POST | `/order` | 下单（MARKET / LIMIT / BRACKET） |
+| POST | `/settings` | 策略开关（st_trail 跟踪止盈） |
+| POST | `/close` | ⏳ 待实现：反向市价平仓 + 取消止损单 |
+
+### Node.js 端（server.js 端口 3000）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/data/:symbol` | 历史 K 线 + 仓位 + 昨日围栏 |
+| GET | `/api/indicators` | 所有标的最新指标 |
+| GET | `/api/account` | 账户余额（优先 Redis，fallback 引擎） |
+| GET | `/api/positions` | 仓位（代理引擎） |
+| GET | `/api/active-orders` | 活跃订单（代理引擎） |
+| POST | `/api/order/:symbol` | 下单（代理引擎） |
+| DELETE | `/api/position/:symbol` | 平仓 ⚠️ 目前仅删 Redis，引擎平仓待实现 |
+| POST | `/api/settings/:symbol` | 策略开关，同步到引擎 |
+
+## 已知未完成
+
+- **平仓按钮**（`multi.html` → DELETE `/api/position/:symbol`）：前端确认框 ✅，Node.js 路由 ✅，**引擎 `POST /close` ❌ 待实现**。目前按钮只删 Redis 记录，不提交 IBKR 平仓指令。临时方案：在 TWS 手动平仓。
+
+## Redis 数据结构
+
+| Key | 类型 | 内容 |
+|-----|------|------|
+| `bars:1m:{sym}` | List | 1分钟 K 线历史 |
+| `bars:5m:{sym}` | List | 5分钟 K 线历史 |
+| `kline:1m:{sym}` | PubSub | 实时 1m K 线推送 |
+| `kline:5m:{sym}` | PubSub | 实时 5m K 线推送 |
+| `order:update` | PubSub | 订单状态变更推送 |
+| `account:funds` | String | 账户余额 JSON |
+| `engine:heartbeat` | PubSub | 引擎心跳（每 5s） |

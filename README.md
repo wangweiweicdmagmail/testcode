@@ -44,13 +44,16 @@
 | 回测/实盘通用接口 | ~800 行 |
 | 纳秒级时间戳对齐、多标的事件排序 | ~300 行 |
 
-**本项目实际编写的核心代码**：`strategy.py` ~430 行 + `order_actor.py` ~400 行，却获得了 3000+ 行才能实现的工业级可靠性。
+**本项目实际编写的核心代码**：`strategy.py` ~430 行 + `order_actor.py` ~1150 行 + `exit_manager.py` ~110 行，却获得了 3000+ 行才能实现的工业级可靠性。
 
 **个人量化者视角**：这套架构已超过大多数个人量化基础设施的成熟度，具备真正的生产部署能力：
 - ✅ 解耦、事件驱动、状态分离
 - ✅ 实时指标计算 + 语音提醒 + 可视化 Dashboard
 - ✅ 完整订单链路（下单 → 成交 → 仓位更新 → 止损管理）
-- ⚠️ 下一步：Redis 告警 + 信号自动化 + 策略归档
+- ✅ 四图联动看盘（时间轴 + 十字线同步）
+- ✅ 止损可视化拖动开仓（BRACKET 单，风险金额自动测算）
+- ⏳ 平仓按钮：前端和 Node.js 路由已就位，引擎端 `POST /close` 待实现
+- ⚠️ 下一步：真正平仓逻辑 + Redis 告警 + 信号自动化
 
 ---
 
@@ -61,12 +64,14 @@ nautilus_ibkr_helloworld/
 ├── main.py            # 主程序：配置并启动 TradingNode（支持 --mode live/backtest）
 ├── strategy.py        # 回测/实盘通用策略：1m K 线 + SuperTrend + EMA + 日K围栏 + 写Redis
 ├── order_actor.py     # HTTP 下单网关 Actor（端口 8888）+ 订单状态 Redis 回调
+├── exit_manager.py    # 独立止盈/止损管理器，监听 bar.collected 事件
+├── events.py          # 自定义 MessageBus 事件类（ExternalOrderCommand 等）
 ├── order_sender.py    # 外部下单测试脚本（MARKET / BRACKET）
 └── frontend/
-    ├── server.js      # Node.js WebSocket 服务器，从 Redis 推送 K 线 + 指标给前端
+    ├── server.js      # Node.js WebSocket + HTTP 代理服务（端口 3000）
     └── public/
         ├── index.html      # 单图 Dashboard（左K线 + 右指标面板 + 语音提醒）
-        ├── multi.html      # 四图总览（2×2 网格，语音提醒）
+        ├── multi.html      # 四图总览（2×2 网格，时间轴/十字线联动，止损拖动开仓）
         └── indicators.html # 四列指标排行（M1 ST / M5 ST / EMA偏离 / 日内新高）
 ```
 
@@ -232,7 +237,16 @@ cd frontend && node server.js
 1. 止损药丸控件出现（红色圆角标签，带脉冲动画）
 2. 上下拖动调整止损价
 3. 订单面板同步显示：最大亏损、建议股数、每股风险、开仓金额、资金占比
-4. 点击 **确认做多/做空** 发送开仓请求
+4. 点击 **确认做多/做空** → `POST /api/order/:symbol` → 引擎提交 BRACKET 单
+
+### 平仓操作（四图总览）
+
+点击 **「平仓」** 按钮后弹出确认框，确认后调用 `DELETE /api/position/:symbol`。
+
+> [!WARNING]
+> **当前版本（待完善）**：该路由仅删除 Redis 中的 `position:{symbol}` 记录，**不向 IBKR 提交实际平仓指令**。
+> 完整平仓逻辑（引擎端 `POST /close` ← server.js ← 前端）尚在实现中。
+> 手动平仓请直接在 TWS 中操作。
 
 ## 发送测试订单
 
@@ -292,6 +306,34 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 
 留空 `FA_GROUP` 则直接在单账号下单。
 
+## HTTP 端点一览
+
+### 引擎端（`order_actor.py` 端口 8888）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/account` | 账户余额（FA Group 聚合） |
+| GET | `/positions` | 当前所有开放仓位 |
+| GET | `/active-orders` | 活跃止损单 + 持仓入场价（供前端恢复价格线） |
+| GET | `/debug-orders` | 调试：打印 cache 中全部订单和持仓 |
+| POST | `/order` | 下单（MARKET / LIMIT / BRACKET） |
+| POST | `/settings` | 策略开关（st_trail 跟踪止盈） |
+| POST | `/close` | **（待实现）** 平仓：反向市价单 + 取消止损 |
+
+### Node.js 服务端（`server.js` 端口 3000）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/data/:symbol` | 历史 K 线 + 仓位 + 昨日围栏 |
+| GET | `/api/indicators` | 所有标的最新指标（ST积分/EMA积分/新高计数） |
+| GET | `/api/account` | 账户余额（优先 Redis，fallback 引擎） |
+| GET | `/api/positions` | 真实 IBKR 仓位（代理引擎） |
+| GET | `/api/active-orders` | 活跃订单（代理引擎） |
+| POST | `/api/order/:symbol` | 下单（代理引擎） |
+| POST | `/api/position/:symbol` | 手动写入仓位记录（旧式，调试用） |
+| DELETE | `/api/position/:symbol` | 平仓（**待完善**：目前仅删 Redis 记录，不向 IBKR 平仓） |
+| POST | `/api/settings/:symbol` | 更新策略开关，同步到引擎 |
+
 ## 常见问题
 
 | 问题 | 解决方案 |
@@ -302,6 +344,7 @@ FA_METHOD = "NetLiq"    # 分配方式（NetLiq / EqualQuantity / AvailableEquit
 | 时区异常 | NautilusTrader 内部使用 UTC 纳秒；图表展示使用 ET fake-UTC |
 | 图表只显示 390 根 | 正常，盘前数据用于指标预热，图表仅展示 RTH 09:30-16:00 |
 | 前端提示「引擎未连接」 | 重启 `server.js` |
+| 点平仓后仓位没消失 | 刷新页面；若 IBKR 仓位还在请在 TWS 手动平仓（引擎平仓端点待实现） |
 
 ## 订单生命周期
 

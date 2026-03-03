@@ -104,7 +104,8 @@ BACKTEST_DATE = _args.date   # 空字符串 = 自动
 # ============================================================
 IBG_HOST = "127.0.0.1"
 IBG_PORT = int(os.environ.get("IBG_PORT", "7496"))  # 实盘 TWS=7496 | 实盘 Gateway=4001 | 模拟 TWS=7497
-IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "2"))  # 多客户端并行时修改，避免冲突
+IBG_CLIENT_ID = int(os.environ.get("IBG_CLIENT_ID", "2"))  # DataClient 使用此 ID
+IBG_EXEC_CLIENT_ID = IBG_CLIENT_ID + 1  # ExecClient 使用不同 ID，避免 IBKR 拒绝双连接
 
 ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
 
@@ -164,10 +165,11 @@ config_node = TradingNodeConfig(
         IB: InteractiveBrokersExecClientConfig(
             ibg_host=IBG_HOST,
             ibg_port=IBG_PORT,
-            ibg_client_id=IBG_CLIENT_ID,
+            ibg_client_id=IBG_EXEC_CLIENT_ID,  # 使用独立 ID（DataClient=2, ExecClient=3）
             account_id=ACCOUNT_ID,
             instrument_provider=instrument_provider_config,
             routing=RoutingConfig(default=True),
+            fetch_all_open_orders=True,  # 感知 TWS GUI 和所有 API 客户端的订单
         ),
     },
     data_engine=LiveDataEngineConfig(
@@ -226,18 +228,6 @@ node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)
 node.add_exec_client_factory(IB, InteractiveBrokersLiveExecClientFactory)
 node.build()
 
-# ── 将引擎的 IB client 注入给 OrderGatewayActor，复用已有 TWS 连接查询 FA Group 余额 ──
-try:
-    from nautilus_trader.model.identifiers import ClientId
-    _exec_engine = node.trader._exec_engine
-    _ib_exec_client = _exec_engine._clients.get(ClientId("INTERACTIVE_BROKERS"))
-    if _ib_exec_client is not None and hasattr(_ib_exec_client, "_client"):
-        gateway_actor.set_ib_client(_ib_exec_client._client)
-        print("  ✓ IB client 已注入 OrderGatewayActor，FA Group 余额将使用引擎连接查询")
-    else:
-        print("  ⚠️ 未找到 IB exec client，账户余额将 fallback 到主账户聚合数据")
-except Exception as _e:
-    print(f"  ⚠️ IB client 注入失败: {_e}")
 
 
 if __name__ == "__main__":
