@@ -80,6 +80,7 @@ cd frontend && node server.js
 | POST | `/order` | 下单（MARKET / LIMIT / BRACKET） |
 | POST | `/settings` | 策略开关（st_trail 跟踪止盈） |
 | POST | `/close` | ⏳ 待实现：反向市价平仓 + 取消止损单 |
+| POST | `/modify-stop` | 修改活跃止损单触发价（body: {symbol, price}） |
 
 ### Node.js 端（server.js 端口 3000）
 
@@ -92,6 +93,7 @@ cd frontend && node server.js
 | GET | `/api/active-orders` | 活跃订单（代理引擎） |
 | POST | `/api/order/:symbol` | 下单（代理引擎） |
 | DELETE | `/api/position/:symbol` | 平仓 ⚠️ 目前仅删 Redis，引擎平仓待实现 |
+| POST | `/api/modify-stop/:symbol` | 修改止损价（代理引擎 + 更新 Redis position.stop_loss） |
 | POST | `/api/settings/:symbol` | 策略开关，同步到引擎 |
 
 ## 已知未完成

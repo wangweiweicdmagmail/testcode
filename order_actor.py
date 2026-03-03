@@ -1088,6 +1088,56 @@ class OrderGatewayActor(Strategy):
             self.log.error(f"[Close] 平仓失败: {e}")
             return {"error": str(e)}
 
+    async def _async_modify_stop(self, symbol: str, new_price: float) -> dict:
+        """
+        在引擎事件循环中修改该标的的活跃止损单触发价。
+        找到 STOP_MARKET 单后调用 modify_order()。
+        """
+        try:
+            TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
+            target_order = None
+            target_instrument = None
+
+            for order in self.cache.orders():
+                sym = order.instrument_id.symbol.value
+                if sym != symbol:
+                    continue
+                order_status = getattr(order.status, "name", str(order.status))
+                type_name = getattr(order.order_type, "name", str(order.order_type))
+                if order_status in TERMINAL_STATUS:
+                    continue
+                if type_name == "STOP_MARKET":
+                    target_order = order
+                    target_instrument = self.cache.instrument(order.instrument_id)
+                    break
+
+            if target_order is None:
+                self.log.warning(f"[ModifySL] 未找到 {symbol} 的活跃止损单")
+                return {"error": f"未找到 {symbol} 的活跃止损单"}
+
+            if target_instrument is None:
+                return {"error": f"合约未加载"}
+
+            new_tp = target_instrument.make_price(Decimal(str(new_price)))
+            self.log.info(
+                f"[ModifySL] 修改止损单 {target_order.client_order_id}  "
+                f"{symbol}  trigger_price: {target_order.trigger_price} → {new_tp}"
+            )
+            self.modify_order(
+                order=target_order,
+                quantity=target_order.quantity,
+                trigger_price=new_tp,
+            )
+            return {
+                "status": "accepted",
+                "symbol": symbol,
+                "new_price": float(new_tp),
+                "client_order_id": str(target_order.client_order_id),
+            }
+        except Exception as e:
+            self.log.error(f"[ModifySL] 修改失败: {e}")
+            return {"error": str(e)}
+
     def _start_http_server(self) -> None:
         """在守护线程中启动 HTTP 网关"""
         loop = self._loop
@@ -1163,6 +1213,26 @@ class OrderGatewayActor(Strategy):
                             return
                         future = asyncio.run_coroutine_threadsafe(
                             actor._async_close_position(symbol), loop
+                        )
+                        result = future.result(timeout=5.0)
+                        code = 400 if "error" in result else 200
+                        self._send(code, result)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
+                    return
+
+                if self.path.startswith("/modify-stop"):
+                    # POST /modify-stop  body: {"symbol": "QQQ", "price": 123.45}
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n)) if n > 0 else {}
+                        symbol = data.get("symbol", "").upper()
+                        price = data.get("price")
+                        if not symbol or price is None:
+                            self._send(400, {"error": "缺少 symbol 或 price"})
+                            return
+                        future = asyncio.run_coroutine_threadsafe(
+                            actor._async_modify_stop(symbol, float(price)), loop
                         )
                         result = future.result(timeout=5.0)
                         code = 400 if "error" in result else 200

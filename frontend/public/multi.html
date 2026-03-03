@@ -406,6 +406,18 @@
             animation: none;
         }
 
+        /* 持仓期间止损修改模式：橙色常亮 */
+        .sl-handle.modify {
+            display: flex;
+            background: #ff9800;
+            box-shadow: 0 2px 8px rgba(255, 152, 0, .5);
+            animation: none;
+        }
+
+        .sl-handle.modify:hover {
+            box-shadow: 0 0 0 3px rgba(255, 152, 0, .35), 0 2px 8px rgba(255, 152, 0, .5);
+        }
+
         .sl-handle .sl-icon {
             flex-shrink: 0;
             opacity: .9;
@@ -1006,9 +1018,9 @@
                 };
                 s.ctx = ctx;
 
-                // 止损控件 mousedown → 开始拖动
+                // 止损控件 mousedown → 开始拖动（orderMode 或 modifyMode 均可拖动）
                 ctx.handleEl.addEventListener('mousedown', e => {
-                    if (!ctx.orderMode) return;
+                    if (!ctx.orderMode && !ctx.modifyMode) return;
                     activeDrag = ctx;
                     document.body.style.cursor = 'ns-resize';
                     e.preventDefault();
@@ -1072,8 +1084,13 @@
 
                 // 图表缩放/滚动后重置控件位置
                 s.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-                    if (ctx.orderMode) snapHandle(ctx);
+                    if (ctx.orderMode || ctx.modifyMode) snapHandle(ctx);
                 });
+
+                // 加载完成后：若有持仓且止损价，自动进入 modifyMode
+                if (position?.stop_loss) {
+                    setTimeout(() => enterModifyMode(ctx, position.stop_loss), 100);
+                }
 
             } catch (e) {
                 const el = document.getElementById(`loading-${symbol}`);
@@ -1151,9 +1168,33 @@
 
         document.addEventListener('mouseup', () => {
             if (!activeDrag) return;
-            snapHandle(activeDrag);
+            const ctx = activeDrag;
+            snapHandle(ctx);
             document.body.style.cursor = '';
             activeDrag = null;
+
+            // modifyMode：松手后调用引擎修改止损单
+            if (ctx.modifyMode && ctx.slPrice) {
+                fetch(`/api/modify-stop/${ctx.sym}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ price: ctx.slPrice }),
+                }).then(r => r.json()).then(result => {
+                    if (!result.ok) {
+                        speak(`${ctx.sym} 止损修改失败`, true);
+                        showToast(`⚠️ ${ctx.sym} 止损修改失败: ${result.error}`, 'warn');
+                    } else {
+                        showToast(`✅ ${ctx.sym} 止损已修改为 ${ctx.slPrice.toFixed(2)}`, 'ok');
+                        // 更新当前仓位信息中的止损价，供面板展示
+                        if (state[ctx.sym]?.position) {
+                            state[ctx.sym].position.stop_loss = ctx.slPrice;
+                            document.getElementById(`p-sl-${ctx.sym}`).textContent = ctx.slPrice.toFixed(2);
+                        }
+                    }
+                }).catch(e => {
+                    showToast(`网络错误: ${e.message}`, 'warn');
+                });
+            }
         });
 
         // 止损控件精确对齐（priceToCoordinate + offset）
@@ -1253,6 +1294,27 @@
             ctx.panelEl.classList.remove('active');
             activeDrag = null;
             document.body.style.cursor = '';
+            // 如果持仓且有止损价，自动切回 modifyMode
+            if (state[ctx.sym]?.position?.stop_loss) {
+                enterModifyMode(ctx, state[ctx.sym].position.stop_loss);
+            }
+        }
+
+        // 进入止损修改模式（持仓期间橙色药丸常显）
+        function enterModifyMode(ctx, slPx) {
+            if (ctx.orderMode) return;  // 开仓模式优先
+            ctx.modifyMode = true;
+            ctx.slPrice = parseFloat(slPx.toFixed ? slPx.toFixed(2) : slPx);
+            ctx.handleEl.classList.remove('active');
+            ctx.handleEl.classList.add('modify');
+            updateHandlePriceLabel(ctx);
+            snapHandle(ctx);
+        }
+
+        // 退出止损修改模式
+        function exitModifyMode(ctx) {
+            ctx.modifyMode = false;
+            ctx.handleEl.classList.remove('modify');
         }
 
 
@@ -1284,10 +1346,16 @@
                                     refreshMarkers(posSym);
                                 }
                                 clearPositionUI(posSym);
+                                // 平仓后退出 modifyMode
+                                if (state[posSym].ctx) exitModifyMode(state[posSym].ctx);
                                 speak(`${posSym} 仓位已平仓`, true);
                             } else {
                                 const isNew = !state[posSym].position;
                                 addPositionLines(posSym, payload);
+                                // 有止损价时自动进入 modifyMode
+                                if (payload.stop_loss && state[posSym].ctx) {
+                                    enterModifyMode(state[posSym].ctx, payload.stop_loss);
+                                }
                                 if (isNew) speak(`${posSym} ${payload.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
                             }
                         }

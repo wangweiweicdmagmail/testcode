@@ -369,7 +369,40 @@ app.post('/api/order/:symbol', async (req, res) => {
     res.json(data);
 });
 
+// POST /api/modify-stop/:symbol — 修改止损价（代理引擎 + 更新 Redis position）
+app.post('/api/modify-stop/:symbol', async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    const { price } = req.body;
+    if (price == null) {
+        return res.status(400).json({ error: 'price 必填' });
+    }
+
+    // 1. 调引擎修改止损单触发价
+    const result = await proxyToEngine('POST', '/modify-stop', { symbol, price: parseFloat(price) },
+        { engine_offline: true });
+
+    if (result.engine_offline || result.error) {
+        return res.json({ ok: false, error: result.error || '引擎未启动' });
+    }
+
+    // 2. 同步更新 Redis position 中的 stop_loss 字段
+    try {
+        const raw = await redis.get(`position:${symbol}`);
+        if (raw) {
+            const pos = JSON.parse(raw);
+            pos.stop_loss = parseFloat(price);
+            await redis.set(`position:${symbol}`, JSON.stringify(pos));
+        }
+    } catch (e) {
+        console.warn(`[modify-stop] Redis 更新失败: ${e.message}`);
+    }
+
+    console.log(`✅ 止损修改 [${symbol}]: ${JSON.stringify(result)}`);
+    res.json({ ok: true, engine: result });
+});
+
 // POST /api/settings/:symbol — ST 跟踪止盈等开关
+
 app.post("/api/settings/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     const existing = await redis.get(`settings:${symbol}`);
