@@ -2394,20 +2394,9 @@
       const qty = Math.min(qtyByLoss, qtyByCash);
 
       if (isNaN(sl) || sl <= 0 || qty <= 0) {
-        alert('止损价无效或风险/股过小，无法计算有效股数');
+        showToast('⚠️ 止损价无效或风险/股过小，无法计算有效股数', 'warn');
         return;
       }
-
-      const costTotal = qty * entry;
-      const confirmed = confirm(
-        `确认开仓？\n` +
-        `方向: ${orderDir === 'BUY' ? '▲ 做多' : '▼ 做空'}\n` +
-        `标的: ${SYMBOL}  数量: ${qty} 股\n` +
-        `开仓: 市价 (~$${entry.toFixed(2)})\n` +
-        `止损: $${sl.toFixed(2)}  (每股风险 $${riskPerShare.toFixed(2)})\n` +
-        `预计资金: $${costTotal.toFixed(0)}`
-      );
-      if (!confirmed) return;
 
       speak(`${SYMBOL} 订单已下发，${orderDir === 'BUY' ? '做多' : '做空'} ${qty}股，止损 ${sl.toFixed(2)}`);
 
@@ -2420,21 +2409,19 @@
         const result = await resp.json();
         if (result.engine_offline || result.error) {
           speak(`订单失败，${result.error || '引擎未连接'}`, true);
-          alert(`⚠ 引擎未连接或出错: ${result.error || '请启动引擎'}
-请检查 main.py 是否已启动`);
+          showToast(`⚠️ 引擎未连接或出错: ${result.error || '请启动引擎'}`, 'warn');
         } else {
           speak(`${SYMBOL} 订单已受理`, true);
-          alert(`✅ 开仓请求已发小到引擎
-${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty}
-止损: $${sl.toFixed(2)}`);
+          showToast(`✅ ${SYMBOL} ${orderDir === 'BUY' ? '做多' : '做空'} x${qty} 止损$${sl.toFixed(2)} 已下发`, 'ok');
         }
       } catch (e) {
         speak('网络错误，订单失败', true);
-        alert(`网络错误: ${e.message}`);
+        showToast(`网络错误: ${e.message}`, 'warn');
       }
 
       exitOrderMode();
     });
+
 
     // 平仓按钮
     document.getElementById('btn-close').addEventListener('click', async () => {
