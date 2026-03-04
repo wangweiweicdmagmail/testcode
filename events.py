@@ -8,9 +8,9 @@ class BarCollectedEvent(Event):
     """
     def __init__(self, symbol: str, bar_dict: dict):
         # Cython Event 子类需手动初始化私有属性
-        # ts_init 是对象创建时间，必须 >= ts_event
-        self._ts_init = time.time_ns()
+        # ts_event 必须先于 ts_init 赋值，确保 ts_init >= ts_event
         self._ts_event = time.time_ns()
+        self._ts_init  = time.time_ns()
         self._id = UUID4()
         
         self.symbol = symbol
@@ -21,9 +21,9 @@ class STTrailSettingsEvent(Event):
     设置变更事件，用于同步 UI 的开关状态到引擎内部策略中。
     """
     def __init__(self, symbol: str, active: bool):
-        # ts_init >= ts_event
-        self._ts_init = time.time_ns()
+        # ts_event 先于 ts_init 赋值，确保 ts_init >= ts_event
         self._ts_event = time.time_ns()
+        self._ts_init  = time.time_ns()
         self._id = UUID4()
         
         self.symbol = symbol
