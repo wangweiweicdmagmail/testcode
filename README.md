@@ -52,8 +52,8 @@
 - ✅ 完整订单链路（下单 → 成交 → 仓位更新 → 止损管理）
 - ✅ 四图联动看盘（时间轴 + 十字线同步）
 - ✅ 止损可视化拖动开仓（BRACKET 单，风险金额自动测算）
-- ⏳ 平仓按钮：前端和 Node.js 路由已就位，引擎端 `POST /close` 待实现
-- ⚠️ 下一步：真正平仓逻辑 + Redis 告警 + 信号自动化
+- ✅ 全标的指标排行：13个标的（NVDA/AAPL/GOOG/AVGO/SPY/TSLA/PLTR/AMZN/AMD/META/MSFT/QQQ/TSM）M1 ST / M5 ST / EMA偏离 / 日内新高四列同屏对比
+- ⚠️ 下一步：自动化信号 + Redis 告警
 
 ---
 
