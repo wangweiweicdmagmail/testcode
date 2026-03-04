@@ -903,26 +903,26 @@ class BarLoggerStrategy(Strategy):
         key = f"bars:1m:{sym}"
         ch  = f"kline:1m:{sym}"
         try:
-            raw  = self._redis.get(key)
-            all_ = json.loads(raw) if raw else []
-            # 防止历史/实时 bar 时间戳重叠：末尾相同时间戳则替换，否则追加
-            # （历史 flush 后立即订阅实时，IBKR 可能重复推送最后一根）
-            if all_ and all_[-1]['time'] == bar_dict['time']:
-                self.log.debug(f"[BAR] {sym}: 替换重复时间戳 bar time={bar_dict['time']}")
-                all_[-1] = bar_dict
+            # 去重：与最后一根时间戳相同时替换（防止 IBKR 重复推送）
+            last_json = self._redis.lindex(key, -1)
+            if last_json:
+                last_bar = json.loads(last_json)
+                if last_bar["time"] == bar_dict["time"]:
+                    # 用 lset 替换末尾元素
+                    self._redis.lset(key, -1, json.dumps(bar_dict))
+                    self.log.debug(f"[BAR] {sym}: 替换重复时间戳 bar time={bar_dict['time']}")
+                else:
+                    self._redis.rpush(key, json.dumps(bar_dict))
+                    self._redis.ltrim(key, -MAX_BARS, -1)
             else:
-                all_.append(bar_dict)
-            if len(all_) > MAX_BARS:
-                all_ = all_[-MAX_BARS:]
-            self._redis.set(key, json.dumps(all_))
+                self._redis.rpush(key, json.dumps(bar_dict))
             # kline:1m: 事件通过 Redis PubSub 推送到 server.js，再由 WebSocket 广播到前端
             self._redis.publish(ch, json.dumps(bar_dict))
             self.log.debug(
-                f"[BAR] {sym}: ✓ Redis SET bars:1m ({len(all_)} 根) + PUBLISH {ch}"
+                f"[BAR] {sym}: ✓ Redis RPUSH bars:1m + PUBLISH {ch}"
             )
 
             # ★ 发布内部事件供 ExitManager 止盈逻辑使用
-            # 使用当前 bar 所属的真实 instrument_id（修复多标的时硬编码主合约的问题）
             bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
             self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
         except Exception as e:
@@ -980,16 +980,21 @@ class BarLoggerStrategy(Strategy):
         key = f"bars:5m:{sym}"
         ch  = f"kline:5m:{sym}"
         try:
-            raw  = self._redis.get(key)
-            all_ = json.loads(raw) if raw else []
-            all_.append(m5_bar)
-            if len(all_) > MAX_BARS:
-                all_ = all_[-MAX_BARS:]
-            self._redis.set(key, json.dumps(all_))
+            # 去重：与最后一根时间戳相同时替换
+            last_json = self._redis.lindex(key, -1)
+            if last_json:
+                last_bar = json.loads(last_json)
+                if last_bar["time"] == m5_bar["time"]:
+                    self._redis.lset(key, -1, json.dumps(m5_bar))
+                else:
+                    self._redis.rpush(key, json.dumps(m5_bar))
+                    self._redis.ltrim(key, -MAX_BARS, -1)
+            else:
+                self._redis.rpush(key, json.dumps(m5_bar))
             if publish:
                 self._redis.publish(ch, json.dumps(m5_bar))
             self.log.debug(
-                f"[M5] {sym}: ✓ Redis SET bars:5m ({len(all_)} 根)"
+                f"[M5] {sym}: ✓ Redis RPUSH bars:5m"
                 + (f" + PUBLISH {ch}" if publish else "")
             )
         except Exception as e:
