@@ -28,7 +28,7 @@ app.use(express.json());
 
 // REST API：获取所有数据（M3: 最多返回最近 500 根 K 线，避免大 JSON 打爆 Node）
 const MAX_BARS = 500;
-const ALL_SYMBOLS = ["QQQ", "AAPL", "NVDA", "TSLA"];
+const ALL_SYMBOLS = ["NVDA", "AAPL", "GOOG", "AVGO", "SPY", "TSLA", "PLTR", "AMZN", "AMD", "META", "MSFT", "QQQ", "TSM"];
 
 app.get("/api/data/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
@@ -287,10 +287,19 @@ app.delete("/api/position/:symbol", async (req, res) => {
 
 // symbol → NautilusTrader instrument_id 映射
 const SYMBOL_MAP = {
-    QQQ: 'QQQ.NASDAQ',
-    AAPL: 'AAPL.NASDAQ',
     NVDA: 'NVDA.NASDAQ',
+    AAPL: 'AAPL.NASDAQ',
+    GOOG: 'GOOG.NASDAQ',
+    AVGO: 'AVGO.NASDAQ',
+    SPY: 'SPY.ARCA',
     TSLA: 'TSLA.NASDAQ',
+    PLTR: 'PLTR.NYSE',
+    AMZN: 'AMZN.NASDAQ',
+    AMD: 'AMD.NASDAQ',
+    META: 'META.NASDAQ',
+    MSFT: 'MSFT.NASDAQ',
+    QQQ: 'QQQ.NASDAQ',
+    TSM: 'TSM.NYSE',
 };
 
 /**
