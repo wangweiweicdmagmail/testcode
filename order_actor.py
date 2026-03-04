@@ -197,6 +197,13 @@ class OrderGatewayActor(Strategy):
         _hb_t = threading.Thread(target=self._heartbeat_loop, daemon=True)
         _hb_t.start()
 
+        # 主动拉取账户数据（延迟 15s 等待 IB 连接稳定，不依赖 IB 3分钟推送）
+        def _delayed_account_sync():
+            time.sleep(15)
+            self.log.info("[Account] 主动触发账户数据同步...")
+            self.on_account_state(None)
+        threading.Thread(target=_delayed_account_sync, daemon=True).start()
+
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
         self.msgbus.unsubscribe(
