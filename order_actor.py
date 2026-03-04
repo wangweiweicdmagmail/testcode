@@ -47,7 +47,7 @@ from nautilus_trader.model.identifiers import OrderListId
 from nautilus_trader.model.orders.list import OrderList
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
-from events import STTrailSettingsEvent
+from events import STTrailSettingsEvent, EMATrailSettingsEvent
 
 
 # ---------------------------------------------------------------------------
@@ -1058,13 +1058,22 @@ class OrderGatewayActor(Strategy):
             self.log.error(f"[Gateway] 消息发布失败: {e}")
 
     async def _async_bridge_settings(self, data: dict) -> None:
-        """转发设置变更到 MessageBus"""
+        """转发设置变更到 MessageBus（支持 st_trail 和 ema_trail）"""
         try:
-            event = STTrailSettingsEvent(
-                symbol=data["symbol"],
-                active=bool(data["active"])
-            )
-            self.msgbus.publish(topic="settings.st_trail", msg=event)
+            symbol = data["symbol"]
+            active = bool(data["active"])
+            # ST 跟踪止损开关
+            if "st_trail" in data or data.get("type") == "st_trail":
+                event = STTrailSettingsEvent(symbol=symbol, active=active)
+                self.msgbus.publish(topic="settings.st_trail", msg=event)
+                self.log.info(f"[Gateway] ST Trail 设置已发布: {symbol} active={active}")
+            # EMA21 M5 跟踪止损开关
+            elif "ema_trail" in data or data.get("type") == "ema_trail":
+                event = EMATrailSettingsEvent(symbol=symbol, active=active)
+                self.msgbus.publish(topic="settings.ema_trail", msg=event)
+                self.log.info(f"[Gateway] EMA Trail 设置已发布: {symbol} active={active}")
+            else:
+                self.log.warning(f"[Gateway] 未知设置类型: {data}")
         except Exception as e:
             self.log.error(f"[Gateway] 设置发布失败: {e}")
 

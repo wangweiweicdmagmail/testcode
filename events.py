@@ -18,10 +18,22 @@ class BarCollectedEvent(Event):
 
 class STTrailSettingsEvent(Event):
     """
-    设置变更事件，用于同步 UI 的开关状态到引擎内部策略中。
+    ST跟踪止损开关变更事件，用于同步 UI 的开关状态到引擎内部策略中。
     """
     def __init__(self, symbol: str, active: bool):
         # ts_event 先于 ts_init 赋值，确保 ts_init >= ts_event
+        self._ts_event = time.time_ns()
+        self._ts_init  = time.time_ns()
+        self._id = UUID4()
+        
+        self.symbol = symbol
+        self.active = active
+
+class EMATrailSettingsEvent(Event):
+    """
+    EMA21 M5 跟踪止损开关变更事件。
+    """
+    def __init__(self, symbol: str, active: bool):
         self._ts_event = time.time_ns()
         self._ts_init  = time.time_ns()
         self._id = UUID4()

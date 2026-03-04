@@ -6,7 +6,7 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce, OrderType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
-from events import BarCollectedEvent, STTrailSettingsEvent
+from events import BarCollectedEvent, STTrailSettingsEvent, EMATrailSettingsEvent
 
 # Redis 连接配置（与 strategy.py / order_actor.py 保持一致）
 REDIS_HOST = "localhost"
@@ -20,15 +20,16 @@ class ExitManagerConfig(StrategyConfig, frozen=True):
 
 class ExitManager(Strategy):
     """
-    ST 跟踪止损 Actor（独立策略模块）。
+    跟踪止损 Actor（独立策略模块），支持两套止损机制：
 
-    功能：
-      - 监听 ST 开关（settings.st_trail）事件
-      - 每根 M1 K 线收盘后（bar.collected 事件），若开关开启：
-          * 读取最新 ST 线值作为新止损价
-          * 棘轮机制：多头只允许止损线上移，空头只允许下移（只收紧不放宽）
-          * 若新止损价与当前不同，调用 modify_order() 修改 IBKR 止损单触发价
-          * 同步更新 Redis position:{sym}.stop_loss + PUBLISH position:update
+    1. ST 跟踪止损（st_trail）：
+       - 每根 M1 K 线收盘后，取最新 M1 SuperTrend 值作为新止损价
+       - 棘轮机制：多头只允许止损线上移，空头只允许下移
+
+    2. EMA21 M5 跟踪止损（ema_trail）：
+       - 每根 M1 K 线收盘后，从 Redis 读取最新 M5 bar 的 ema21 值作为新止损价
+       - 棘轮机制相同（只收紧不放宽）
+       - 两套机制可同时开启，各自独立计算，取更优（更紧）的止损价
 
     设计原则：
       - 与 OrderGatewayActor 完全解耦，通过 cache.orders() + modify_order() 操作
@@ -39,6 +40,8 @@ class ExitManager(Strategy):
         super().__init__(config)
         # symbol -> bool，是否启用 ST 跟踪止损
         self._st_trail_active: dict[str, bool] = {}
+        # symbol -> bool，是否启用 EMA21 M5 跟踪止损
+        self._ema_trail_active: dict[str, bool] = {}
         # Redis 连接
         self._redis = None
 
@@ -60,41 +63,49 @@ class ExitManager(Strategy):
             topic="bar.collected",
             handler=self._on_bar_collected
         )
-        # 订阅前端开关变更事件（order_actor.py 收到 POST /settings 后发布）
+        # 订阅 ST 跟踪止损开关事件
         self.msgbus.subscribe(
             topic="settings.st_trail",
-            handler=self._on_settings_change
+            handler=self._on_st_settings_change
         )
-        self.log.info("[ExitManager] 已启动，等待 bar.collected / settings.st_trail 事件")
+        # 订阅 EMA 跟踪止损开关事件
+        self.msgbus.subscribe(
+            topic="settings.ema_trail",
+            handler=self._on_ema_settings_change
+        )
+        self.log.info("[ExitManager] 已启动，等待 bar.collected / settings.st_trail / settings.ema_trail 事件")
 
     def on_stop(self) -> None:
         if self._redis:
             self._redis.close()
         self.log.info("[ExitManager] 已停止")
 
-    # ── 开关变更 ────────────────────────────────────────────────────────
-    def _on_settings_change(self, event: STTrailSettingsEvent) -> None:
+    # ── ST 开关变更 ──────────────────────────────────────────────────────
+    def _on_st_settings_change(self, event: STTrailSettingsEvent) -> None:
         self._st_trail_active[event.symbol] = event.active
         self.log.info(
             f"[ExitManager] {event.symbol} ST 跟踪止损已"
             f"{'开启 ✓' if event.active else '关闭'}"
         )
 
+    # ── EMA 开关变更 ─────────────────────────────────────────────────────
+    def _on_ema_settings_change(self, event: EMATrailSettingsEvent) -> None:
+        self._ema_trail_active[event.symbol] = event.active
+        self.log.info(
+            f"[ExitManager] {event.symbol} EMA21 M5 跟踪止损已"
+            f"{'开启 ✓' if event.active else '关闭'}"
+        )
+
     # ── K 线收盘 → 评估是否调整止损价 ──────────────────────────────────
     def _on_bar_collected(self, event: BarCollectedEvent) -> None:
         sym = event.symbol
-        if not self._st_trail_active.get(sym, False):
+        st_active  = self._st_trail_active.get(sym, False)
+        ema_active = self._ema_trail_active.get(sym, False)
+
+        if not st_active and not ema_active:
             return
 
         bar = event.bar
-        st_val = bar.get("st_value", 0.0)
-        st_dir = bar.get("st_dir", 0)
-
-        # ST 尚未预热时跳过（st_val == 0.0）
-        if not st_val:
-            return
-
-        # 找到该标的的 instrument_id
         instrument_id_str = bar.get("instrument_id", "")
         if not instrument_id_str:
             self.log.warning(f"[ExitManager] {sym}: bar 中无 instrument_id，跳过")
@@ -106,7 +117,7 @@ class ExitManager(Strategy):
             self.log.error(f"[ExitManager] {sym}: instrument_id 解析失败: {e}")
             return
 
-        # 找到该标的的开放仓位（手动过滤，避免 API 兼容问题）
+        # 找到该标的的开放仓位
         open_positions = [
             p for p in self.cache.positions_open()
             if p.instrument_id == instrument_id
@@ -115,51 +126,92 @@ class ExitManager(Strategy):
             return
 
         for pos in open_positions:
-            self._maybe_update_stop(pos, instrument_id, st_val, st_dir, sym)
+            # 收集候选止损价列表（各机制分别计算，最终取最优）
+            candidate_sls = []
 
-    # ── 评估并执行止损价修改 ────────────────────────────────────────────
-    def _maybe_update_stop(self, pos, instrument_id, st_val: float, st_dir: int, sym: str) -> None:
-        """
-        棘轮机制：
-          - 多头（is_long）：新止损价 = max(当前止损价, st_val)（只允许上移，ST 方向需为多头）
-          - 空头：新止损价 = min(当前止损价, st_val)（只允许下移，ST 方向需为空头）
-        若 ST 转向则不调整（等待止损单被触发即可）。
-        """
-        # 读取当前止损价（从 Redis 的 position 记录中获取）
-        current_sl = self._get_current_sl(sym)
-        if current_sl is None:
-            self.log.info(f"[ExitManager] {sym}: 未找到当前止损价，跳过")
-            return
+            # ─ 机制1：ST 跟踪止损 ─────────────────────────────────────
+            if st_active:
+                st_val = bar.get("st_value", 0.0)
+                st_dir = bar.get("st_dir", 0)
+                if st_val:  # ST 已预热
+                    sl = self._calc_st_sl(pos, st_val, st_dir, sym)
+                    if sl is not None:
+                        candidate_sls.append(("ST", sl))
 
-        # 计算新止损价（棘轮：只收紧不放宽）
+            # ─ 机制2：EMA21 M5 跟踪止损 ──────────────────────────────
+            if ema_active:
+                ema21 = self._get_m5_ema21(sym)
+                if ema21 is not None:
+                    sl = self._calc_ema_sl(pos, ema21, sym)
+                    if sl is not None:
+                        candidate_sls.append(("EMA", sl))
+
+            if not candidate_sls:
+                continue
+
+            # 读取当前止损价
+            current_sl = self._get_current_sl(sym)
+            if current_sl is None:
+                self.log.info(f"[ExitManager] {sym}: 未找到当前止损价，跳过")
+                continue
+
+            # 取各机制中最优（最紧）的止损价
+            if pos.is_long:
+                # 多头：取最大值（最高的止损价最好）
+                best_name, best_sl = max(candidate_sls, key=lambda x: x[1])
+                new_sl = max(current_sl, best_sl)  # 棘轮：只允许上移
+            else:
+                # 空头：取最小值（最低的止损价最好）
+                best_name, best_sl = min(candidate_sls, key=lambda x: x[1])
+                new_sl = min(current_sl, best_sl)  # 棘轮：只允许下移
+
+            if abs(new_sl - current_sl) < 0.01:
+                continue
+
+            self.log.info(
+                f"[ExitManager] {sym}: [{best_name}] 止损价 {current_sl:.2f} → {new_sl:.2f}  "
+                f"({'多' if pos.is_long else '空'}头)  "
+                f"所有候选: {[(n, f'{v:.2f}') for n, v in candidate_sls]}"
+            )
+            self._modify_stop_order(pos, instrument_id, new_sl, sym)
+
+    # ── ST 止损价计算 ────────────────────────────────────────────────────
+    def _calc_st_sl(self, pos, st_val: float, st_dir: int, sym: str) -> float | None:
+        """计算 ST 跟踪止损的候选止损价，ST 转向时返回 None（不参与本次竞选）。"""
         if pos.is_long:
             if st_dir != 1:
-                # ST 已转空：不追随，等止损单自然触发
-                self.log.debug(f"[ExitManager] {sym}: 多头但 ST 转空，不调整止损")
-                return
-            new_sl = max(current_sl, st_val)
+                self.log.debug(f"[ExitManager] {sym}: 多头但 ST 转空，ST 不参与本次调整")
+                return None
+            return st_val
         else:
             if st_dir != -1:
-                # ST 已转多：不追随
-                self.log.debug(f"[ExitManager] {sym}: 空头但 ST 转多，不调整止损")
-                return
-            new_sl = min(current_sl, st_val)
+                self.log.debug(f"[ExitManager] {sym}: 空头但 ST 转多，ST 不参与本次调整")
+                return None
+            return st_val
 
-        # 价差小于 0.01 美元时跳过（避免无意义调用）
-        if abs(new_sl - current_sl) < 0.01:
-            self.log.debug(
-                f"[ExitManager] {sym}: 新止损价 {new_sl:.2f} 与当前 {current_sl:.2f} 差距 < 0.01，跳过"
-            )
-            return
+    # ── EMA21 M5 止损价计算 ──────────────────────────────────────────────
+    def _calc_ema_sl(self, pos, ema21: float, sym: str) -> float | None:
+        """计算 EMA21 M5 跟踪止损的候选止损价。"""
+        # EMA 跟踪：直接将 EMA21 作为止损参考线（无方向过滤，EMA 本身就是趋势线）
+        return ema21
 
-        self.log.info(
-            f"[ExitManager] {sym}: ST={st_val:.2f}  "
-            f"止损价 {current_sl:.2f} → {new_sl:.2f}  "
-            f"({'多' if pos.is_long else '空'}头)"
-        )
-
-        # 找到并修改 IBKR 止损单
-        self._modify_stop_order(pos, instrument_id, new_sl, sym)
+    # ── 从 Redis 获取最新 M5 EMA21 ──────────────────────────────────────
+    def _get_m5_ema21(self, sym: str) -> float | None:
+        """从 Redis bars:5m:{sym} 读取最新一根 M5 bar 的 ema21 字段。"""
+        if not self._redis:
+            return None
+        try:
+            raw = self._redis.lindex(f"bars:5m:{sym}", -1)  # 最新一根（列表末尾）
+            if not raw:
+                return None
+            bar = json.loads(raw)
+            ema21 = bar.get("ema21")
+            if ema21 is None:
+                return None
+            return float(ema21)
+        except Exception as e:
+            self.log.warning(f"[ExitManager] {sym}: 读取 M5 EMA21 失败: {e}")
+            return None
 
     # ── 修改 IBKR 止损单 ───────────────────────────────────────────────
     def _modify_stop_order(self, pos, instrument_id, new_sl: float, sym: str) -> None:
@@ -180,7 +232,6 @@ class ExitManager(Strategy):
                 break
 
         # ─ cache 找不到：尝试 Redis fallback ─────────────────────────
-        # 引擎重启后 IBKR 会推回 ACCEPTED 事件填充 cache，但有时序延迟
         if stop_order is None and self._redis:
             try:
                 stored = self._redis.get(f"order:stop:{sym}")
@@ -217,7 +268,6 @@ class ExitManager(Strategy):
 
         try:
             new_trigger_price = instrument.make_price(new_sl)
-            # NautilusTrader modify_order API
             self.modify_order(
                 order=stop_order,
                 trigger_price=new_trigger_price,

@@ -1012,6 +1012,13 @@
           </label>
           <span id="st-trail-label">ST跟踪止盈</span>
         </div>
+        <div class="toggle-wrap">
+          <label class="toggle">
+            <input type="checkbox" id="ema-trail-toggle">
+            <span class="slider"></span>
+          </label>
+          <span id="ema-trail-label">EMA跟踪止盈</span>
+        </div>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
         <button class="btn btn-close" id="btn-close">平仓</button>
@@ -1054,6 +1061,10 @@
         <div class="legend-item">
           <div class="legend-dot" style="background:#ef5350"></div>
           <span style="color:#ef5350">SuperTrend↓</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#60a5fa;height:2px;border-top:2px dashed #60a5fa"></div>
+          <span style="color:#60a5fa">EMA21(M5)</span>
         </div>
       </div>
 
@@ -1634,6 +1645,7 @@
     }
 
     // ─── 加载数据 ────────────────────────────────────────────
+    let ema21M5Series = null;  // M5 EMA21 折线 series（全局保持引用）
     async function loadData() {
       try {
         const res = await fetch(`/api/data/${SYMBOL}`);
@@ -1641,7 +1653,7 @@
           const err = await res.json();
           throw new Error(err.error);
         }
-        const { symbol, m1_bars, position, prev_day } = await res.json();
+        const { symbol, m1_bars, m5_bars, position, prev_day } = await res.json();
 
         document.getElementById("symbol-label").textContent = symbol;
         document.getElementById("loading").style.display = "none";
@@ -1654,6 +1666,29 @@
 
         // SuperTrend 按段断开
         createSegmentedST(m1_bars);
+
+        // M5 EMA21 折线（蓝色虚线）
+        if (ema21M5Series) {
+          chart.removeSeries(ema21M5Series);
+          ema21M5Series = null;
+        }
+        if (m5_bars && m5_bars.length) {
+          const ema21Data = m5_bars
+            .filter(b => b.ema21 != null)
+            .map(b => ({ time: b.time, value: b.ema21 }));
+          if (ema21Data.length) {
+            ema21M5Series = chart.addLineSeries({
+              color: '#60a5fa',
+              lineWidth: 1,
+              lineStyle: 1,  // 1 = Dashed
+              crosshairMarkerVisible: false,
+              lastValueVisible: true,
+              priceLineVisible: false,
+              title: 'EMA21(M5)',
+            });
+            ema21M5Series.setData(ema21Data);
+          }
+        }
 
         // 开盘区间（前15分钟 OR High / OR Low）
         addOpeningRange(m1_bars);
@@ -2456,6 +2491,19 @@
       });
       const lbl = document.getElementById('st-trail-label');
       lbl.style.color = stTrailEnabled ? '#26a69a' : '#787b86';
+    });
+
+    // EMA21 M5 跟踪止盈 toggle
+    let emaTrailEnabled = false;
+    document.getElementById('ema-trail-toggle').addEventListener('change', async e => {
+      emaTrailEnabled = e.target.checked;
+      await fetch(`/api/settings/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ema_trail: emaTrailEnabled }),
+      });
+      const lbl = document.getElementById('ema-trail-label');
+      lbl.style.color = emaTrailEnabled ? '#60a5fa' : '#787b86';
     });
 
     // ─── 标的切换 ────────────────────────────────────────────

@@ -424,8 +424,16 @@ app.post("/api/settings/:symbol", async (req, res) => {
     if (req.body.st_trail !== undefined) {
         await proxyToEngine('POST', '/settings', {
             symbol: symbol,
-            active: req.body.st_trail
-        }).catch(e => console.error("同步设置到引擎失败:", e.message));
+            active: req.body.st_trail,
+            st_trail: true,          // 标识类型，让引擎区分
+        }).catch(e => console.error("同步 ST Trail 设置到引擎失败:", e.message));
+    }
+    if (req.body.ema_trail !== undefined) {
+        await proxyToEngine('POST', '/settings', {
+            symbol: symbol,
+            active: req.body.ema_trail,
+            ema_trail: true,         // 标识类型，让引擎区分
+        }).catch(e => console.error("同步 EMA Trail 设置到引擎失败:", e.message));
     }
 
     res.json({ ok: true, settings });
