@@ -1063,8 +1063,8 @@
           <span style="color:#ef5350">SuperTrend↓</span>
         </div>
         <div class="legend-item">
-          <div class="legend-dot" style="background:#60a5fa;height:2px;border-top:2px dashed #60a5fa"></div>
-          <span style="color:#60a5fa">EMA21(M5)</span>
+          <div class="legend-dot" style="background:#ffffff"></div>
+          <span style="color:#ffffff">EMA21(M5)</span>
         </div>
       </div>
 
@@ -1667,7 +1667,7 @@
         // SuperTrend 按段断开
         createSegmentedST(m1_bars);
 
-        // M5 EMA21 折线（蓝色虚线）
+        // M5 EMA21 折线（白色实线加粗）
         if (ema21M5Series) {
           chart.removeSeries(ema21M5Series);
           ema21M5Series = null;
@@ -1678,9 +1678,9 @@
             .map(b => ({ time: b.time, value: b.ema21 }));
           if (ema21Data.length) {
             ema21M5Series = chart.addLineSeries({
-              color: '#60a5fa',
-              lineWidth: 1,
-              lineStyle: 1,  // 1 = Dashed
+              color: '#ffffff',
+              lineWidth: 2,
+              lineStyle: 0,  // 0 = Solid
               crosshairMarkerVisible: false,
               lastValueVisible: true,
               priceLineVisible: false,
