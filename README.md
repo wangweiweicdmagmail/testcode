@@ -282,8 +282,9 @@ python order_sender.py --bracket  # 括号单（市价 + 止损 + 定时移动�
 |--------------------------|------|
 | `bars:1m:{SYMBOL}`       | 1m K 线列表（含 SuperTrend、EMA21） |
 | `bars:5m:{SYMBOL}`       | 5m 聚合 K 线（含 nh_score 日内新高计数） |
-| `position:{SYMBOL}`      | 仓位信息 |
-| `settings:{SYMBOL}`      | 策略开关 |
+| `position:{SYMBOL}`      | 仓位信息（含 `stop_loss` 字段） |
+| `settings:{SYMBOL}`      | 策略开关（如 `st_trail` ST跟踪止损开关） |
+| `order:stop:{SYMBOL}`    | 活跃止损单 `{client_order_id, trigger_price}` — 供引擎重启后恢复修改能力 |
 | `prev_day:{SYMBOL}`      | 昨日围栏 `{high, low, close}`（引擎启动时由日K写入） |
 | `account:funds`          | 账户资金快照 `{account_id, balances:[{currency,total,free,locked}], ts}` |
 | `kline:1m:{SYMBOL}`      | PUBLISH：1m K 线收盘事件 |

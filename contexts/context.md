@@ -98,8 +98,10 @@ cd frontend && node server.js
 
 ## 已实现功能汇总
 
-- **平仓按钮** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
-- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸出现 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；成功后原价格线移到新位置，止损成交/平仓后价格线自动清除
+- **平仓按鈕** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
+- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸出现 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；成功后原价格线移动到新价格，止损成交/平仓后价格线自动清除
+- **ST 跟踪止损** ✅：开仓后开启“ST跟踪止盈”开关 → `ExitManager` 每分钟 K 线收盘后自动计算新止损价（檘轮机制：多头只週上移，空头只週下移）并调用 `modify_order()` 修改 IBKR 止损单
+- **止损单 ID 持久化** ✅：止损单 ACCEPTED 后将 `client_order_id` 写入 Redis `order:stop:{sym}`；引擎重启后 IBKR 重新推送 ACCEPTED 事件，cache 回充，`modify_order()` 即可正常运作
 
 ## Redis 数据结构
 
@@ -107,6 +109,9 @@ cd frontend && node server.js
 |-----|------|------|
 | `bars:1m:{sym}` | List | 1分钟 K 线历史 |
 | `bars:5m:{sym}` | List | 5分钟 K 线历史 |
+| `position:{sym}` | String | 仓位 JSON（含 `stop_loss`） |
+| `settings:{sym}` | String | 策略开关 JSON（含 `st_trail`） |
+| `order:stop:{sym}` | String | 活跃止损单 `{client_order_id, trigger_price}` — 重启恢复用 |
 | `kline:1m:{sym}` | PubSub | 实时 1m K 线推送 |
 | `kline:5m:{sym}` | PubSub | 实时 5m K 线推送 |
 | `order:update` | PubSub | 订单状态变更推送 |
