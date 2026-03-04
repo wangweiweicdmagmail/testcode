@@ -669,16 +669,17 @@ class BarLoggerStrategy(Strategy):
                     f"盘前={len(bars)-len(rth_m1)} 根（已用于指标预热，不写图表）"
                 )
                 try:
-                    rth_last = rth_m1[-1] if rth_m1 else None
-                    key  = f"bars:1m:{sym}"
+                    key_m1 = f"bars:1m:{sym}"
                     written = rth_m1[-MAX_BARS:]
-                    self._redis.set(key, json.dumps(written))
+                    # 切换为 Redis List 结构
+                    self._redis.delete(key_m1)
+                    if written:
+                        self._redis.rpush(key_m1, *[json.dumps(b) for b in written])
+                    
                     self.log.info(
                         f"[FLUSH] {sym}: ✓ bars:1m 写入完成  "
                         f"写入={len(written)} 根  "
-                        + (f"最新 C={rth_last['close']}  "
-                           f"ST={rth_last.get('st_value','?')}({'↑' if rth_last.get('st_dir')==1 else '↓'})  "
-                           f"EMA21={rth_last.get('ema21','?')}" if rth_last else "（无 RTH 数据）")
+                        + (f"最新 C={written[-1]['close']}  " if written else "（无有效数据）")
                     )
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:1m Redis 写入失败: {e}")
@@ -702,12 +703,16 @@ class BarLoggerStrategy(Strategy):
 
                 # ── 步骤3：整体覆盖写入 M5 历史 K 线（仅 RTH）────────────
                 rth_m5 = [b for b in m5_bars if self._is_rth(b["time"])]
+                key_m5 = f"bars:5m:{sym}"
+                written_m5 = rth_m5[-MAX_BARS:]
                 try:
-                    self._redis.set(f"bars:5m:{sym}", json.dumps(rth_m5[-MAX_BARS:]))
+                    self._redis.delete(key_m5)
+                    if written_m5:
+                        self._redis.rpush(key_m5, *[json.dumps(b) for b in written_m5])
                     self.log.info(
                         f"[FLUSH] {sym}: ✓ bars:5m 覆盖写入完成  "
                         f"RTH={len(rth_m5)} 根"
-                        + (f"  最新 C={rth_m5[-1]['close']}" if rth_m5 else "")
+                        + (f"  最新 C={written_m5[-1]['close']}" if written_m5 else "")
                     )
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:5m Redis 写入失败: {e}")

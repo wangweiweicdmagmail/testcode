@@ -33,19 +33,19 @@ const ALL_SYMBOLS = ["QQQ", "AAPL", "NVDA", "TSLA"];
 app.get("/api/data/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     try {
-        const [m1Raw, m5Raw, posRaw, prevDayRaw] = await Promise.all([
-            redis.get(`bars:1m:${symbol}`),
-            redis.get(`bars:5m:${symbol}`),
+        const [m1List, m5List, posRaw, prevDayRaw] = await Promise.all([
+            redis.lrange(`bars:1m:${symbol}`, 0, -1),
+            redis.lrange(`bars:5m:${symbol}`, 0, -1),
             redis.get(`position:${symbol}`),
             redis.get(`prev_day:${symbol}`),   // 引擎启动时从日K写入
         ]);
 
-        if (!m1Raw) {
-            return res.status(404).json({ error: `No data for ${symbol}. Run data_feeder.py first.` });
+        if (!m1List || m1List.length === 0) {
+            return res.status(404).json({ error: `No data for ${symbol}. Run engine first.` });
         }
 
-        const m1All = JSON.parse(m1Raw);
-        const m5All = m5Raw ? JSON.parse(m5Raw) : [];
+        const m1All = m1List.map(s => JSON.parse(s));
+        const m5All = m5List ? m5List.map(s => JSON.parse(s)) : [];
 
         // 防御层：按时间戳去重（保留最后出现的），确保 LightweightCharts setData 时间严格递增
         function dedupBars(bars) {
@@ -175,14 +175,14 @@ function updateNHState(symbol, close) {
 app.get("/api/indicators", async (req, res) => {
     try {
         const results = await Promise.all(ALL_SYMBOLS.map(async sym => {
-            const [m1Raw, m5Raw] = await Promise.all([
-                redis.get(`bars:1m:${sym}`),
-                redis.get(`bars:5m:${sym}`),
+            const [m1List, m5List] = await Promise.all([
+                redis.lrange(`bars:1m:${sym}`, 0, -1),
+                redis.lrange(`bars:5m:${sym}`, 0, -1),
             ]);
-            if (!m1Raw) return { symbol: sym, error: "no data" };
+            if (!m1List || m1List.length === 0) return { symbol: sym, error: "no data" };
 
-            const m1 = JSON.parse(m1Raw);
-            const m5 = m5Raw ? JSON.parse(m5Raw) : [];
+            const m1 = m1List.map(s => JSON.parse(s));
+            const m5 = m5List ? m5List.map(s => JSON.parse(s)) : [];
             const lastM1 = m1[m1.length - 1];
             const lastM5 = m5.length ? m5[m5.length - 1] : null;
 
