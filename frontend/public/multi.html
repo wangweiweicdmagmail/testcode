@@ -438,21 +438,37 @@
         /* ── 内嵌订单面板 ── */
         .order-panel {
             display: none;
-            position: absolute;
-            top: 35px;
-            left: 8px;
-            width: 190px;
-            background: rgba(19, 23, 34, .97);
-            border: 1px solid #2a2e39;
-            border-radius: 10px;
-            padding: 12px 14px;
-            z-index: 60;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 220px;
+            background: rgba(19, 23, 34, .98);
+            border: 1px solid #434651;
+            border-radius: 12px;
+            padding: 16px 18px;
+            z-index: 9999;
             color: #d1d4dc;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, .6);
+        }
+
+        /* 遮罩层：点击对话框外部时关闭 */
+        .order-panel-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .45);
+            z-index: 9998;
+        }
+
+        .order-panel-overlay.active {
+            display: block;
         }
 
         .order-panel.active {
             display: block;
         }
+
 
         .op-hdr {
             display: flex;
@@ -581,6 +597,9 @@
 </head>
 
 <body>
+
+    <!-- 开仓对话框遮罩层（点击关闭） -->
+    <div class="order-panel-overlay" id="orderPanelOverlay"></div>
 
     <!-- 顶部导航 -->
     <div id="nav">
@@ -1332,6 +1351,12 @@
             ctx.orderMode = true;
             ctx.handleEl.classList.add('active');
             ctx.panelEl.classList.add('active');
+            // 显示遮罩层
+            const overlay = document.getElementById('orderPanelOverlay');
+            if (overlay) {
+                overlay.classList.add('active');
+                overlay.onclick = () => exitOrderMode(ctx);
+            }
             updateHandlePriceLabel(ctx);
             updateOrderPanel(ctx);
             snapHandle(ctx);
@@ -1343,6 +1368,9 @@
             if (ctx.slPriceLine) { ctx.cs.removePriceLine(ctx.slPriceLine); ctx.slPriceLine = null; }
             ctx.handleEl.classList.remove('active');
             ctx.panelEl.classList.remove('active');
+            // 隐藏遮罩层
+            const overlay = document.getElementById('orderPanelOverlay');
+            if (overlay) { overlay.classList.remove('active'); overlay.onclick = null; }
             activeDrag = null;
             document.body.style.cursor = '';
             // 如果持仓且有止损价，自动切回 modifyMode

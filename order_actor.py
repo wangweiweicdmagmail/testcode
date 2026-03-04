@@ -147,6 +147,10 @@ class OrderGatewayActor(Strategy):
         self._pending_sl: dict = {}
         # FA Group 专属账户查询线程控制
         self._fa_accounts_running: bool = False
+        # 跟踪止损开关状态（sym -> bool）
+        self._st_trail_active: dict[str, bool] = {}
+        self._ema_trail_active: dict[str, bool] = {}
+
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -179,14 +183,24 @@ class OrderGatewayActor(Strategy):
             else:
                 self.log.warning("[Gateway] redis 包未安装，order:update 推送已禁用")
 
-            # ★ 标准 MessageBus 订阅：注册 ExternalOrderCommand 的处理函数
+            # ★ 路读 MessageBus 订阅：外部下单 + 跟踪止损开关 + K 线收盘
             self.msgbus.subscribe(
                 topic=ExternalOrderCommand.TOPIC,
                 handler=self.on_external_order_command,
             )
-            self.log.info(
-                f"[Gateway] 已订阅 MessageBus Topic: {ExternalOrderCommand.TOPIC!r}"
+            self.msgbus.subscribe(
+                topic="settings.st_trail",
+                handler=self._on_st_trail_change,
             )
+            self.msgbus.subscribe(
+                topic="settings.ema_trail",
+                handler=self._on_ema_trail_change,
+            )
+            self.msgbus.subscribe(
+                topic="bar.collected",
+                handler=self._on_bar_collected_trail,
+            )
+            self.log.info("[Gateway] 已订阅 ExternalOrderCommand / st_trail / ema_trail / bar.collected")
 
             # 启动 HTTP 网关线程
             self._start_http_server()
@@ -219,6 +233,9 @@ class OrderGatewayActor(Strategy):
             topic=ExternalOrderCommand.TOPIC,
             handler=self.on_external_order_command,
         )
+        self.msgbus.unsubscribe(topic="settings.st_trail",  handler=self._on_st_trail_change)
+        self.msgbus.unsubscribe(topic="settings.ema_trail", handler=self._on_ema_trail_change)
+        self.msgbus.unsubscribe(topic="bar.collected",      handler=self._on_bar_collected_trail)
 
         # 取消未完成的止损修改计划
         for t in self._sl_tasks:
@@ -233,6 +250,176 @@ class OrderGatewayActor(Strategy):
 
         if self._redis:
             self._redis.close()
+
+    # ------------------------------------------------------------------
+    # ★ 跟踪止损逻辑（直接在 OrderGatewayActor 内实现，可访问自己的 cache.orders()）
+    # ------------------------------------------------------------------
+
+    def _on_st_trail_change(self, event) -> None:
+        """ST 跟踪止损开关变更"""
+        self._st_trail_active[event.symbol] = event.active
+        self.log.info(
+            f"[Trail] {event.symbol} ST 跟踪止损已"
+            f"{'\u5f00启 ✓' if event.active else '关闭'}"
+        )
+
+    def _on_ema_trail_change(self, event) -> None:
+        """EMA21 跟踪止损开关变更"""
+        self._ema_trail_active[event.symbol] = event.active
+        self.log.info(
+            f"[Trail] {event.symbol} EMA21 跟踪止损已"
+            f"{'\u5f00启 ✓' if event.active else '关闭'}"
+        )
+
+    def _on_bar_collected_trail(self, event) -> None:
+        """
+        M1 K 线收盘事件 - 跟踪止损逻辑入口。
+        在 OrderGatewayActor 内执行，可直接访问自己提交的止损单。
+
+        开关状态从 Redis settings:{sym} 读取（server.js 在用户切换开关时写入），
+        引擎重启后自动恢复，无需重新点击界面开关。
+        """
+        sym = event.symbol
+
+        # ── 从 Redis 读取开关状态（Source of Truth）──────────────────
+        st_active = ema_active = False
+        if self._redis:
+            try:
+                raw = self._redis.get(f"settings:{sym}")
+                if raw:
+                    settings = json.loads(raw)
+                    st_active  = bool(settings.get("st_trail",  False))
+                    ema_active = bool(settings.get("ema_trail", False))
+            except Exception:
+                # Redis 不可用时，降级到内存开关
+                st_active  = self._st_trail_active.get(sym, False)
+                ema_active = self._ema_trail_active.get(sym, False)
+        else:
+            # 无 Redis 时使用内存开关
+            st_active  = self._st_trail_active.get(sym, False)
+            ema_active = self._ema_trail_active.get(sym, False)
+
+        if not st_active and not ema_active:
+            return
+
+        bar = event.bar
+        instrument_id_str = bar.get("instrument_id", "")
+        if not instrument_id_str:
+            return
+
+        try:
+            from nautilus_trader.model.identifiers import InstrumentId as _InstrumentId
+            instrument_id = _InstrumentId.from_str(instrument_id_str)
+        except Exception as e:
+            self.log.error(f"[Trail] {sym}: instrument_id 解析失败: {e}")
+            return
+
+        # 找开放仓位
+        open_positions = [
+            p for p in self.cache.positions_open()
+            if p.instrument_id == instrument_id
+        ]
+        if not open_positions:
+            return
+
+
+        for pos in open_positions:
+            # ―― 无条件计算 ST 候选値 ―――――――――――――――――――――
+            st_val = float(bar.get("st_value", 0.0))
+            st_dir = int(bar.get("st_dir", 0))
+            st_candidate = None
+            if st_val:
+                if pos.is_long and st_dir == 1:
+                    st_candidate = st_val
+                elif not pos.is_long and st_dir == -1:
+                    st_candidate = st_val
+
+            # ―― 无条件计算 EMA21 M5 候选値 ――――――――――――――――
+            ema_candidate = None
+            if self._redis:
+                try:
+                    raw_ema = self._redis.lindex(f"bars:5m:{sym}", -1)
+                    if raw_ema:
+                        m5bar = json.loads(raw_ema)
+                        ema21 = m5bar.get("ema21")
+                        if ema21 is not None:
+                            ema_candidate = float(ema21)
+                except Exception:
+                    pass
+
+            # ―― 找到活跃的 STOP_MARKET 止损单 ―――――――――――――――
+            stop_order = None
+            for order in self.cache.orders():
+                if order.instrument_id != instrument_id:
+                    continue
+                status_name = getattr(order.status,     "name", "")
+                type_name   = getattr(order.order_type, "name", "")
+                if status_name in TERMINAL:
+                    continue
+                if type_name == "STOP_MARKET":
+                    stop_order = order
+                    break
+
+            if stop_order is None:
+                self.log.debug(f"[Trail] {sym}: 无活跃止损单，跳过")
+                continue
+
+            current_sl = float(stop_order.trigger_price)
+
+            # ―― 根据开关筛选候选（开关在此才起效）―――――――――
+            candidate_sls = []
+            if st_active and st_candidate is not None:
+                candidate_sls.append(("ST", st_candidate))
+            if ema_active and ema_candidate is not None:
+                candidate_sls.append(("EMA", ema_candidate))
+
+            if not candidate_sls:
+                continue
+
+            if pos.is_long:
+                best_name, best_sl = max(candidate_sls, key=lambda x: x[1])
+                new_sl = max(current_sl, best_sl)
+            else:
+                best_name, best_sl = min(candidate_sls, key=lambda x: x[1])
+                new_sl = min(current_sl, best_sl)
+
+            if abs(new_sl - current_sl) < 0.01:
+                continue
+
+            self.log.info(
+                f"[Trail] {sym}: [{best_name}] 止损价 {current_sl:.2f} → {new_sl:.2f}  "
+                f"({'\u591a' if pos.is_long else '\u7a7a'}头)  "
+                f"候选: {[(n, f'{v:.2f}') for n, v in candidate_sls]}"
+            )
+
+            # 执行改单
+            try:
+                instrument = self.cache.instrument(instrument_id)
+                if instrument is None:
+                    self.log.error(f"[Trail] {sym}: 合约未加载")
+                    continue
+                new_trigger_price = instrument.make_price(new_sl)
+                self.modify_order(
+                    order=stop_order,
+                    quantity=stop_order.quantity,
+                    trigger_price=new_trigger_price,
+                )
+                self.log.info(
+                    f"[Trail] {sym}: ✓ modify_order 已提交  "
+                    f"触发价={new_trigger_price}  订单={stop_order.client_order_id}"
+                )
+                # 同步更新 Redis order:stop 中的 trigger_price
+                if self._redis:
+                    try:
+                        stored = self._redis.get(f"order:stop:{sym}")
+                        if stored:
+                            data = json.loads(stored)
+                            data["trigger_price"] = str(new_sl)
+                            self._redis.set(f"order:stop:{sym}", json.dumps(data))
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.log.error(f"[Trail] {sym}: modify_order 失败: {e}")
 
         if self._http_server:
             threading.Thread(
@@ -883,7 +1070,8 @@ class OrderGatewayActor(Strategy):
         # 尝试从 cache 取到该订单的详细信息加入日志
         try:
             order = self.cache.order(event.client_order_id)
-            order_type = str(order.order_type).replace("OrderType.", "") if order else "UNKNOWN"
+            # 统一用 .name 获取枚举名，避免 Cython 枚举 str() 返回整数序号
+            order_type = getattr(order.order_type, "name", "") if order else ""
             tp = getattr(order, "trigger_price", None) if order else None
             if order_type == "STOP_MARKET":
                 self.log.info(
@@ -911,6 +1099,7 @@ class OrderGatewayActor(Strategy):
                 f"VenueOrderId={event.venue_order_id}"
             )
         self._pub_order("ACCEPTED", event)
+
 
     def _persist_stop_order(self, sym: str, client_order_id: str, trigger_price) -> None:
         """将止损单 ID 写入 Redis order:stop:{sym}，供引擎重启后恢复。"""

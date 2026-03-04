@@ -28,6 +28,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import redis as _redis
+from events import BarCollectedEvent
 
 from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
 from nautilus_trader.indicators.averages import MovingAverageType
@@ -937,12 +938,13 @@ class BarLoggerStrategy(Strategy):
             self.log.debug(
                 f"[BAR] {sym}: ✓ Redis RPUSH bars:1m + PUBLISH {ch}"
             )
-
-            # ★ 发布内部事件供 ExitManager 止盈逻辑使用
-            bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
-            self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
         except Exception as e:
             self.log.error(f"[BAR] {sym}: ✗ Redis 写入失败: {e}")
+
+        # ★ 发布内部事件供 ExitManager 止盈逻辑使用（在 try 外面，不被 Redis 异常影响）
+        bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
+        self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
+
 
     # ── M5 处理（历史/实时共用）────────────────────────────────────────
     def _process_m5_bar(self, sym: str, m5_raw: dict, publish: bool) -> None:

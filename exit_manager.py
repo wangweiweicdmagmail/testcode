@@ -285,36 +285,86 @@ class ExitManager(Strategy):
 
     # ── Redis 辅助 ─────────────────────────────────────────────────────
     def _get_current_sl(self, sym: str) -> float | None:
-        """从 Redis position:{sym} 读取当前止损价。"""
-        if not self._redis:
-            return None
+        """
+        读取当前止损价。
+
+        优先级：
+        1. self.cache.orders() 中活跃的 STOP_MARKET 单的 trigger_price
+           （与界面 /api/active-orders 数据源一致，最可靠）
+        2. Redis order:stop:{sym}.trigger_price（重启后 IBKR 重推前的窗口期 fallback）
+        3. Redis position:{sym}.stop_loss（旧路径兼容，前端手动记录的开仓止损价）
+        """
+        TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
+
+        # 方案1：直接从引擎 cache 读取活跃 STOP_MARKET 的 trigger_price
         try:
-            raw = self._redis.get(f"position:{sym}")
-            if not raw:
-                return None
-            data = json.loads(raw)
-            sl = data.get("stop_loss")
-            return float(sl) if sl is not None else None
+            for order in self.cache.orders():
+                type_name   = getattr(order.order_type, "name", "")
+                status_name = getattr(order.status,     "name", "")
+                sym_val     = order.instrument_id.symbol.value
+                if sym_val != sym:
+                    continue
+                if status_name in TERMINAL_STATUS:
+                    continue
+                if type_name == "STOP_MARKET":
+                    tp = getattr(order, "trigger_price", None)
+                    if tp is not None:
+                        return float(tp)
         except Exception as e:
-            self.log.warning(f"[ExitManager] {sym}: 读取 Redis stop_loss 失败: {e}")
-            return None
+            self.log.warning(f"[ExitManager] {sym}: cache 读取 trigger_price 失败: {e}")
+
+        # 方案2：Redis order:stop:{sym} fallback（重启后 IBKR 推回订单之前的窗口期）
+        if self._redis:
+            try:
+                stored = self._redis.get(f"order:stop:{sym}")
+                if stored:
+                    data = json.loads(stored)
+                    tp_str = data.get("trigger_price")
+                    if tp_str:
+                        self.log.info(f"[ExitManager] {sym}: 使用 Redis order:stop fallback  tp={tp_str}")
+                        return float(tp_str)
+            except Exception as e:
+                self.log.warning(f"[ExitManager] {sym}: Redis order:stop 读取失败: {e}")
+
+        # 方案3：Redis position:{sym}.stop_loss（兼容旧的前端手动开仓数据）
+        if self._redis:
+            try:
+                raw = self._redis.get(f"position:{sym}")
+                if raw:
+                    data = json.loads(raw)
+                    sl = data.get("stop_loss")
+                    if sl is not None:
+                        self.log.info(f"[ExitManager] {sym}: 使用 Redis position fallback  sl={sl}")
+                        return float(sl)
+            except Exception as e:
+                self.log.warning(f"[ExitManager] {sym}: Redis position 读取失败: {e}")
+
+        return None
 
     def _update_redis_sl(self, sym: str, new_sl: float) -> None:
-        """更新 Redis position:{sym}.stop_loss 并 PUBLISH position:update 通知前端。"""
+        """更新 Redis order:stop:{sym}.trigger_price 并 PUBLISH position:update 通知前端。"""
         if not self._redis:
             return
         try:
-            raw = self._redis.get(f"position:{sym}")
-            if not raw:
-                return
-            data = json.loads(raw)
-            data["stop_loss"] = new_sl
-            self._redis.set(f"position:{sym}", json.dumps(data))
-            # 通知前端更新止损线位置
-            self._redis.publish("position:update", json.dumps({
-                **data,
-                "stop_loss": new_sl,
-            }))
-            self.log.info(f"[ExitManager] {sym}: Redis stop_loss 已更新为 {new_sl:.2f}")
+            # 更新 order:stop:{sym} 中的 trigger_price（供重启后恢复）
+            stored = self._redis.get(f"order:stop:{sym}")
+            if stored:
+                data = json.loads(stored)
+                data["trigger_price"] = str(new_sl)
+                self._redis.set(f"order:stop:{sym}", json.dumps(data))
+
+            # 兼容更新旧的 position:{sym}.stop_loss（若存在）
+            pos_raw = self._redis.get(f"position:{sym}")
+            if pos_raw:
+                pos = json.loads(pos_raw)
+                pos["stop_loss"] = new_sl
+                self._redis.set(f"position:{sym}", json.dumps(pos))
+                # 通知前端更新止损线位置
+                self._redis.publish("position:update", json.dumps({
+                    **pos,
+                    "stop_loss": new_sl,
+                }))
+            self.log.info(f"[ExitManager] {sym}: Redis 止损价已更新为 {new_sl:.2f}")
         except Exception as e:
-            self.log.warning(f"[ExitManager] {sym}: 更新 Redis stop_loss 失败: {e}")
+            self.log.warning(f"[ExitManager] {sym}: 更新 Redis 止损价失败: {e}")
+
