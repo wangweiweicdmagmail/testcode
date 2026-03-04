@@ -984,10 +984,25 @@
         <!-- 标的切换下拉 -->
         <select id="symbol-select"
           style="background:#131722;color:#d1d4dc;border:1px solid #2a2e39;border-radius:4px;padding:3px 8px;font-size:13px;cursor:pointer;">
-          <option value="QQQ">QQQ</option>
-          <option value="AAPL">AAPL</option>
-          <option value="NVDA">NVDA</option>
-          <option value="TSLA">TSLA</option>
+          <optgroup label="ETF">
+            <option value="QQQ">QQQ</option>
+            <option value="SPY">SPY</option>
+          </optgroup>
+          <optgroup label="科技">
+            <option value="AAPL">AAPL</option>
+            <option value="MSFT">MSFT</option>
+            <option value="NVDA">NVDA</option>
+            <option value="AMD">AMD</option>
+            <option value="META">META</option>
+            <option value="GOOG">GOOG</option>
+            <option value="AMZN">AMZN</option>
+            <option value="TSLA">TSLA</option>
+          </optgroup>
+          <optgroup label="半导体/其他">
+            <option value="TSM">TSM</option>
+            <option value="AVGO">AVGO</option>
+            <option value="PLTR">PLTR</option>
+          </optgroup>
         </select>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <div class="toggle-wrap">

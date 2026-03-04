@@ -121,11 +121,23 @@ FA_METHOD = os.environ.get("IB_FA_METHOD", "NetLiq")   # EqualQuantity | Availab
 FA_ACCOUNT_ID = os.environ.get("IB_FA_ACCOUNT_ID", "")  # 如 "DU123456"，与 dt_test group 对应
 
 # K 线订阅合约（P6: 多标的）
-BAR_INSTRUMENT_ID = "AAPL.NASDAQ"   # 主合约（兼容旧配置）
+BAR_INSTRUMENT_ID = "QQQ.NASDAQ"   # 主合约（兼容旧配置）
 GATEWAY_INSTRUMENTS_EXTRA = [
-    "QQQ.NASDAQ",
+    # ETF
+    "SPY.ARCA",
+    # 科技
+    "AAPL.NASDAQ",
+    "MSFT.NASDAQ",
     "NVDA.NASDAQ",
+    "AMD.NASDAQ",
+    "META.NASDAQ",
+    "GOOG.NASDAQ",
+    "AMZN.NASDAQ",
     "TSLA.NASDAQ",
+    # 半导体/其他
+    "TSM.NYSE",
+    "AVGO.NASDAQ",
+    "PLTR.NYSE",
 ]
 
 # 下单网关支持的全部合约（预加载）
