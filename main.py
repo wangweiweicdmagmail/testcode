@@ -113,6 +113,11 @@ ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
 FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
 FA_METHOD = os.environ.get("IB_FA_METHOD", "NetLiq")   # EqualQuantity | AvailableEquity | NetLiq | PctChange
 
+# dt_test FA Group 余额查询：直接用 IBKR reqAccountSummary(group='dt_test')
+# IBKR 只会返回属于该 Group 的子账户，无需手动配置账号列表
+# 引擎启动 15s 后自动发起查询，每 3 分钟刷新一次写入 Redis
+FA_GROUP_ACCOUNTS: tuple = ()  # 留空由 IBKR Group 自动决定，无需手动维护
+
 # FA 子账户真实 IB ID（用于账户余额读取）
 # 说明：dt_test 是 FA Group 名称，IBKR API 以真实子账户 ID（如 DU123456）推送 AccountState 事件
 # 引擎通过 reqAccountSummary("All") 接收所有子账户数据，并以 accountSummary:{ID} 存入 cache
@@ -221,6 +226,7 @@ gateway_actor = OrderGatewayActor(
         http_port=8888,
         fa_group=FA_GROUP,
         fa_method=FA_METHOD,
+        fa_group_accounts=FA_GROUP_ACCOUNTS,  # dt_test 子账户列表（留空则自动汇总全部）
     )
 )
 

@@ -103,6 +103,7 @@ cd frontend && node server.js
 - **ST 跟踪止损** ✅：开仓后开启“ST跟踪止盈”开关 → `ExitManager` 每分钟 K 线收盘后自动计算新止损价（檘轮机制：多头只週上移，空头只週下移）并调用 `modify_order()` 修改 IBKR 止损单
 - **止损单 ID 持久化** ✅：止损单 ACCEPTED 后将 `client_order_id` 写入 Redis `order:stop:{sym}`；引擎重启后 IBKR 重新推送 ACCEPTED 事件，cache 回充，`modify_order()` 即可正常运作
 - **全标的指标排行** ✅：`indicators.html` 从 `/api/indicators` 拉取全部 13 个标的（NVDA/AAPL/GOOG/AVGO/SPY/TSLA/PLTR/AMZN/AMD/META/MSFT/QQQ/TSM）的 M1 ST 积分 / M5 ST 积分 / EMA 偏离 / 日内新高，四列并排对比排行；`server.js` 的 `ALL_SYMBOLS` 和 `SYMBOL_MAP` 已同步扩展到 13 个标的
+- **EMA21 偏差修复** ✅：修复 `strategy.py` 中两处 Bug：① `_M5Bucket.flush_current()` 输出未完成 M5 bucket 后不清空 `_bars`，导致后续实时 `on_bar()` 再次触发同一 bucket 输出并将临时 close 二次喂入 EMA 状态机；② `_flush_history_for()` 对未完成 M5 bar 不再调用 `update()`，改为复用最后一根完整 M5 bar 的指标值展示，消除 EMA21 持续偏高的累计误差
 
 ## Redis 数据结构
 

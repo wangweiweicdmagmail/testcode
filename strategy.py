@@ -192,9 +192,15 @@ class _M5Bucket:
         }
 
     def flush_current(self) -> Optional[dict]:
-        """强制输出当前未完成的 bucket（供预热结束时调用）"""
+        """强制输出当前未完成的 bucket（供预热结束时调用）
+
+        注意：输出后清空 _bars，避免后续 push() 遇到 bucket 边界时
+        再次调用 _flush() 触发重复计算，导致 EMA/ST 状态机被多喂一次数据。
+        """
         if self._bars:
-            return self._flush()
+            result = self._flush()
+            self._bars = []   # ← 关键：清空缓存，防止后续 push() 重复处理
+            return result
         return None
 
 
@@ -688,11 +694,19 @@ class BarLoggerStrategy(Strategy):
 
                 # ── 步骤2：补刷最后一个未完成的 M5 bucket ─────────────────
                 m5_bars = self._hist_m5.get(sym, [])
+                # 记录最后一根完整 M5 bar 的指标值（未完成 bar 展示时直接复用，不更新状态机）
+                prev_complete_m5 = m5_bars[-1] if m5_bars else None
                 last_m5 = self._m5_bucket[sym].flush_current()
                 if last_m5:
-                    o5, h5, lo5, c5 = last_m5["open"], last_m5["high"], last_m5["low"], last_m5["close"]
-                    st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
-                    ema21_5 = self._ema_m5[sym].update(c5)
+                    c5 = last_m5["close"]
+                    # 未完成 bar 仅用于展示：复用最后一根完整 M5 的指标值，不调用 update()
+                    # 原因：未完成 bar 的 close 此时只是临时值，后续实时 on_bar() 还会继续更新；
+                    # 若此处调用 update() 会将这个临时 close 喂入 EMA/ST 状态机，导致累计偏差
+                    ema21_5 = prev_complete_m5.get("ema21")    if prev_complete_m5 else None
+                    st_val5 = prev_complete_m5.get("st_value") if prev_complete_m5 else 0.0
+                    st_dir5 = prev_complete_m5.get("st_dir")   if prev_complete_m5 else -1
+                    st_up5  = prev_complete_m5.get("st_upper") if prev_complete_m5 else 0.0
+                    st_lo5  = prev_complete_m5.get("st_lower") if prev_complete_m5 else 0.0
                     m5_bars.append({
                         **last_m5,
                         "ema21":    ema21_5,
@@ -701,7 +715,7 @@ class BarLoggerStrategy(Strategy):
                         "st_upper": st_up5,
                         "st_lower": st_lo5,
                     })
-                    self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket  C={c5:.2f}")
+                    self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket（仅展示）  C={c5:.2f}  EMA21={ema21_5}")
 
                 # ── 步骤3：整体覆盖写入 M5 历史 K 线（仅 RTH）────────────
                 rth_m5 = [b for b in m5_bars if self._is_rth(b["time"])]

@@ -2099,6 +2099,14 @@
             loadIndicators();
           }
 
+          // ── M5 K 线收盘（kline:5m:）—— 实时更新 EMA21 M5 折线 ──
+          if (channel.startsWith("kline:5m:")) {
+            if (payload.ema21 != null && ema21M5Series) {
+              ema21M5Series.update({ time: payload.time, value: payload.ema21 });
+            }
+            return;
+          }
+
           // ── 5分钟新高事件（server.js 计算后广播）──
           if (channel === 'nh:update') {
             loadIndicators();  // 刷新右侧面板

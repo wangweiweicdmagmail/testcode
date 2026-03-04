@@ -112,11 +112,17 @@ class OrderGatewayConfig(StrategyConfig, frozen=True):
         FA Group 名称（留空则不使用 FA 分配，直接在当前账号下单）
     fa_method : str
         FA 分配方法：EqualQuantity | AvailableEquity | NetLiq | PctChange
+    fa_group_accounts : tuple[str, ...]
+        dt_test FA Group 包含的真实子账户 ID（如 DU123456），
+        用于精确读取该 Group 的专属余额，而非 FA 主账号总资产。
+        ⚠️ 请替换为真实 DU 账号，账号可在 TWS → Allocation → FA Groups 查看。
+        留空则汇总 IBKR 返回的该 Group 所有子账户数据。
     """
     http_host: str = "localhost"
     http_port: int = 8888
     fa_group: str = ""         # 留空则不使用 FA
     fa_method: str = "EqualQuantity"
+    fa_group_accounts: tuple[str, ...] = ()  # dt_test Group 子账户列表，如 ("DU111111", "DU222222")
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +145,8 @@ class OrderGatewayActor(Strategy):
         # 待提交的止损单：{entry_client_order_id: (sl_order, sl_tasks_params)}
         # 入场单成交后在 on_order_filled 里提交
         self._pending_sl: dict = {}
+        # FA Group 专属账户查询线程控制
+        self._fa_accounts_running: bool = False
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -197,12 +205,13 @@ class OrderGatewayActor(Strategy):
         _hb_t = threading.Thread(target=self._heartbeat_loop, daemon=True)
         _hb_t.start()
 
-        # 主动拉取账户数据（延迟 15s 等待 IB 连接稳定，不依赖 IB 3分钟推送）
-        def _delayed_account_sync():
-            time.sleep(15)
-            self.log.info("[Account] 主动触发账户数据同步...")
-            self.on_account_state(None)
-        threading.Thread(target=_delayed_account_sync, daemon=True).start()
+        # 启动 FA Group 专属账户查询线程（延迟 15s 等待 IB 连接稳定）
+        self._fa_accounts_running = True
+        threading.Thread(
+            target=self._fa_group_account_loop,
+            daemon=True,
+            name="FAGroupAccountQuery",
+        ).start()
 
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
@@ -218,8 +227,9 @@ class OrderGatewayActor(Strategy):
                 self.log.warning(f"[Gateway] 止损修改 task 已取消: {t}")
         self._sl_tasks.clear()
 
-        # 停止心跳
+        # 停止心跳 & FA Group 账户查询
         self._heartbeat_running = False
+        self._fa_accounts_running = False
 
         if self._redis:
             self._redis.close()
@@ -259,53 +269,184 @@ class OrderGatewayActor(Strategy):
 
     def on_account_state(self, event) -> None:
         """
-        引擎标准回调：IB 推送 accountSummary 数据后自动触发（约每 3 分钟一次）。
-        FA Group 场景下遇历 cache 中所有账户，取 USD balance 最大的那个（即 FA 主账户汇总）。
+        引擎标准回调：IB 推送 AccountState 后自动触发。
+        
+        注意：IBKR FA 账户下，cache 中的账户对象对应 FA 主账号（F10251881），
+        其 balance 是所有 FA Group 的汇总，不是 dt_test 专属余额。
+        因此这里仅记录日志，实际余额由 _fa_group_account_loop 通过独立连接获取。
         """
         try:
             from nautilus_trader.model.currencies import USD
             accounts = self.cache.accounts()
             if not accounts:
-                self.log.debug("[Account] on_account_state: cache 暂无账户数据，跳过")
                 return
-
-            # 打印所有账户，方便调试
-            self.log.info(f"[Account] cache 共有 {len(accounts)} 个账户: {[str(a.id) for a in accounts]}")
-
-            # 取 USD balance 最大的账户（FA 主账户包含各子账户之和）
-            best_account = None
-            best_total = -1.0
-            for acct in accounts:
-                try:
-                    t = acct.balance_total(USD)
-                    total_val = float(t.as_double()) if t else 0.0
-                    if total_val > best_total:
-                        best_total = total_val
-                        best_account = acct
-                except Exception:
-                    continue
-
-            if best_account is None:
-                self.log.warning("[Account] 所有账户 USD 余额均为 0")
-                return
-
-            balances = []
-            for currency, bal in best_account.balances().items():
-                total  = float(bal.total.as_double())
-                free   = float(bal.free.as_double())
-                locked = float(bal.locked.as_double())
-                if total > 0 or free > 0:
-                    balances.append({
-                        "currency": str(currency),
-                        "total":    round(total,  2),
-                        "free":     round(free,   2),
-                        "locked":   round(locked, 2),
-                    })
-            if balances:
-                fa_group = self.config.fa_group or str(best_account.id)
-                self._write_account_to_redis(fa_group, balances)
+            self.log.debug(
+                f"[Account] on_account_state 触发（主账号汇总，仅供参考）: "
+                f"{[str(a.id) for a in accounts]}"
+            )
         except Exception as e:
-            self.log.warning(f"[Account] on_account_state 处理异常: {e}")
+            self.log.debug(f"[Account] on_account_state 处理异常: {e}")
+
+    # ------------------------------------------------------------------
+    # FA Group 专属账户查询（独立 ibapi 连接，绕过主账号汇总问题）
+    # ------------------------------------------------------------------
+
+    def _fa_group_account_loop(self) -> None:
+        """
+        后台线程：使用独立的 ibapi 轻量连接，每 3 分钟查询一次
+        dt_test FA Group 的专属余额，避免与主账号（F10251881）总资产混淆。
+
+        原理：
+          NautilusTrader 主引擎配置 account_id='F10251881'，
+          cache.accounts() 只返回主账号（balance = 所有 FA Group 之和）。
+          通过 reqAccountSummary(group='dt_test') 可以直接拿到该 Group 专属余额。
+        """
+        import os as _os
+
+        # 等待主引擎连接稳定
+        time.sleep(15)
+        self.log.info("[Account-FA] FA Group 账户查询线程启动")
+
+        ibg_host = _os.environ.get("IBG_HOST", "127.0.0.1")
+        ibg_port = int(_os.environ.get("IBG_PORT", "7496"))
+        # 使用高编号 client_id 避免与主引擎冲突（DataClient=2, ExecClient=3, FAQuery=102）
+        aux_client_id = int(_os.environ.get("IBG_CLIENT_ID", "2")) + 100
+        fa_group = self.config.fa_group or "dt_test"
+
+        # 查询间隔：3 分钟（与 IBKR 推送频率对齐，分段 sleep 支持快速停止）
+        POLL_INTERVAL = 180
+        SLEEP_UNIT   = 0.5
+
+        while self._fa_accounts_running:
+            try:
+                self._query_fa_group_once(ibg_host, ibg_port, aux_client_id, fa_group)
+            except Exception as e:
+                self.log.warning(f"[Account-FA] 查询异常，将在下次重试: {e}")
+
+            # 分段 sleep，支持快速响应停止信号
+            for _ in range(int(POLL_INTERVAL / SLEEP_UNIT)):
+                if not self._fa_accounts_running:
+                    return
+                time.sleep(SLEEP_UNIT)
+
+        self.log.info("[Account-FA] FA Group 账户查询线程已停止")
+
+    def _query_fa_group_once(self, host: str, port: int, client_id: int, fa_group: str) -> None:
+        """
+        建立临时 ibapi 连接，发起 reqAccountSummary(group=fa_group)，
+        收集子账户余额后写入 Redis，然后断开连接。
+        """
+        try:
+            from ibapi.client import EClient
+            from ibapi.wrapper import EWrapper as _EWrapper
+        except ImportError:
+            self.log.warning("[Account-FA] ibapi 包未安装，无法查询 FA Group 余额")
+            return
+
+        # 内部 EWrapper：仅收集 accountSummary 回调
+        class _SummaryWrapper(_EWrapper):
+            def __init__(self):
+                super().__init__()
+                # {account_id: {"TotalCashValue": float, "AvailableFunds": float}}
+                self.sub_accounts: dict = {}
+                self._done = threading.Event()
+                self._conn_error: str = ""
+
+            def accountSummary(self, reqId, account, tag, value, currency):
+                """每条子账户摘要数据回调"""
+                if currency != "USD":
+                    return
+                if tag not in ("NetLiquidation", "AvailableFunds"):
+                    return
+                if account not in self.sub_accounts:
+                    self.sub_accounts[account] = {}
+                try:
+                    self.sub_accounts[account][tag] = float(value)
+                except ValueError:
+                    pass
+
+            def accountSummaryEnd(self, reqId):
+                """所有数据推送完毕"""
+                self._done.set()
+
+            def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
+                """连接或请求出错"""
+                # errorCode=502/504=无法连接，504=未连接，忽略 -1（连接状态通知）
+                if reqId == -1:
+                    return  # 连接级别的通知，非错误
+                self._conn_error = f"code={errorCode} {errorString}"
+                self._done.set()
+
+        wrapper = _SummaryWrapper()
+        client = EClient(wrapper)
+        try:
+            client.connect(host, port, client_id)
+        except Exception as e:
+            self.log.warning(f"[Account-FA] ibapi 连接失败 ({host}:{port} clientId={client_id}): {e}")
+            return
+
+        # 启动消息循环线程
+        msg_thread = threading.Thread(target=client.run, daemon=True)
+        msg_thread.start()
+
+        # 等待连接就绪（最多 5s）
+        time.sleep(2)
+        if not client.isConnected():
+            self.log.warning(f"[Account-FA] ibapi 连接未就绪，跳过本次查询")
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            return
+
+        # 发起 FA Group accountSummary 请求
+        REQ_ID = 9001  # 专用请求 ID，不与主引擎 reqId 冲突
+        client.reqAccountSummary(REQ_ID, fa_group, "NetLiquidation,AvailableFunds")
+
+        # 等待数据返回（最多 15s）
+        wrapper._done.wait(timeout=15)
+
+        if wrapper._conn_error:
+            self.log.warning(f"[Account-FA] reqAccountSummary 出错: {wrapper._conn_error}")
+        elif not wrapper.sub_accounts:
+            self.log.warning(f"[Account-FA] FA Group '{fa_group}' 无子账户数据返回（检查 Group 名称是否正确）")
+        else:
+            # IBKR reqAccountSummary(group=fa_group) 本身只返回该 Group 的账户
+            # 无需额外过滤，直接汇总所有返回账户的 USD 余额
+            total_usd = 0.0
+            free_usd  = 0.0
+            sub_ids   = []
+            for acct_id, tags in wrapper.sub_accounts.items():
+                tv = tags.get("NetLiquidation", 0.0)  # 净资产（持仓市值 + 现金）
+                fv = tags.get("AvailableFunds",  0.0)  # 剩余流动性
+                total_usd += tv
+                free_usd  += fv
+                sub_ids.append(acct_id)
+                self.log.info(
+                    f"[Account-FA]   └─ {acct_id}  "
+                    f"TotalCash={tv:,.2f}  AvailFunds={fv:,.2f}  USD"
+                )
+
+            locked_usd = total_usd - free_usd
+            self.log.info(
+                f"[Account-FA] FA Group '{fa_group}' 余额汇总: "
+                f"total={total_usd:,.2f}  free={free_usd:,.2f}  "
+                f"locked={locked_usd:,.2f}  USD | 子账户={sub_ids}"
+            )
+
+            balances = [{
+                "currency": "USD",
+                "total":  round(total_usd,  2),
+                "free":   round(free_usd,   2),
+                "locked": round(locked_usd, 2),
+            }]
+            self._write_account_to_redis(fa_group, balances)
+
+        try:
+            client.cancelAccountSummary(REQ_ID)
+            client.disconnect()
+        except Exception:
+            pass
 
 
     def _write_account_to_redis(self, account_id: str, balances: list) -> None:
