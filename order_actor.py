@@ -260,17 +260,37 @@ class OrderGatewayActor(Strategy):
     def on_account_state(self, event) -> None:
         """
         引擎标准回调：IB 推送 accountSummary 数据后自动触发（约每 3 分钟一次）。
-        FA Group 场景下 IB 服务端已在服务器端做聚合，主账号收到的是各子账户余额总和。
-        直接从引擎 Cache 读取，写入 Redis 即可，无需自己发 reqAccountSummary。
+        FA Group 场景下遇历 cache 中所有账户，取 USD balance 最大的那个（即 FA 主账户汇总）。
         """
         try:
-            from nautilus_trader.model.identifiers import Venue
-            account = self.cache.account_for_venue(Venue("IB"))
-            if account is None:
+            from nautilus_trader.model.currencies import USD
+            accounts = self.cache.accounts()
+            if not accounts:
                 self.log.debug("[Account] on_account_state: cache 暂无账户数据，跳过")
                 return
+
+            # 打印所有账户，方便调试
+            self.log.info(f"[Account] cache 共有 {len(accounts)} 个账户: {[str(a.id) for a in accounts]}")
+
+            # 取 USD balance 最大的账户（FA 主账户包含各子账户之和）
+            best_account = None
+            best_total = -1.0
+            for acct in accounts:
+                try:
+                    t = acct.balance_total(USD)
+                    total_val = float(t.as_double()) if t else 0.0
+                    if total_val > best_total:
+                        best_total = total_val
+                        best_account = acct
+                except Exception:
+                    continue
+
+            if best_account is None:
+                self.log.warning("[Account] 所有账户 USD 余额均为 0")
+                return
+
             balances = []
-            for currency, bal in account.balances().items():
+            for currency, bal in best_account.balances().items():
                 total  = float(bal.total.as_double())
                 free   = float(bal.free.as_double())
                 locked = float(bal.locked.as_double())
@@ -282,7 +302,7 @@ class OrderGatewayActor(Strategy):
                         "locked":   round(locked, 2),
                     })
             if balances:
-                fa_group = self.config.fa_group or str(account.id)
+                fa_group = self.config.fa_group or str(best_account.id)
                 self._write_account_to_redis(fa_group, balances)
         except Exception as e:
             self.log.warning(f"[Account] on_account_state 处理异常: {e}")
@@ -333,14 +353,26 @@ class OrderGatewayActor(Strategy):
     async def _async_get_account_info(self) -> dict:
         """在引擎事件循环中安全访问 cache，获取账户余额"""
         try:
-            from nautilus_trader.model.identifiers import Venue
             from nautilus_trader.model.currencies import USD
-            venue = Venue("INTERACTIVE_BROKERS")
-            account = self.cache.account_for_venue(venue)
-            if account is None:
+            accounts = self.cache.accounts()
+            if not accounts:
                 return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
-            total = account.balance_total(USD)
-            free  = account.balance_free(USD)
+            # 取 USD balance 最大的账户作为 FA 主账户
+            best_account = None
+            best_total = -1.0
+            for acct in accounts:
+                try:
+                    t = acct.balance_total(USD)
+                    v = float(t.as_double()) if t else 0.0
+                    if v > best_total:
+                        best_total = v
+                        best_account = acct
+                except Exception:
+                    continue
+            if best_account is None:
+                return {"total_equity": 0.0, "available_cash": 0.0, "currency": "USD"}
+            total = best_account.balance_total(USD)
+            free  = best_account.balance_free(USD)
             return {
                 "total_equity":   float(total.as_double()) if total else 0.0,
                 "available_cash": float(free.as_double())  if free  else 0.0,
