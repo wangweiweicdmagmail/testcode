@@ -72,7 +72,9 @@ class _STState:
         self._prev_close:   float = 0.0
         self._prev_upper_b: float = 0.0
         self._prev_lower_b: float = 0.0
-        self._prev_dir:     int   = 1    # 1=多头, -1=空头
+        # TradingView 初始 direction=1 → ST=upperBand（空头），
+        # 我们的约定 -1=空头，与 TV 保持一致
+        self._prev_dir:     int   = -1
         self._initialized:  bool  = False
 
     def update(self, o: float, h: float, lo: float, c: float
