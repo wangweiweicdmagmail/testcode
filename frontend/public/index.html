@@ -2480,30 +2480,40 @@
       location.reload();
     });
 
-    // ST 跟踪止盈 toggle
-    let stTrailEnabled = false;
-    document.getElementById('st-trail-toggle').addEventListener('change', async e => {
-      stTrailEnabled = e.target.checked;
+    // 跟踪止盈互斥 toggle（ST 和 EMA 只能选一）
+    const stToggle = document.getElementById('st-trail-toggle');
+    const emaToggle = document.getElementById('ema-trail-toggle');
+    const stLbl = document.getElementById('st-trail-label');
+    const emaLbl = document.getElementById('ema-trail-label');
+
+    async function setTrail(type, active) {
       await fetch(`/api/settings/${SYMBOL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ st_trail: stTrailEnabled }),
+        body: JSON.stringify({ [type]: active }),
       });
-      const lbl = document.getElementById('st-trail-label');
-      lbl.style.color = stTrailEnabled ? '#26a69a' : '#787b86';
+    }
+
+    stToggle.addEventListener('change', async e => {
+      if (e.target.checked) {
+        // 关闭 EMA trail
+        emaToggle.checked = false;
+        emaLbl.style.color = '#787b86';
+        await setTrail('ema_trail', false);
+      }
+      stLbl.style.color = e.target.checked ? '#26a69a' : '#787b86';
+      await setTrail('st_trail', e.target.checked);
     });
 
-    // EMA21 M5 跟踪止盈 toggle
-    let emaTrailEnabled = false;
-    document.getElementById('ema-trail-toggle').addEventListener('change', async e => {
-      emaTrailEnabled = e.target.checked;
-      await fetch(`/api/settings/${SYMBOL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ema_trail: emaTrailEnabled }),
-      });
-      const lbl = document.getElementById('ema-trail-label');
-      lbl.style.color = emaTrailEnabled ? '#60a5fa' : '#787b86';
+    emaToggle.addEventListener('change', async e => {
+      if (e.target.checked) {
+        // 关闭 ST trail
+        stToggle.checked = false;
+        stLbl.style.color = '#787b86';
+        await setTrail('st_trail', false);
+      }
+      emaLbl.style.color = e.target.checked ? '#60a5fa' : '#787b86';
+      await setTrail('ema_trail', e.target.checked);
     });
 
     // ─── 标的切换 ────────────────────────────────────────────
