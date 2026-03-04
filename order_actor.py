@@ -823,6 +823,17 @@ class OrderGatewayActor(Strategy):
         )
         self._pub_order("FILLED", event)
 
+        # 止损单成交（被触发平仓）→ 清除 Redis 持久化记录
+        # 修复：原代码遗漏此处，导致重启后可能误用已成交的旧止损单 ID
+        try:
+            order = self.cache.order(event.client_order_id)
+            if order and getattr(order.order_type, "name", "") == "STOP_MARKET":
+                sym = order.instrument_id.symbol.value
+                self._clear_stop_order(sym, str(event.client_order_id))
+                self.log.info(f"[SL] 止损单已成交触发，清除 Redis 记录: {sym}")
+        except Exception as e:
+            self.log.warning(f"[SL] on_order_filled 清除止损记录失败: {e}")
+
         # BRACKET：入场单成交后自动提交止损单
         coid = event.client_order_id.value
         if coid in self._pending_sl:
@@ -852,6 +863,7 @@ class OrderGatewayActor(Strategy):
                 self._sl_tasks.append(task)
         else:
             self.log.info(f"[SL] 成交单 {coid} 不在 _pending_sl 中（非 BRACKET 入场单或已处理）")
+
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
