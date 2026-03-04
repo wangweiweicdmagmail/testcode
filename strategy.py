@@ -64,7 +64,7 @@ class _STState:
     Wilder's RMA 计算方式一致。Band 收紧逻辑与 data_feeder.py 完全对齐。
     """
 
-    def __init__(self, period: int = 10, mult: float = 2.0):
+    def __init__(self, period: int = 10, mult: float = 3.5):
         self.period = period
         self.mult   = mult
         # 使用鹦鹉螺内置 ATR，Wilder 平滑（指数平滑，与 data_feeder.py 一致）
