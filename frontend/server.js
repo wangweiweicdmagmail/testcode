@@ -518,19 +518,20 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
     try {
         const parsed = JSON.parse(message);
 
-        // kline:5m: 收盘事件 → 更新日内连续新高状态并广播（仅正市期间）
+        // kline:5m: 收盘事件 → 更新日内高低突破信号并广播（仅正市期间）
         if (channel.startsWith('kline:5m:')) {
             const sym = channel.split(':')[2];
             if (sym && ALL_SYMBOLS.includes(sym) && isRTH()) {
-                const count = updateNHState(sym, parsed.close);
-                // 广播 nh:update 事件给前端（用于语音播报）
-                const nhPayload = JSON.stringify({
-                    channel: 'nh:update',
-                    data: { symbol: sym, count, close: parsed.close },
+                const score = updateHLState(sym, parsed.close);
+                // 广播 hl:update 事件给前端（用于语音播报）
+                const hlPayload = JSON.stringify({
+                    channel: 'hl:update',
+                    data: { symbol: sym, score, close: parsed.close },
                 });
-                wss.clients.forEach(c => c.readyState === 1 && c.send(nhPayload));
+                wss.clients.forEach(c => c.readyState === 1 && c.send(hlPayload));
             }
         }
+
 
         // 盘前/盘后：拦截 kline 和 bars 实时推送，只透传其他频道（order/position/account/engine 等）
         const isBarChannel = channel.startsWith('kline:') || channel.startsWith('bars:');
