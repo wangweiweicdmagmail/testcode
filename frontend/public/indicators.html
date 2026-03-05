@@ -58,13 +58,13 @@
             color: #2962ff;
         }
 
-        /* ── 四表并排布局 ── */
+        /* ── 五表并排布局 ── */
         #main {
             display: grid;
-            grid-template-columns: 1fr 1fr 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
             gap: 16px;
             padding: 24px 20px;
-            max-width: 1600px;
+            max-width: 1900px;
             margin: 0 auto;
         }
 
@@ -260,13 +260,39 @@
     </div>
 
     <div id="main">
+        <!-- 动量窗口（第一列） -->
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#f43f5e"></span>
+                    动量窗口
+                    <span id="update-time" style="margin-left:auto;font-size:10px;color:#4b5563">—</span>
+                </div>
+                <div class="card-sub">(C₀−C₋²) ÷ ATR₁₄ · 15分钟滑动窗口</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">实值</th>
+                        <th>强度</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-mom">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
         <!-- M1 ST 积分 -->
         <div class="score-card">
             <div class="card-header">
                 <div class="card-title">
                     <span class="dot" style="background:#26a69a"></span>
                     M1 SuperTrend 积分
-                    <span id="update-time" style="margin-left:auto;font-size:10px;color:#4b5563">—</span>
                 </div>
                 <div class="card-sub">1分钟 ST 做多 +1/棒 · 做空 -1/棒</div>
             </div>
@@ -448,6 +474,34 @@
       `;
         }
 
+        function buildMomRow(rank, sym, mom, maxAbs) {
+            const val = mom != null ? mom : null;
+            const isBull = (val ?? 0) >= 0;
+            const color = val == null ? '#4b5563'
+                : Math.abs(val) < 0.5 ? '#787b86'
+                    : isBull ? '#f43f5e' : '#60a5fa';
+            const pct = Math.min(100, maxAbs > 0 ? (Math.abs(val ?? 0) / maxAbs) * 100 : 0).toFixed(1);
+            const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
+            const strength = val == null ? '<span style="color:#4b5563">—</span>'
+                : Math.abs(val) < 0.3 ? '<span style="color:#4b5563">⚪排队中</span>'
+                    : Math.abs(val) < 0.8 ? (isBull ? '<span class="badge badge-bull">⬆硬拉</span>' : '<span class="badge badge-bear">⬇下涌</span>')
+                        : (isBull ? '<span class="badge badge-bull">🚀强势</span>' : '<span class="badge badge-bear">🔴崩涧</span>');
+            const cls = val != null && val >= 0.3 ? 'bull' : val != null && val <= -0.3 ? 'bear' : '';
+            return `
+        <tr class="${cls}">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${color}">${display}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+            </div>
+          </td>
+          <td>${strength}</td>
+        </tr>
+      `;
+        }
+
         async function loadData() {
             try {
                 const res = await fetch('/api/indicators');
@@ -482,6 +536,14 @@
                 document.getElementById('tbody-nh').innerHTML = byNH.map((r, i) =>
                     buildNHRow(i + 1, r.symbol, r.nh_score ?? 0)
                 ).join('');
+
+                // mom_atr 全车动势排行
+                const byMom = [...data].sort((a, b) => (b.mom_atr ?? -Infinity) - (a.mom_atr ?? -Infinity));
+                const maxMom = Math.max(0.01, ...byMom.map(r => Math.abs(r.mom_atr ?? 0)));
+                document.getElementById('tbody-mom').innerHTML = byMom.map((r, i) =>
+                    buildMomRow(i + 1, r.symbol, r.mom_atr, maxMom)
+                ).join('');
+
 
                 const now = new Date();
                 document.getElementById('update-time').textContent =

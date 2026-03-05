@@ -110,16 +110,28 @@ cd frontend && node server.js
 
 ## 已实现功能汇总
 
-- **盘前盘后数据过滤** ✅：引擎层（`strategy.py`）和前端 API（`server.js`）均过滤非正市 RTH 数据（仅保留 09:30–16:00 ET）；盘后 bar/tick 不进指标计算、不写 Redis、不推送前端
-- **M1/M5 ST 参数分离** ✅：M1 ST 用（period=10, mult=3.5），M5 ST 用（period=10, mult=3.0）；`BarLoggerStrategyConfig` 新增 `st_mult_m5` 字段；引擎日志确认显示 `M1-ST(10,3.5)  M5-ST(10,3.0)`
-- **trail_mode 重构（三套互斥止盈）** ✅：`settings:{sym}.trail_mode` 单字段控制（0=关, 1=M1-ST, 2=M5-ST, 3=EMA-M5）；`ExitManager` 每次 bar 收盘直接从 Redis 读开关，无内存状态；前端三个 toggle 互斥
-- **M5 bar 收盘事件** ✅：`events.py` 新增 `BarCollectedM5Event`；`strategy.py` 在 `_process_m5_bar` 发布 `bar.collected.m5`；`ExitManager` 订阅后处理 M5-ST 跟踪（每5分钟一次）
-- **mom_atr 归一化动量指标** ✅：新增 `_MomentumATRState` 状态机；公式 = `(close_now - close_2bars_ago) / ATR_14`（15分钟窗口 ÷ Wilder ATR-14）；写入 `bars:5m:{sym}` 的 `mom_atr` 字段，ATR 预热前为 `None`
-- **平仓按钮** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
-- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；止损成交/平仓后价格线自动清除
-- **止损单 ID 持久化** ✅：止损单 ACCEPTED 后将 `client_order_id` 写入 Redis `order:stop:{sym}`；引擎重启后 IBKR 重新推送 ACCEPTED 事件，cache 回充，`modify_order()` 即可正常运作
-- **全标的指标排行** ✅：`indicators.html` 从 `/api/indicators` 拉取全部 13 个标的的 M1 ST 积分 / M5 ST 积分 / EMA 偏离 / 日内新高，四列并排排行
-- **EMA21 偏差修复** ✅：修复 `_M5Bucket.flush_current()` 不清空 `_bars` 导致 EMA 二次喂入的 Bug，以及 `_flush_history_for()` 对未完成 M5 bar 不再调用 `update()`
+- **盘前盘后数据过滤** ✅：引擎层（`strategy.py`）和前端 API（`server.js`）均过滤非正市 RTH 数据（仅保留 09:30–16:00 ET）
+- **M1/M5 ST 参数分离** ✅：M1 ST（period=10, mult=3.5）/ M5 ST（period=10, mult=3.0）
+- **trail_mode 重构（三套互斥止盈）** ✅：`settings:{sym}.trail_mode` 单字段控制（0=关, 1=M1-ST, 2=M5-ST, 3=EMA-M5）
+- **M5 bar 收盘事件** ✅：`events.py` 新增 `BarCollectedM5Event`；`ExitManager` 订阅后处理 M5-ST 跟踪
+- **动量窗口指标（mom_atr）** ✅：`_MomentumATRState` 状态机；公式 = `(C₀ - C₋₂) / ATR_14`（15分钟滑动窗口）；写入 `bars:5m:{sym}.mom_atr`；`/api/indicators` 暴露；`indicators.html` 第一列 + `index.html` 右侧面板置顶，含 4 档强度标签
+- **平仓按钮** ✅：`DELETE /api/position/:symbol` → 反向市价单 + 取消止损单
+- **持仓止损价修改** ✅：拖动止损线 → `POST /api/modify-stop/:symbol` → `modify_order()`
+- **止损单 ID 持久化** ✅：`order:stop:{sym}` Redis 持久化，引擎重启后恢复
+- **全标的指标排行** ✅：`indicators.html` 五列并排（动量窗口 / M1-ST / M5-ST / EMA偏离 / 日内新高）
+- **EMA21 偏差修复** ✅：修复 `_M5Bucket.flush_current()` 重复喂入 Bug
+- **代码审核 Bug 修复（2026-03-05）** ✅：
+  - `on_stop()` 代码错位 → 每根 M1 bar 随机关闭 HTTP 网关（最高优先级）
+  - `_sync_position_to_redis` 覆写 `stop_loss=None` → 追踪止损价随机丢失
+  - `_process_m5_bar` fallback 硬编码 `.NASDAQ` → TSM/SPY 等合约跟踪止损失效
+  - `on_order_updated` 枚举用 `str().replace()` → Cython 返回整数序号，判断失效
+  - `TERMINAL_STATUS` 统一到 `events.py`，消除 7 处重复定义
+  - `__init__` 补充 `_heartbeat_running = False` 初始化，消除极端情况 `AttributeError`
+  - 删除 `strategy.py` 重复的 `from events import BarCollectedEvent`
+- **UI 稳定性修复（2026-03-05）** ✅：
+  - 引擎心跳文字加 `min-width:4.5em`，防止在线/离线切换时工具栏抖动
+  - 切换标的时不再重复播报"引擎已上线"（`sessionStorage` 跨页面保持在线状态）
+
 
 ## Redis 数据结构
 

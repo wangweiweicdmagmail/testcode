@@ -1035,10 +1035,10 @@
           display:flex;align-items:center;gap:5px;
           font-size:12px;color:#787b86;">
           <span id="hb-dot" style="
-            width:8px;height:8px;border-radius:50%;
+            width:8px;height:8px;border-radius:50%;flex-shrink:0;
             background:#787b86;display:inline-block;
             transition:background .5s;"></span>
-          <span id="hb-text">引擎 —</span>
+          <span id="hb-text" style="min-width:4.5em;display:inline-block;">引擎 —</span>
         </div>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <!-- 语音提醒开关 -->
@@ -1148,6 +1148,30 @@
     </div>
 
     <div id="right-panel">
+
+      <!-- 动量窗口（置顶）-->
+      <div class="ind-card">
+        <div class="ind-card-head">
+          <span class="dot" style="background:#f43f5e"></span>
+          动量窗口
+          <span class="ind-card-sub">(C₀−C₋²)÷ATR₁₄ 15m</span>
+          <span class="ind-chevron">▾</span>
+        </div>
+        <table class="ind-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="r">动量</th>
+              <th>强度</th>
+            </tr>
+          </thead>
+          <tbody id="ind-mom">
+            <tr>
+              <td colspan="3" class="ind-empty">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       <!-- M1 ST 积分 -->
       <div class="ind-card">
@@ -1279,7 +1303,8 @@
 
     // ─── 引擎心跳状态 ──────────────────────────────────────────
     let lastHbTime = 0;       // 上次收到 engine:heartbeat 的时间戳（ms）
-    let engineOnline = false; // 引擎当前是否在线
+    // sessionStorage 跨标的切换（页面刷新）保持在线状态，避免重复播报"引擎已上线"
+    let engineOnline = sessionStorage.getItem('engineOnline') === '1';
 
     function setEntryLine(price, side, qty) {
       // 先清旧线
@@ -1848,6 +1873,7 @@
             const wasOnline = engineOnline;
             lastHbTime = now;
             engineOnline = true;
+            sessionStorage.setItem('engineOnline', '1');
             const dot = document.getElementById('hb-dot');
             const txt = document.getElementById('hb-text');
             if (dot) dot.style.background = '#26a69a';
@@ -2612,6 +2638,25 @@
         <td><span style="color:${color};font-size:13px;font-weight:600">${label}</span></td>
       </tr>`;
     }
+    function indMomRow(sym, mom) {
+      const val = mom != null ? mom : null;
+      const isBull = (val ?? 0) >= 0;
+      const color = val == null ? '#4b5563'
+        : Math.abs(val) < 0.3 ? '#787b86'
+          : isBull ? '#f43f5e' : '#60a5fa';
+      const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
+      const strength = val == null ? '<span style="color:#4b5563">—</span>'
+        : Math.abs(val) < 0.3 ? '<span style="color:#787b86">⚪ 排队</span>'
+          : Math.abs(val) < 0.8 ? (isBull ? '<span class="ind-badge badge-bull">⬆ 硬拉</span>' : '<span class="ind-badge badge-bear">⬇ 下涌</span>')
+            : (isBull ? '<span class="ind-badge badge-bull">🚀 强势</span>' : '<span class="ind-badge badge-bear">🔴 崩涧</span>');
+      const cls = val != null && val >= 0.3 ? 'bull' : val != null && val <= -0.3 ? 'bear' : '';
+      return `<tr class="${cls}">
+        <td><a href="/?symbol=${sym}" class="ind-sym">${sym}</a></td>
+        <td class="r"><span class="ind-score" style="color:${color}">${display}</span>
+          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:0%;background:${color}"></div></div></td>
+        <td>${strength}</td>
+      </tr>`;
+    }
     async function loadIndicators() {
       try {
         const res = await fetch('/api/indicators');
@@ -2621,9 +2666,13 @@
         const byM5 = [...rows].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
         const byEma = [...rows].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
         const byNH = [...rows].sort((a, b) => (b.nh_score ?? 0) - (a.nh_score ?? 0));
+        const byMom = [...rows].sort((a, b) => (b.mom_atr ?? -Infinity) - (a.mom_atr ?? -Infinity));
         const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
         const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
         const maxEma = Math.max(.01, ...byEma.map(r => Math.abs(r.ema_score ?? 0)));
+        // 动量窗口（置顶卡）
+        const momEl = document.getElementById('ind-mom');
+        if (momEl) momEl.innerHTML = byMom.map(r => indMomRow(r.symbol, r.mom_atr)).join('');
         document.getElementById('ind-m1').innerHTML =
           byM1.map(r => indRow(r.symbol, r.st_score_m1 ?? 0, r.st_dir_m1,
             r.st_dir_m1 === 1 ? '#26a69a' : '#ef5350', maxM1)).join('');
@@ -2658,8 +2707,8 @@
       const dot = document.getElementById('hb-dot');
       const txt = document.getElementById('hb-text');
       if (gap > 30000 && engineOnline) {
-        // 超时 → 引擎下线
         engineOnline = false;
+        sessionStorage.setItem('engineOnline', '0');
         if (dot) dot.style.background = '#ef5350';
         if (txt) txt.textContent = '引擎 离线';
         speak('警告，引擎已离线', true);

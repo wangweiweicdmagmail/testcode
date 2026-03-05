@@ -47,7 +47,10 @@ from nautilus_trader.model.identifiers import OrderListId
 from nautilus_trader.model.orders.list import OrderList
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
-from events import STTrailSettingsEvent, EMATrailSettingsEvent
+from events import STTrailSettingsEvent, EMATrailSettingsEvent, TERMINAL_STATUS
+
+# 订单终态集合（全局复用，来自 events.py）
+TERMINAL = TERMINAL_STATUS
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +150,8 @@ class OrderGatewayActor(Strategy):
         self._pending_sl: dict = {}
         # FA Group 专属账户查询线程控制
         self._fa_accounts_running: bool = False
+        # 心跳线程控制（在 __init__ 初始化，防止 on_stop 在 on_start 前被调用时 AttributeError）
+        self._heartbeat_running: bool = False
         # 跟踪止损开关状态（sym -> bool）
         self._st_trail_active: dict[str, bool] = {}
         self._ema_trail_active: dict[str, bool] = {}
@@ -250,6 +255,14 @@ class OrderGatewayActor(Strategy):
 
         if self._redis:
             self._redis.close()
+
+        # 关闭 HTTP 网关（在守护线程中执行，避免阻塞引擎停止）
+        if self._http_server:
+            threading.Thread(
+                target=self._http_server.shutdown, daemon=True
+            ).start()
+
+        self.log.info("[Gateway] OrderGatewayActor 已停止")
 
     # ------------------------------------------------------------------
     # ★ 跟踪止损逻辑（直接在 OrderGatewayActor 内实现，可访问自己的 cache.orders()）
@@ -422,13 +435,6 @@ class OrderGatewayActor(Strategy):
                         pass
             except Exception as e:
                 self.log.error(f"[Trail] {sym}: modify_order 失败: {e}")
-
-        if self._http_server:
-            threading.Thread(
-                target=self._http_server.shutdown, daemon=True
-            ).start()
-
-        self.log.info("[Gateway] OrderGatewayActor 已停止")
 
     # ------------------------------------------------------------------
     # 引擎心跳（每 5s 向 Redis 发布 engine:heartbeat 供前端显示状态）
@@ -1144,7 +1150,7 @@ class OrderGatewayActor(Strategy):
         # 尝试从 cache 取 trigger_price
         try:
             order = self.cache.order(event.client_order_id)
-            order_type = str(order.order_type).replace("OrderType.", "") if order else "UNKNOWN"
+            order_type = getattr(order.order_type, "name", "UNKNOWN") if order else "UNKNOWN"
             tp = getattr(order, "trigger_price", None) if order else None
             new_price = getattr(event, "price", None)
             new_tp = getattr(event, "trigger_price", None)

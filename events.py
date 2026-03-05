@@ -55,3 +55,7 @@ class BarCollectedM5Event(Event):
         self.symbol = symbol
         self.bar = bar_dict  # 包含 M5 OHLC, st_value, st_dir, instrument_id 等
 
+# 订单终态集合（不再活跃），全局共用，避免各模块重复定义
+TERMINAL_STATUS: frozenset[str] = frozenset({
+    "FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"
+})

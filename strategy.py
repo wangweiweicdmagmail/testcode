@@ -28,7 +28,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import redis as _redis
-from events import BarCollectedEvent
 
 from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
 from nautilus_trader.indicators.averages import MovingAverageType
@@ -568,12 +567,21 @@ class BarLoggerStrategy(Strategy):
                 except Exception:
                     pass
 
+            # ── 保留 Redis 中已有的 stop_loss（由前端/ExitManager 写入），不覆写为 None ──
+            existing_sl = None
+            try:
+                existing_raw = self._redis.get(f"position:{sym}")
+                if existing_raw:
+                    existing_sl = json.loads(existing_raw).get("stop_loss")
+            except Exception:
+                pass
+
             pos_data = {
                 "symbol":         sym,
                 "side":           "LONG" if pos.is_long else "SHORT",
                 "entry_price":    float(pos.avg_px_open),
                 "quantity":       float(pos.quantity),
-                "stop_loss":      None,          # 止损价由前端开仓时传入，此处留空
+                "stop_loss":      existing_sl,   # 保留已有止损价，不清零
                 "unrealized_pnl": upnl,
                 "realized_pnl":   float(pos.realized_pnl.as_double()) if pos.realized_pnl else 0.0,
                 "last_price":     last_price,
@@ -583,6 +591,7 @@ class BarLoggerStrategy(Strategy):
             self.log.info(f"[Strategy] 仓位已同步到 Redis: {sym} {pos_data['side']} x{pos_data['quantity']}")
         except Exception as e:
             self.log.warning(f"[Strategy] _sync_position_to_redis 失败: {e}")
+
 
     # ── 历史 K 线回调（IBKR request_bars 响应）─────────────────────────
     def on_historical_data(self, data) -> None:
@@ -1088,7 +1097,8 @@ class BarLoggerStrategy(Strategy):
         # ★ 发布内部事件供 ExitManager 执行 M5 ST 跟踪止盈（publish M5 bar 才触发）
         if publish:
             bar_type = self._bar_types.get(sym)
-            iid_str = str(bar_type.instrument_id) if bar_type else f"{sym}.NASDAQ"
+            # 注意：不硬编码 .NASDAQ，避免 TSM.NYSE / SPY.ARCA 等合约映射错误
+            iid_str = str(bar_type.instrument_id) if bar_type else ""
             self.msgbus.publish(
                 "bar.collected.m5",
                 BarCollectedM5Event(sym, {**m5_bar, "instrument_id": iid_str})

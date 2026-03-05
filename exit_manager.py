@@ -3,7 +3,8 @@ import redis as _redis
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
-from events import BarCollectedEvent, BarCollectedM5Event
+from events import BarCollectedEvent, BarCollectedM5Event, TERMINAL_STATUS
+
 
 # Redis 连接配置（与 strategy.py / order_actor.py 保持一致）
 REDIS_HOST = "localhost"
@@ -176,16 +177,14 @@ class ExitManager(Strategy):
             self.log.warning(f"[ExitManager] {sym}: 读取 M5 EMA21 失败: {e}")
             return None
 
-    # ── 读取当前止损价（三重 fallback）──────────────────────────────────
+    # ── 读取当前止损价（三重 fallback）────────────────────────────────────
     def _get_current_sl(self, sym: str) -> float | None:
-        TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
-
         # 方案1：cache 中活跃的 STOP_MARKET 单
         try:
             for order in self.cache.orders():
                 if order.instrument_id.symbol.value != sym:
                     continue
-                if getattr(order.status, "name", "") in TERMINAL:
+                if getattr(order.status, "name", "") in TERMINAL_STATUS:
                     continue
                 if getattr(order.order_type, "name", "") == "STOP_MARKET":
                     tp = getattr(order, "trigger_price", None)
@@ -220,15 +219,15 @@ class ExitManager(Strategy):
 
         return None
 
+
     # ── 修改 IBKR 止损单 ─────────────────────────────────────────────────
     def _modify_stop_order(self, pos, instrument_id, new_sl: float, sym: str) -> None:
-        TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
         stop_order = None
 
         for order in self.cache.orders():
             if order.instrument_id != instrument_id:
                 continue
-            if getattr(order.status, "name", "") in TERMINAL:
+            if getattr(order.status, "name", "") in TERMINAL_STATUS:
                 continue
             if getattr(order.order_type, "name", "") == "STOP_MARKET":
                 stop_order = order
@@ -242,11 +241,12 @@ class ExitManager(Strategy):
                     if coid_str:
                         from nautilus_trader.model.identifiers import ClientOrderId
                         cached = self.cache.order(ClientOrderId(coid_str))
-                        if cached and getattr(cached.status, "name", "") not in TERMINAL:
+                        if cached and getattr(cached.status, "name", "") not in TERMINAL_STATUS:
                             stop_order = cached
                             self.log.info(f"[ExitManager] {sym}: Redis fallback 止损单: {coid_str}")
             except Exception as e:
                 self.log.warning(f"[ExitManager] {sym}: Redis fallback 失败: {e}")
+
 
         if stop_order is None:
             self.log.warning(f"[ExitManager] {sym}: 未找到活跃 STOP_MARKET 单，跳过")

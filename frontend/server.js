@@ -221,12 +221,14 @@ app.get("/api/indicators", async (req, res) => {
                 st_score_m1: stScoreM1,     // M1 ST 积分（做多+，做空-）
                 st_score_m5: stScoreM5,     // M5 ST 积分
                 ema_score: emaScore,        // EMA 积分（ATR 倍数，正=价格在EMA上）
+                mom_atr: lastM5 ? (lastM5.mom_atr ?? null) : null,  // 15分钟滚动窗口归一化动量
                 nh_score: nhResult.count ?? 0,  // 日内连续新高计数
                 st_dir_m1: lastM1.st_dir,
                 st_dir_m5: lastM5 ? lastM5.st_dir : null,
                 st_val_m1: lastM1.st_value,
                 ema21_m5: lastM5 ? lastM5.ema21 : null,
             };
+
         }));
 
         // 排序：优先按 M1 ST 积分降序（做多最强在顶）
