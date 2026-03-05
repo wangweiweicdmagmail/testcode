@@ -1041,8 +1041,13 @@ class BarLoggerStrategy(Strategy):
             self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
             self._ema_m5[sym] = _EMAState(self.config.ema_period)
 
+        # 动量窗口状态机（如果不存在则临时初始化）
+        if sym not in self._mom_m5:
+            self._mom_m5[sym] = _MomentumATRState(atr_period=14)
+
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
         ema21_m5 = self._ema_m5[sym].update(c)
+        mom_atr  = self._mom_m5[sym].update(h, lo, c)   # 归一化动量 = (C₀-C₋₂)/ATR₁₄
 
         # ─ 计算日内连续新高  ─────────────────────────────────────────────
         today_str = self._today_et_date  # 'YYYY-MM-DD'
@@ -1067,6 +1072,7 @@ class BarLoggerStrategy(Strategy):
             "st_upper": st_up,
             "st_lower": st_lo,
             "nh_score": nh_score,   # 日内连续新高计数（跌破清零）
+            "mom_atr":  mom_atr,    # 归一化动量窗口 = (C₀-C₋₂)/ATR₁₄
         }
 
         self.log.info(
