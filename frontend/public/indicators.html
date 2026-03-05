@@ -268,7 +268,7 @@
                     动量窗口
                     <span id="update-time" style="margin-left:auto;font-size:10px;color:#4b5563">—</span>
                 </div>
-                <div class="card-sub">(C₀−C₋²) ÷ ATR₁₄ · 15分钟滑动窗口</div>
+                <div class="card-sub">(M5_close₀ − M5_open₋₂) ÷ M1_ATR₁₄ · 3根M5组合成15分K线实体</div>
             </div>
             <table>
                 <thead>
@@ -370,17 +370,17 @@
             <div class="card-header">
                 <div class="card-title">
                     <span class="dot" style="background:#a78bfa"></span>
-                    日内连续新高
+                    日内高低突破
                 </div>
-                <div class="card-sub">M5收盘创新高 +1/次 · 跌破清零</div>
+                <div class="card-sub">M5收盘 创新高+1 创新低-1 无突破归零</div>
             </div>
             <table>
                 <thead>
                     <tr>
                         <th style="width:24px">#</th>
                         <th>标的</th>
-                        <th class="right">连续次数</th>
-                        <th>评价</th>
+                        <th class="right">信号</th>
+                        <th>状态</th>
                     </tr>
                 </thead>
                 <tbody id="tbody-nh">
@@ -449,22 +449,77 @@
       `;
         }
 
-        function buildNHRow(rank, sym, count) {
-            const color = count === 0 ? '#4b5563'
-                : count <= 2 ? '#f59e0b'
-                    : count <= 4 ? '#4ade80'
-                        : '#26a69a';
-            const label = count === 0 ? '<span style="color:#4b5563">——</span>'
-                : count <= 2 ? `<span class="badge badge-bull">⚡ x${count}</span>`
-                    : count <= 4 ? `<span class="badge badge-bull">🔥 x${count}</span>`
-                        : `<span class="badge badge-bull">🚀 x${count}</span>`;
-            const pct = Math.min(100, count * 20).toFixed(1);
+        // ─── 语音播报系统 ───────────────────────────────────────────────────
+        let voiceEnabled = true;  // 默认开启
+        // 上次播报的 hl_score 快照 { [symbol]: score }，用于检测变化
+        const prevHLScore = {};
+
+        function speak(text) {
+            if (!voiceEnabled || !window.speechSynthesis) return;
+            // 取消当前播报（避免队列堆积）
+            window.speechSynthesis.cancel();
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = 'zh-CN';
+            u.rate = 1.1;
+            window.speechSynthesis.speak(u);
+        }
+
+        // 检测 hl_score 变化，触发语音
+        function checkHLVoice(data) {
+            for (const r of data) {
+                const sym = r.symbol;
+                const score = r.hl_score ?? 0;
+                const prev = prevHLScore[sym];  // undefined = 初次加载
+
+                if (prev === undefined) {
+                    // 首次加载不播报，只记录
+                    prevHLScore[sym] = score;
+                    continue;
+                }
+
+                if (score === prev) continue;  // 无变化
+
+                // 触发播报的条件：score 绝对值增大（连续突破），或从正转负/负转正
+                const prevAbs = Math.abs(prev);
+                const currAbs = Math.abs(score);
+
+                if (score > 0 && currAbs > prevAbs) {
+                    speak(`${sym} 创新高，连续 ${score} 次`);
+                } else if (score < 0 && currAbs > prevAbs) {
+                    speak(`${sym} 创新低，连续 ${Math.abs(score)} 次`);
+                } else if (score === 0 && prev !== 0) {
+                    // 归零不播报（太频繁），可按需打开
+                    // speak(`${sym} 突破信号归零`);
+                }
+
+                prevHLScore[sym] = score;
+            }
+        }
+
+        function buildHLRow(rank, sym, score) {
+            const abs = Math.abs(score);
+            const isBull = score > 0;
+            const isBear = score < 0;
+            const color = score === 0 ? '#4b5563'
+                : isBull ? (abs <= 2 ? '#4ade80' : abs <= 4 ? '#26a69a' : '#22d3ee')
+                    : (abs <= 2 ? '#f87171' : abs <= 4 ? '#ef5350' : '#e11d48');
+            const sign = score > 0 ? '+' : '';
+            const label = score === 0 ? '<span style="color:#4b5563">——</span>'
+                : isBull
+                    ? (abs <= 2 ? `<span class="badge badge-bull">⚡ 新高×${abs}</span>`
+                        : abs <= 4 ? `<span class="badge badge-bull">🔥 新高×${abs}</span>`
+                            : `<span class="badge badge-bull">🚀 新高×${abs}</span>`)
+                    : (abs <= 2 ? `<span class="badge badge-bear">⚡ 新低×${abs}</span>`
+                        : abs <= 4 ? `<span class="badge badge-bear">🔥 新低×${abs}</span>`
+                            : `<span class="badge badge-bear">💀 新低×${abs}</span>`);
+            const pct = Math.min(100, abs * 20).toFixed(1);
+            const rowCls = isBull ? 'bull' : isBear ? 'bear' : '';
             return `
-        <tr class="${count > 0 ? 'bull' : ''}">
+        <tr class="${rowCls}">
           <td><span class="rank">${rank}</span></td>
           <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
           <td class="right">
-            <span class="score" style="color:${color}">${count}</span>
+            <span class="score" style="color:${color}">${sign}${score}</span>
             <div class="bar-bg">
               <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
             </div>
@@ -512,7 +567,6 @@
                 const byM1 = [...data].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
                 const byM5 = [...data].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
                 const byEma = [...data].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
-                const byNH = [...data].sort((a, b) => (b.nh_score ?? 0) - (a.nh_score ?? 0));
 
                 const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
                 const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
@@ -533,9 +587,16 @@
                         (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)
                 ).join('');
 
-                document.getElementById('tbody-nh').innerHTML = byNH.map((r, i) =>
-                    buildNHRow(i + 1, r.symbol, r.nh_score ?? 0)
+                // 高低突破排序：正值在前（新高），负值在后（新低），0在中间
+                const byHL = [...data].sort((a, b) => (b.hl_score ?? 0) - (a.hl_score ?? 0));
+
+                document.getElementById('tbody-nh').innerHTML = byHL.map((r, i) =>
+                    buildHLRow(i + 1, r.symbol, r.hl_score ?? 0)
                 ).join('');
+
+                // 语音检测
+                checkHLVoice(data);
+
 
                 // mom_atr 全车动势排行
                 const byMom = [...data].sort((a, b) => (b.mom_atr ?? -Infinity) - (a.mom_atr ?? -Infinity));

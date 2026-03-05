@@ -129,58 +129,66 @@ function calcATR10(bars) {
     return n > 0 ? sumTR / n : null;
 }
 
-// ─── 日内连续新高状态（内存，进程存活期间有效）─────────────────────────
-// 结构：{ [symbol]: { dayKey: 'YYYYMMDD', dayHigh: number, count: number } }
-const nhState = {};
+// ─── 日内高低突破信号状态（内存，进程存活期间有效）─────────────────────
+// 结构：{ [symbol]: { dayKey, dayHigh, dayLow, score } }
+// score: 创新高 +1 累计、创新低 -1 累计、无突破归零
+const hlState = {};
 
-// 从 Redis 中的 5m bars 重算当日连续新高计数（用于 /api/indicators 恢复状态）
-function calcNewHigh(m5Bars) {
-    if (!m5Bars || !m5Bars.length) return { count: 0, dayHigh: null };
-    // 只保留今日的 bar（Unix timestamp 按 ET fake-UTC 判断）
-    const now = Date.now() / 1000;
-    // ET offset 简化: 夏令时3-11月 -4h，其他 -5h
+// ET fake-UTC 的当日 dayKey 工具函数
+function etDayKey() {
     const month = new Date().getUTCMonth() + 1;
-    const etOffsetSec = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-    // ET 今日零点（ET fake-UTC）
-    const etNow = now + etOffsetSec;
-    const etMidnight = etNow - (etNow % 86400);  // 当天0点 ET fake-UTC
-    const todayBars = m5Bars.filter(b => b.time >= etMidnight);
-    if (!todayBars.length) return { count: 0, dayHigh: null };
+    const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    const etNow = Math.floor(Date.now() / 1000) + etOff;
+    return new Date(etNow * 1000).toISOString().slice(0, 10);
+}
 
-    let dayHigh = -Infinity;
-    let count = 0;
+// 从 Redis 5m bars 重建今日 hlState（服务重启后恢复）
+function calcHLScore(m5Bars) {
+    if (!m5Bars || !m5Bars.length) return { score: 0, dayHigh: null, dayLow: null };
+    const month = new Date().getUTCMonth() + 1;
+    const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    const etNow = Date.now() / 1000 + etOff;
+    const etMidnight = etNow - (etNow % 86400);
+    const todayBars = m5Bars.filter(b => b.time >= etMidnight);
+    if (!todayBars.length) return { score: 0, dayHigh: null, dayLow: null };
+
+    let dayHigh = -Infinity, dayLow = Infinity, score = 0;
     for (const bar of todayBars) {
         const c = bar.close;
         if (c > dayHigh) {
             dayHigh = c;
-            count++;
+            score++;          // 创新高，累加
+        } else if (c < dayLow) {
+            dayLow = c;
+            score--;          // 创新低，累减
         } else {
-            count = 0;  // 跌破新高，清零
+            score = 0;        // 既没创新高也没创新低，归零
         }
+        // 更新低点（第一根 bar 建立基准）
+        if (dayLow === Infinity) dayLow = c;
     }
-    return { count, dayHigh };
+    return { score, dayHigh, dayLow: dayLow === Infinity ? null : dayLow };
 }
 
-// 在 kline:5m: 推送时更新 nhState（实时路径）
-function updateNHState(symbol, close) {
-    const month = new Date().getUTCMonth() + 1;
-    const etOffsetSec = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-    const etNow = Math.floor(Date.now() / 1000) + etOffsetSec;
-    const dayKey = new Date(etNow * 1000).toISOString().slice(0, 10);  // YYYY-MM-DD
-
-    if (!nhState[symbol] || nhState[symbol].dayKey !== dayKey) {
+// 实时路径：每根 M5 bar 收盘后更新 hlState（从实时 kline:5m 推送触发）
+function updateHLState(symbol, close) {
+    const dayKey = etDayKey();
+    if (!hlState[symbol] || hlState[symbol].dayKey !== dayKey) {
         // 新的一天，重置
-        nhState[symbol] = { dayKey, dayHigh: close, count: 1 };
+        hlState[symbol] = { dayKey, dayHigh: close, dayLow: close, score: 1 };
     } else {
-        const s = nhState[symbol];
+        const s = hlState[symbol];
         if (close > s.dayHigh) {
             s.dayHigh = close;
-            s.count++;
+            s.score++;
+        } else if (close < s.dayLow) {
+            s.dayLow = close;
+            s.score--;
         } else {
-            s.count = 0;
+            s.score = 0;
         }
     }
-    return nhState[symbol].count;
+    return hlState[symbol].score;
 }
 
 app.get("/api/indicators", async (req, res) => {
@@ -199,9 +207,9 @@ app.get("/api/indicators", async (req, res) => {
 
             // M1 ST 积分
             const stScoreM1 = calcSTScore(m1);
-            // M5 ST 积分（同逻辑，换 M5 bars）
+            // M5 ST 积分
             const stScoreM5 = m5.length ? calcSTScore(m5) : 0;
-            // EMA 积分：(M5.close - M5.ema21) / ATR10(M5)
+            // EMA 积分
             let emaScore = null;
             if (lastM5 && lastM5.ema21 != null) {
                 const atr10 = calcATR10(m5);
@@ -210,19 +218,28 @@ app.get("/api/indicators", async (req, res) => {
                 }
             }
 
-            const nhResult = nhState[sym]
-                ? nhState[sym]
-                : calcNewHigh(m5);  // 首次从 bars 恢复
-            if (!nhState[sym]) nhState[sym] = nhResult;  // 缓存
+            // 高低突破信号（从内存恢复 or 从 bars 重建）
+            let hlResult;
+            if (hlState[sym]) {
+                hlResult = hlState[sym];
+            } else {
+                hlResult = { ...calcHLScore(m5), dayKey: etDayKey() };
+                hlState[sym] = hlResult;
+            }
 
             return {
                 symbol: sym,
                 price: lastM1.close,
-                st_score_m1: stScoreM1,     // M1 ST 积分（做多+，做空-）
-                st_score_m5: stScoreM5,     // M5 ST 积分
-                ema_score: emaScore,        // EMA 积分（ATR 倍数，正=价格在EMA上）
-                mom_atr: lastM5 ? (lastM5.mom_atr ?? null) : null,  // 15分钟滚动窗口归一化动量
-                nh_score: nhResult.count ?? 0,  // 日内连续新高计数
+                st_score_m1: stScoreM1,
+                st_score_m5: stScoreM5,
+                ema_score: emaScore,
+                mom_atr: (() => {
+                    for (let i = m5.length - 1; i >= 0; i--) {
+                        if (m5[i].mom_atr != null) return m5[i].mom_atr;
+                    }
+                    return null;
+                })(),
+                hl_score: hlResult.score ?? 0,  // 日内高低突破信号：+N=连续新高 -N=连续新低 0=震荡
                 st_dir_m1: lastM1.st_dir,
                 st_dir_m5: lastM5 ? lastM5.st_dir : null,
                 st_val_m1: lastM1.st_value,
@@ -231,13 +248,14 @@ app.get("/api/indicators", async (req, res) => {
 
         }));
 
-        // 排序：优先按 M1 ST 积分降序（做多最强在顶）
+        // 排序：优先按 M1 ST 积分降序
         results.sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
         res.json(results);
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
+
 
 // POST /api/position/:symbol — 开仓（写入 Redis）
 app.post("/api/position/:symbol", async (req, res) => {
@@ -421,6 +439,17 @@ app.post('/api/modify-stop/:symbol', async (req, res) => {
 
     console.log(`✅ 止损修改 [${symbol}]: ${JSON.stringify(result)}`);
     res.json({ ok: true, engine: result });
+});
+
+// GET /api/settings/:symbol — 读取当前策略开关设置
+app.get("/api/settings/:symbol", async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    try {
+        const raw = await redis.get(`settings:${symbol}`);
+        res.json(raw ? JSON.parse(raw) : { trail_mode: 0 });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // POST /api/settings/:symbol — ST 跟踪止盈等开关

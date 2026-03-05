@@ -136,43 +136,38 @@ class _STState:
 class _MomentumATRState:
     """
     每根 M5 bar 收盘时计算：
-      mom_atr = (close_now - close_2bars_ago) / ATR_14
+      mom_atr = (M5_close_now - M5_open_2bars_ago) / M1_ATR_14
 
     其中：
-      - 15分钟滑动窗口 = 当前 M5 bar 距上上一根 M5 bar（3根*5min=15min）
-      - ATR_14 = 14周期 Wilder ATR 的均值（预热完成后输出非 None）
+      - 15分钟K线实体 = 当前 M5 bar 的收盘价 − 2根 M5 bar 之前的开盘价
+        （相当于把3根 M5 bar 组合成一根 15分钟 K 线，取其实体大小）
+      - M1_ATR_14 = 外部传入的 M1 ATR（14周期 Wilder 平滑），每根 M1 bar 更新
 
     该值代表过去15分钟内相对于 ATR 的价格移动幅度，可用于多标的动量排序。
     """
 
-    def __init__(self, atr_period: int = 14):
-        self.atr_period = atr_period
-        # 使用鹦鹉螺内置 ATR（Wilder 指数平滑，与 SuperTrend 一致）
-        self._atr = AverageTrueRange(atr_period, MovingAverageType.WILDER)
-        # 滑动 close 队列，保留最近3根（index 0=最旧，index 2=最新）
-        self._closes: list[float] = []
+    def __init__(self):
+        # 滑动 M5 bar open 队列，保留最近3根（index 0=最旧，index 2=最新）
+        # 用 open（而非 close）构成 15分钟K线的起始价
+        self._opens: list[float] = []
 
-    def update(self, h: float, lo: float, c: float
+    def update(self, o: float, c: float, m1_atr: Optional[float]
                ) -> Optional[float]:
         """
-        喂入 (h, lo, c)，返回 mom_atr（ATR 预热完成且有 ≥3 根历史后才输出）。
+        喂入 M5 bar 的 (open, close) 及当前 M1_ATR，
+        返回 mom_atr（M1_ATR 有效且累积 ≥3 根 M5 bar 后才输出）。
         """
-        # 更新 ATR
-        self._atr.update_raw(h, lo, c)
-        # 维护 close 队列，只保最近3根
-        self._closes.append(c)
-        if len(self._closes) > 3:
-            self._closes.pop(0)
+        # 维护 M5 bar open 队列，只保最近3根
+        self._opens.append(o)
+        if len(self._opens) > 3:
+            self._opens.pop(0)
 
-        # 预热检查：ATR 就绪 + 至少累积了3根（可取 close_2bars_ago）
-        if not self._atr.initialized or len(self._closes) < 3:
+        # 预热检查：M1 ATR 有值 + 至少累积了3根 M5 bar（可取 open_2bars_ago）
+        if m1_atr is None or m1_atr == 0 or len(self._opens) < 3:
             return None
 
-        atr_val = self._atr.value
-        if atr_val == 0:
-            return None
-
-        mom = (self._closes[-1] - self._closes[0]) / atr_val
+        # 15分钟K线实体 = 当前 close − 最早那根 M5 bar 的 open
+        mom = (c - self._opens[0]) / m1_atr
         return round(mom, 4)
 
 
@@ -311,7 +306,10 @@ class BarLoggerStrategy(Strategy):
         # 每个标的状态机（M5 维度）
         self._st_m5:  dict[str, _STState]  = {}
         self._ema_m5: dict[str, _EMAState] = {}
-        self._mom_m5: dict[str, _MomentumATRState] = {}  # M5 归一化动量（10, 3.0 ATR14）
+        self._mom_m5: dict[str, _MomentumATRState] = {}  # M5 归一化动量（15分钟K线实体/M1_ATR）
+
+        # 每个标的 M1 ATR（14周期 Wilder，按 M1 bar 更新，供 mom_atr 使用）
+        self._atr_m1: dict[str, AverageTrueRange] = {}
 
         # 历史 bar 缓冲（按标的聚合， flush 时一次性覆盖写入 Redis）
         self._hist_m1: dict[str, list[dict]] = defaultdict(list)
@@ -464,7 +462,8 @@ class BarLoggerStrategy(Strategy):
                 self._ema_m1[sym]    = _EMAState(self.config.ema_period)
                 self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult_m5)
                 self._ema_m5[sym]    = _EMAState(self.config.ema_period)
-                self._mom_m5[sym]    = _MomentumATRState(atr_period=14)
+                self._mom_m5[sym]    = _MomentumATRState()
+                self._atr_m1[sym]    = AverageTrueRange(14, MovingAverageType.WILDER)  # M1 ATR 供动量窗口使用
                 self._m5_bucket[sym] = _M5Bucket()
                 self.log.info(f"[Strategy][Async] {sym}: 状态机初始化完成")
 
@@ -662,6 +661,9 @@ class BarLoggerStrategy(Strategy):
         # M1 指标计算
         st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
         ema21 = self._ema_m1[sym].update(c)
+        # 更新 M1 ATR（供动量窗口使用）
+        if sym in self._atr_m1:
+            self._atr_m1[sym].update_raw(h, lo, c)
 
         bar_dict = {
             "time":     et,
@@ -700,12 +702,16 @@ class BarLoggerStrategy(Strategy):
             if sym not in self._st_m5:
                 self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
                 self._ema_m5[sym] = _EMAState(self.config.ema_period)
-                self._mom_m5[sym] = _MomentumATRState(atr_period=14)
+                self._mom_m5[sym] = _MomentumATRState()
             if sym not in self._mom_m5:
-                self._mom_m5[sym] = _MomentumATRState(atr_period=14)
+                self._mom_m5[sym] = _MomentumATRState()
+            if sym not in self._atr_m1:
+                self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
             st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
             ema21_5 = self._ema_m5[sym].update(c5)
-            mom_atr5 = self._mom_m5[sym].update(h5, lo5, c5)
+            # 获取当前 M1 ATR 值（已按每根 M1 bar 更新）
+            m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
+            mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val)
             m5_bar = {
                 **m5_out,
                 "ema21":    ema21_5,
@@ -875,7 +881,8 @@ class BarLoggerStrategy(Strategy):
                 o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
                 st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
                 ema21_5 = self._ema_m5[sym].update(c5)
-                mom_atr5 = self._mom_m5[sym].update(h5, lo5, c5) if sym in self._mom_m5 else None
+                m1_atr_val = self._atr_m1[sym].value if sym in self._atr_m1 and self._atr_m1[sym].initialized else None
+                mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val) if sym in self._mom_m5 else None
                 m5_bar = {
                     **m5_out, "symbol": sym, "ema21": ema21_5,
                     "st_value": st_val5, "st_dir": st_dir5, "st_upper": st_up5, "st_lower": st_lo5,
@@ -940,9 +947,13 @@ class BarLoggerStrategy(Strategy):
             )
             self._st_m1[sym]  = _STState(self.config.st_period, self.config.st_mult)
             self._ema_m1[sym] = _EMAState(self.config.ema_period)
+            self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
 
         st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
         ema21 = self._ema_m1[sym].update(c)
+        # 更新 M1 ATR（供动量窗口使用）
+        if sym in self._atr_m1:
+            self._atr_m1[sym].update_raw(h, lo, c)
 
         # 盘前 bar：指标已更新（继续预热），但不写 Redis / 不显示图表
         if is_premarket:
@@ -1043,11 +1054,15 @@ class BarLoggerStrategy(Strategy):
 
         # 动量窗口状态机（如果不存在则临时初始化）
         if sym not in self._mom_m5:
-            self._mom_m5[sym] = _MomentumATRState(atr_period=14)
+            self._mom_m5[sym] = _MomentumATRState()
+        if sym not in self._atr_m1:
+            self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
 
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
         ema21_m5 = self._ema_m5[sym].update(c)
-        mom_atr  = self._mom_m5[sym].update(h, lo, c)   # 归一化动量 = (C₀-C₋₂)/ATR₁₄
+        # 动量 = (当前M5 close − 2根前M5 bar的open) / M1_ATR_14（15分钟K线实体归一化）
+        m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
+        mom_atr = self._mom_m5[sym].update(o, c, m1_atr_val)
 
         # ─ 计算日内连续新高  ─────────────────────────────────────────────
         today_str = self._today_et_date  # 'YYYY-MM-DD'

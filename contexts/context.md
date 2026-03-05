@@ -114,11 +114,14 @@ cd frontend && node server.js
 - **M1/M5 ST 参数分离** ✅：M1 ST（period=10, mult=3.5）/ M5 ST（period=10, mult=3.0）
 - **trail_mode 重构（三套互斥止盈）** ✅：`settings:{sym}.trail_mode` 单字段控制（0=关, 1=M1-ST, 2=M5-ST, 3=EMA-M5）
 - **M5 bar 收盘事件** ✅：`events.py` 新增 `BarCollectedM5Event`；`ExitManager` 订阅后处理 M5-ST 跟踪
-- **动量窗口指标（mom_atr）** ✅：`_MomentumATRState` 状态机；公式 = `(C₀ - C₋₂) / ATR_14`（15分钟滑动窗口）；写入 `bars:5m:{sym}.mom_atr`；`/api/indicators` 暴露；`indicators.html` 第一列 + `index.html` 右侧面板置顶，含 4 档强度标签
+- **动量窗口指标（mom_atr）** ✅：`_MomentumATRState` 状态机；公式 = `(M5_close₀ - M5_open₋₂) / M1_ATR_14`（把3根M5组成15分K线，实体除以M1 ATR归一化）；写入 `bars:5m:{sym}.mom_atr`；`/api/indicators` 暴露；`indicators.html` 第一列 + `index.html` 右侧面板置顶，含 4 档强度标签
 - **平仓按钮** ✅：`DELETE /api/position/:symbol` → 反向市价单 + 取消止损单
 - **持仓止损价修改** ✅：拖动止损线 → `POST /api/modify-stop/:symbol` → `modify_order()`
 - **止损单 ID 持久化** ✅：`order:stop:{sym}` Redis 持久化，引擎重启后恢复
-- **全标的指标排行** ✅：`indicators.html` 五列并排（动量窗口 / M1-ST / M5-ST / EMA偏离 / 日内新高）
+- **全标的指标排行** ✅：`indicators.html` 五列并排（动量窗口 / M1-ST / M5-ST / EMA偏离 / 日内高低突破）
+- **日内高低突破信号（hl_score）** ✅：`server.js` 维护 `hlState`；每根 M5 bar 创新高 `+1` 累积、创新低 `-1` 累积、无突破归零；`/api/indicators` 返回 `hl_score`；`indicators.html` 第五列显示带颜色的正负值 + 语音播报（创新高/新低时自动朗读）
+- **尾盘 15:45 ET 自动平仓** ✅：`exit_manager.py` `_check_eod_close()`；每根 M1 bar 检测 ET 时间 ≥ 15:45 时调用 HTTP POST `/close` 平掉所有持仓；每交易日仅触发一次（`_eod_closed_dates` set 防重复）
+- **止盈跟踪改为下拉框** ✅：工具栏三个 toggle 合并为单个 `<select>`（0=关/1=M1-ST/2=M5-ST/3=EMA）；新增 `GET /api/settings/:symbol` 端点，页面加载时自动恢复已保存的 trail_mode 选中项
 - **EMA21 偏差修复** ✅：修复 `_M5Bucket.flush_current()` 重复喂入 Bug
 - **代码审核 Bug 修复（2026-03-05）** ✅：
   - `on_stop()` 代码错位 → 每根 M1 bar 随机关闭 HTTP 网关（最高优先级）
@@ -155,4 +158,14 @@ cd frontend && node server.js
 | `st_value` | M1/M5 | SuperTrend 值（M1:10,3.5 / M5:10,3.0） |
 | `st_dir` | M1/M5 | ST 方向：`1`=多头, `-1`=空头 |
 | `ema21` | M1/M5 | EMA21 |
-| `mom_atr` | M5 | 归一化15分钟动量 = `(C - C_2bars_ago) / ATR_14`（预热14根后有值） |
+| `mom_atr` | M5 | 归一化15分钟动量 = `(M5_close₀ - M5_open₋₂) / M1_ATR_14`（3根M5组成15分K线实体，M1 ATR归一化；⩾3根M5 bar且M1 ATR预热后有值） |
+
+## /api/indicators 返回字段
+
+| 字段 | 说明 |
+|------|------|
+| `st_score_m1` | M1 ST 积分（连续多头+N，连续空头-N） |
+| `st_score_m5` | M5 ST 积分 |
+| `ema_score` | EMA 偏离积分 |
+| `mom_atr` | 15分钟动量信号 |
+| `hl_score` | 日内高低突破信号：+N=连续创新高，-N=连续创新低，0=无突破 |

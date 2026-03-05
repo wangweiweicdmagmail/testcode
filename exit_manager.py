@@ -1,4 +1,5 @@
 import json
+import http.client
 import redis as _redis
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
@@ -15,6 +16,9 @@ TRAIL_OFF   = 0   # 全部关闭
 TRAIL_M1_ST = 1   # M1 SuperTrend 跟踪（10, 3.5）
 TRAIL_M5_ST = 2   # M5 SuperTrend 跟踪（10, 3.0）
 TRAIL_EMA   = 3   # M5 EMA21 跟踪
+
+# 尾盘自动平仓时间（ET，15:45 = 945分钟）
+EOD_CLOSE_ET_MINUTE = 15 * 60 + 45   # 945
 
 
 class ExitManagerConfig(StrategyConfig, frozen=True):
@@ -35,11 +39,14 @@ class ExitManager(Strategy):
       - 每次 bar 收盘直接从 Redis 读 trail_mode，不依赖内存状态
       - 三套互斥，只有一个生效，由前端控制
       - 棘轮机制：多头止损只上移，空头止损只下移（|变化| >= 0.01 才提交）
+      - 尾盘 15:45 ET 自动平掉所有持仓（通过 order_actor HTTP /close 接口）
     """
 
     def __init__(self, config: ExitManagerConfig) -> None:
         super().__init__(config)
         self._redis = None
+        # 防止同一天重复触发尾盘平仓（存 ET date 字符串，如 '2026-03-05'）
+        self._eod_closed_dates: set[str] = set()
 
     def on_start(self) -> None:
         try:
@@ -76,14 +83,22 @@ class ExitManager(Strategy):
             self.log.warning(f"[ExitManager] {sym}: 读取 trail_mode 失败: {e}")
             return TRAIL_OFF
 
-    # ── M1 bar 收盘：处理 mode=1（M1 ST）和 mode=3（EMA）─────────────────
+    # ── M1 bar 收盘：处理 mode=1（M1 ST）和 mode=3（EMA）+ 尾盘平仓检测 ───
     def _on_m1_bar(self, event: BarCollectedEvent) -> None:
         sym = event.symbol
+        bar = event.bar
+
+        # ── 尾盘 15:45 ET 自动平仓检测（优先处理）─────────────────────────
+        # bar.time 是 ET fake-UTC 秒，当天秒偏移直接对应 ET 时间
+        bar_time = bar.get("time", 0)
+        et_minute_of_day = (bar_time % 86400) // 60  # 当天分钟数（ET）
+        if et_minute_of_day >= EOD_CLOSE_ET_MINUTE:
+            self._check_eod_close(bar_time)
+
         mode = self._get_trail_mode(sym)
         if mode == TRAIL_OFF:
             return
 
-        bar = event.bar
         iid_str = bar.get("instrument_id", "")
         if not iid_str:
             return
@@ -99,6 +114,60 @@ class ExitManager(Strategy):
             if ema21:
                 # EMA 无方向过滤（st_dir=0 表示跳过方向判断）
                 self._apply_trail(sym, iid_str, ema21, 0, "EMA-M5")
+
+    # ── 尾盘平仓：每天 15:45 ET 后首次 M1 bar 触发，平掉所有持仓 ──────────
+    def _check_eod_close(self, bar_time: int) -> None:
+        """检查并执行尾盘自动平仓（每交易日只触发一次）。"""
+        # 计算当前 ET 日期字符串（ET fake-UTC 直接取 UTC 日期）
+        from datetime import datetime, timezone
+        et_date = datetime.fromtimestamp(bar_time, tz=timezone.utc).strftime("%Y-%m-%d")
+
+        if et_date in self._eod_closed_dates:
+            return  # 今天已经平仓过，不重复触发
+
+        # 查是否有持仓（从 Redis position:* 键判断）
+        if not self._redis:
+            return
+        try:
+            syms_with_pos = []
+            for key in self._redis.keys("position:*"):
+                raw = self._redis.get(key)
+                if raw:
+                    syms_with_pos.append(key.split(":", 1)[1])
+        except Exception as e:
+            self.log.warning(f"[EOD] Redis 查询持仓列表失败: {e}")
+            return
+
+        if not syms_with_pos:
+            self.log.info(f"[EOD] {et_date} 15:45 ET — 无持仓，跳过")
+            self._eod_closed_dates.add(et_date)
+            return
+
+        self.log.info(
+            f"[EOD] {et_date} 15:45 ET — 开始自动平仓: {syms_with_pos}"
+        )
+        self._eod_closed_dates.add(et_date)  # 先标记，避免重复
+        self._eod_close_all(syms_with_pos, et_date)
+
+    def _eod_close_all(self, symbols: list[str], date_label: str) -> None:
+        """向 order_actor HTTP /close 接口依次发送平仓请求。"""
+        for sym in symbols:
+            try:
+                body = json.dumps({"symbol": sym}).encode()
+                conn = http.client.HTTPConnection("127.0.0.1", 8888, timeout=5)
+                conn.request(
+                    "POST", "/close",
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = conn.getresponse()
+                result = resp.read().decode()
+                conn.close()
+                self.log.info(
+                    f"[EOD] {date_label} 平仓 {sym}: HTTP {resp.status} → {result}"
+                )
+            except Exception as e:
+                self.log.error(f"[EOD] {date_label} 平仓 {sym} 失败: {e}")
 
     # ── M5 bar 收盘：处理 mode=2（M5 ST）────────────────────────────────
     def _on_m5_bar(self, event: BarCollectedM5Event) -> None:

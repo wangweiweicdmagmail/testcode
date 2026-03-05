@@ -965,17 +965,8 @@
         <span class="acct-label">Available</span>
         <span class="acct-val acct-free" id="acct-free">—</span>
       </div>
-      <div class="acct-divider"></div>
-      <div class="acct-group">
-        <span class="acct-label">Currency</span>
-        <span class="acct-val" id="acct-currency" style="color:#787b86">USD</span>
-      </div>
-      <div class="acct-divider"></div>
-      <div class="acct-group" style="align-items:center">
-        <span class="acct-label">Updated</span>
-        <span class="acct-ts" id="acct-ts">—</span>
-      </div>
     </div>
+
 
     <!-- 右列：两行 -->
     <div id="tb-right">
@@ -1018,27 +1009,16 @@
           </optgroup>
         </select>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" id="st-trail-toggle">
-            <span class="slider"></span>
-          </label>
-          <span id="st-trail-label">M1 ST跟踪</span>
-        </div>
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" id="st-trail-m5-toggle">
-            <span class="slider"></span>
-          </label>
-          <span id="st-trail-m5-label">M5 ST跟踪</span>
-        </div>
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" id="ema-trail-toggle">
-            <span class="slider"></span>
-          </label>
-          <span id="ema-trail-label">EMA跟踪</span>
-        </div>
+        <span style="font-size:11px;color:#787b86;white-space:nowrap;">止盈跟踪</span>
+        <select id="trail-mode-select" style="
+          background:#131722;color:#d1d4dc;
+          border:1px solid #2a2e39;border-radius:4px;
+          padding:3px 6px;font-size:12px;cursor:pointer;">
+          <option value="0">关闭</option>
+          <option value="1">M1 ST跟踪</option>
+          <option value="2">M5 ST跟踪</option>
+          <option value="3">EMA跟踪</option>
+        </select>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
         <button class="btn btn-close" id="btn-close">平仓</button>
@@ -2534,62 +2514,44 @@
       location.reload();
     });
 
-    // ─── 跟踪止盈开关（互斥，写 trail_mode: 0=关 1=M1-ST 2=M5-ST 3=EMA）───
-    const stToggle = document.getElementById('st-trail-toggle');
-    const stM5Toggle = document.getElementById('st-trail-m5-toggle');
-    const emaToggle = document.getElementById('ema-trail-toggle');
-    const stLbl = document.getElementById('st-trail-label');
-    const stM5Lbl = document.getElementById('st-trail-m5-label');
-    const emaLbl = document.getElementById('ema-trail-label');
+    // ─── 止盈跟踪下拉（trail_mode: 0=关 1=M1-ST 2=M5-ST 3=EMA）─────────
+    const trailSelect = document.getElementById('trail-mode-select');
 
-    const TRAIL_COLOR = { st: '#26a69a', stM5: '#4ade80', ema: '#60a5fa' };
+    // 不同模式的高亮颜色（border 表示激活状态）
+    const TRAIL_COLORS = { 0: '#2a2e39', 1: '#26a69a', 2: '#4ade80', 3: '#60a5fa' };
+
+    function applyTrailSelectStyle(mode) {
+      const m = parseInt(mode);
+      trailSelect.style.borderColor = TRAIL_COLORS[m] || '#2a2e39';
+      trailSelect.style.color = m > 0 ? (TRAIL_COLORS[m] || '#d1d4dc') : '#787b86';
+    }
 
     async function setTrailMode(mode) {
       await fetch(`/api/settings/${SYMBOL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trail_mode: mode }),
+        body: JSON.stringify({ trail_mode: parseInt(mode) }),
       });
     }
 
-    function clearAllTrailUI() {
-      stToggle.checked = false; stLbl.style.color = '#787b86';
-      stM5Toggle.checked = false; stM5Lbl.style.color = '#787b86';
-      emaToggle.checked = false; emaLbl.style.color = '#787b86';
-    }
-
-    stToggle.addEventListener('change', async e => {
-      clearAllTrailUI();
-      if (e.target.checked) {
-        stToggle.checked = true;
-        stLbl.style.color = TRAIL_COLOR.st;
-        await setTrailMode(1);   // M1 ST
-      } else {
-        await setTrailMode(0);   // 关闭
-      }
+    trailSelect.addEventListener('change', async () => {
+      const mode = parseInt(trailSelect.value);
+      applyTrailSelectStyle(mode);
+      await setTrailMode(mode);
     });
 
-    stM5Toggle.addEventListener('change', async e => {
-      clearAllTrailUI();
-      if (e.target.checked) {
-        stM5Toggle.checked = true;
-        stM5Lbl.style.color = TRAIL_COLOR.stM5;
-        await setTrailMode(2);   // M5 ST
-      } else {
-        await setTrailMode(0);
-      }
-    });
-
-    emaToggle.addEventListener('change', async e => {
-      clearAllTrailUI();
-      if (e.target.checked) {
-        emaToggle.checked = true;
-        emaLbl.style.color = TRAIL_COLOR.ema;
-        await setTrailMode(3);   // EMA M5
-      } else {
-        await setTrailMode(0);
-      }
-    });
+    // 页面加载时读取当前设置，还原 select 状态
+    (async () => {
+      try {
+        const res = await fetch(`/api/settings/${SYMBOL}`);
+        if (res.ok) {
+          const s = await res.json();
+          const m = s.trail_mode ?? 0;
+          trailSelect.value = String(m);
+          applyTrailSelectStyle(m);
+        }
+      } catch (e) { /* 引擎离线时忽略 */ }
+    })();
 
 
     // ─── 标的切换 ────────────────────────────────────────────
