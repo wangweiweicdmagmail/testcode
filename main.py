@@ -33,6 +33,7 @@ from nautilus_trader.adapters.interactive_brokers.factories import (
     InteractiveBrokersLiveExecClientFactory,
 )
 from nautilus_trader.config import LiveDataEngineConfig
+from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import RoutingConfig
 from nautilus_trader.config import TradingNodeConfig
@@ -193,8 +194,13 @@ config_node = TradingNodeConfig(
         time_bars_timestamp_on_close=False,
         validate_data_sequence=True,
     ),
+    exec_engine=LiveExecEngineConfig(
+        # 关闭状态协调：避免 IBKR 返回开权合约（AVGO 期权等）造成工具解析失败阻止策略启动
+        # 本引擎对订单生命周期自行管理，非實盘交易平台，关闭并不影响止损单管理
+        reconciliation=False,
+    ),
     timeout_connection=120.0,
-    timeout_reconciliation=5.0,
+    timeout_reconciliation=1.0,   # 已关闭协调，设为 1s 避免无谓等待
     timeout_portfolio=5.0,
     timeout_disconnection=5.0,
     timeout_post_stop=2.0,
