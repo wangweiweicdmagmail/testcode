@@ -20,6 +20,40 @@ const redis = new Redis({
 });
 redis.on("error", (err) => console.error(`[Redis主连接] ${err.message}`));
 
+// ─── ET 时区工具函数（自动处理夏令时 DST）─────────────────────────────────
+// 用 Intl.DateTimeFormat 精确计算当前 ET 时间（克服 'month>=3' 简化判断导致冬令时算错）
+// 美国 DST：3月第二个周日 → 11月第一个周日
+const _etFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
+
+/** 返回当前 ET 时当天的秒偏移（对应 bar.time % 86400）和日期字符串 */
+function getETInfo() {
+    const now = new Date();
+    const parts = _etFormatter.formatToParts(now);
+    const get = (t) => parseInt(parts.find(p => p.type === t).value);
+    const h = get('hour'), m = get('minute'), s = get('second');
+    const yy = get('year'), mo = get('month'), dd = get('day');
+    const secOfDay = h * 3600 + m * 60 + s;
+    const dayKey = `${yy}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    return { secOfDay, dayKey };
+}
+
+/** ET fake-UTC 偏移秒数（用于 midnight 计算，保持与引擎 bar.time 的计算一致） */
+function getETOffsetSec() {
+    const { secOfDay } = getETInfo();
+    const nowUtc = Math.floor(Date.now() / 1000);
+    const utcSecOfDay = nowUtc % 86400;
+    // offset = etSecOfDay - utcSecOfDay，并四舍五入到整小时
+    const rawOff = secOfDay - utcSecOfDay;
+    // 处理跨日边界（-12h ~ +12h 范围内）
+    if (rawOff > 43200) return rawOff - 86400;
+    if (rawOff < -43200) return rawOff + 86400;
+    return rawOff;
+}
+
 
 // 静态文件服务
 app.use(express.static(path.join(__dirname, "public")));
@@ -69,10 +103,8 @@ app.get("/api/data/:symbol", async (req, res) => {
         // ET fake-UTC：bars.time 已是 ET fake-UTC 秒
         function calcPrevDay(m5Bars) {
             if (!m5Bars.length) return null;
+            const etOff = getETOffsetSec();
             const now = Date.now() / 1000;
-            const month = new Date().getUTCMonth() + 1;
-            const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-            const etNow = now + etOff;
             // 今日 ET 凌晨 0:00（fake-UTC）
             const todayMidnight = etNow - (etNow % 86400);
             // 昨日 ET 凌晨 0:00
@@ -136,17 +168,13 @@ const hlState = {};
 
 // ET fake-UTC 的当日 dayKey 工具函数
 function etDayKey() {
-    const month = new Date().getUTCMonth() + 1;
-    const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-    const etNow = Math.floor(Date.now() / 1000) + etOff;
-    return new Date(etNow * 1000).toISOString().slice(0, 10);
+    return getETInfo().dayKey;
 }
 
 // 从 Redis 5m bars 重建今日 hlState（服务重启后恢复）
 function calcHLScore(m5Bars) {
     if (!m5Bars || !m5Bars.length) return { score: 0, dayHigh: null, dayLow: null };
-    const month = new Date().getUTCMonth() + 1;
-    const etOff = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    const etOff = getETOffsetSec();
     const etNow = Date.now() / 1000 + etOff;
     const etMidnight = etNow - (etNow % 86400);
     const todayBars = m5Bars.filter(b => b.time >= etMidnight);
@@ -502,16 +530,10 @@ redisSub.on("ready", () => {
     redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*", "engine:*").catch(console.error);
 });
 
-// 判断当前时刻是否在美股正市（09:30-16:00 ET），用于实时推送过滤
+// 判断当前时刻是否在美股正市（09:30-16:00 ET）
 function isRTH() {
-    const now = Math.floor(Date.now() / 1000);
-    const month = new Date().getUTCMonth() + 1;
-    const etOffset = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-    const etNow = now + etOffset;
-    const secOfDay = etNow % 86400;
-    const RTH_OPEN = 9 * 3600 + 30 * 60;  // 34200
-    const RTH_CLOSE = 16 * 3600;             // 57600
-    return secOfDay >= RTH_OPEN && secOfDay < RTH_CLOSE;
+    const { secOfDay } = getETInfo();
+    return secOfDay >= 34200 && secOfDay < 57600;  // 09:30 – 16:00
 }
 
 redisSub.on("pmessage", (_pattern, channel, message) => {
