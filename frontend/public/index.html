@@ -2038,11 +2038,15 @@
                 showToast(`🏁 ${sym} 仓位已平仓`, 'warn');
                 break;
               case 'POSITION_OPENED':
-                // 外部开仓（如 TWS 手动开仓）→ 更新入场价线
+                // 外部开仓（如 TWS 手动开仓）→ 补画入场价线，但不加 marker（避免与 FILLED 重复）
+                // 本引擎下单的情况：FILLED 已经画好线，这里只做仓位状态同步
                 if (o.avg_px_open) {
                   const p = parseFloat(o.avg_px_open);
                   const q = parseFloat(o.quantity || 0);
-                  setEntryLine(p, o.side === 'LONG' ? 'BUY' : 'SELL', q);
+                  // 只在 FILLED 没有画线时才补画（外部开仓 / 引擎重启恢复）
+                  if (!activeOrderLines.entryLine) {
+                    setEntryLine(p, o.side === 'LONG' ? 'BUY' : 'SELL', q);
+                  }
                   if (!currentPosition) {
                     currentPosition = {
                       symbol: sym, side: o.side,
@@ -2054,6 +2058,7 @@
                   }
                 }
                 break;
+
               case 'POSITION_CHANGED':
                 // 仓位变化（部分平仓等）→ 更新面板
                 if (currentPosition && o.avg_px_open) {
