@@ -137,6 +137,12 @@ cd frontend && node server.js
 - **开仓重复打点修复（2026-03-06）** ✅：
   - `FILLED` 事件和 `POSITION_OPENED` 事件均调用 `setEntryLine` + 加 marker，导致一次开仓出现两个箭头
   - 修复：`POSITION_OPENED` 改为只在 `activeOrderLines.entryLine` 不存在时才补画（外部/重启恢复场景），不再重复推 marker
+- **pmessage 残留旧函数导致推送中断（2026-03-06）** ✅：
+  - 重构 `nh_score → hl_score` 时未同步更新 `server.js` 的 `pmessage` 回调，每根 M5 bar 收盘时抛 `ReferenceError: updateNHState is not defined`，导致整个实时推送中断
+  - 修复：改为调用 `updateHLState()`，广播频道改为 `hl:update`
+- **isRTH() 冬令时 DST 判断错误（2026-03-06）** ✅：
+  - `month >= 3 → -4h` 的简化规则在 DST 切换日（3月第二个周日）前的冬令时期间算出错误的 ET 时间（15:12 被算成 16:12），导致 `isRTH()` 返回 false，屏蔽所有 kline 实时推送，前端必须手动刷新
+  - 修复：新增 `getETInfo()` / `getETOffsetSec()` 工具函数，使用 `Intl.DateTimeFormat('America/New_York')` 精确处理 DST 边界，替换 `isRTH()`、`etDayKey()`、`calcHLScore()`、`calcPrevDay()` 中所有简化偏移计算
 
 
 ## Redis 数据结构
