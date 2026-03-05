@@ -67,6 +67,18 @@ python main.py --mode backtest
 cd frontend && node server.js
 ```
 
+> [!IMPORTANT]
+> **重启规则**：说"重启"默认表示**前端 + 引擎同时重启**。只有明确说"重启前端"时才只重启前端。
+>
+> 重启命令：
+> ```bash
+> # 重启引擎（前后端都重启时）
+> pkill -f "python main.py"; pkill -f "node server.js"
+> cd /Users/weiweiwang/testcode/nautilus_ibkr_helloworld && python main.py > /tmp/engine.log 2>&1 &
+> cd frontend && node server.js > /tmp/frontend.log 2>&1 &
+> ```
+
+
 ## HTTP 端点
 
 ### 引擎端（order_actor.py 端口 8888）
@@ -98,24 +110,37 @@ cd frontend && node server.js
 
 ## 已实现功能汇总
 
-- **平仓按鈕** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
-- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸出现 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；成功后原价格线移动到新价格，止损成交/平仓后价格线自动清除
-- **ST 跟踪止损** ✅：开仓后开启“ST跟踪止盈”开关 → `ExitManager` 每分钟 K 线收盘后自动计算新止损价（檘轮机制：多头只週上移，空头只週下移）并调用 `modify_order()` 修改 IBKR 止损单
+- **盘前盘后数据过滤** ✅：引擎层（`strategy.py`）和前端 API（`server.js`）均过滤非正市 RTH 数据（仅保留 09:30–16:00 ET）；盘后 bar/tick 不进指标计算、不写 Redis、不推送前端
+- **M1/M5 ST 参数分离** ✅：M1 ST 用（period=10, mult=3.5），M5 ST 用（period=10, mult=3.0）；`BarLoggerStrategyConfig` 新增 `st_mult_m5` 字段；引擎日志确认显示 `M1-ST(10,3.5)  M5-ST(10,3.0)`
+- **trail_mode 重构（三套互斥止盈）** ✅：`settings:{sym}.trail_mode` 单字段控制（0=关, 1=M1-ST, 2=M5-ST, 3=EMA-M5）；`ExitManager` 每次 bar 收盘直接从 Redis 读开关，无内存状态；前端三个 toggle 互斥
+- **M5 bar 收盘事件** ✅：`events.py` 新增 `BarCollectedM5Event`；`strategy.py` 在 `_process_m5_bar` 发布 `bar.collected.m5`；`ExitManager` 订阅后处理 M5-ST 跟踪（每5分钟一次）
+- **mom_atr 归一化动量指标** ✅：新增 `_MomentumATRState` 状态机；公式 = `(close_now - close_2bars_ago) / ATR_14`（15分钟窗口 ÷ Wilder ATR-14）；写入 `bars:5m:{sym}` 的 `mom_atr` 字段，ATR 预热前为 `None`
+- **平仓按钮** ✅：前端 → `DELETE /api/position/:symbol` → `POST /close`（引擎）→ 取消止损单 + 市价平仓；引擎离线时降级为仅删 Redis 记录
+- **持仓止损价修改** ✅：点击图表止损价格线 → 橙色药丸 → 拖动 → 松手调用 `POST /api/modify-stop/:symbol` → 引擎 `modify_order()` 修改 IBKR 止损单触发价；止损成交/平仓后价格线自动清除
 - **止损单 ID 持久化** ✅：止损单 ACCEPTED 后将 `client_order_id` 写入 Redis `order:stop:{sym}`；引擎重启后 IBKR 重新推送 ACCEPTED 事件，cache 回充，`modify_order()` 即可正常运作
-- **全标的指标排行** ✅：`indicators.html` 从 `/api/indicators` 拉取全部 13 个标的（NVDA/AAPL/GOOG/AVGO/SPY/TSLA/PLTR/AMZN/AMD/META/MSFT/QQQ/TSM）的 M1 ST 积分 / M5 ST 积分 / EMA 偏离 / 日内新高，四列并排对比排行；`server.js` 的 `ALL_SYMBOLS` 和 `SYMBOL_MAP` 已同步扩展到 13 个标的
-- **EMA21 偏差修复** ✅：修复 `strategy.py` 中两处 Bug：① `_M5Bucket.flush_current()` 输出未完成 M5 bucket 后不清空 `_bars`，导致后续实时 `on_bar()` 再次触发同一 bucket 输出并将临时 close 二次喂入 EMA 状态机；② `_flush_history_for()` 对未完成 M5 bar 不再调用 `update()`，改为复用最后一根完整 M5 bar 的指标值展示，消除 EMA21 持续偏高的累计误差
+- **全标的指标排行** ✅：`indicators.html` 从 `/api/indicators` 拉取全部 13 个标的的 M1 ST 积分 / M5 ST 积分 / EMA 偏离 / 日内新高，四列并排排行
+- **EMA21 偏差修复** ✅：修复 `_M5Bucket.flush_current()` 不清空 `_bars` 导致 EMA 二次喂入的 Bug，以及 `_flush_history_for()` 对未完成 M5 bar 不再调用 `update()`
 
 ## Redis 数据结构
 
 | Key | 类型 | 内容 |
 |-----|------|------|
-| `bars:1m:{sym}` | List | 1分钟 K 线历史 |
-| `bars:5m:{sym}` | List | 5分钟 K 线历史 |
+| `bars:1m:{sym}` | List | 1分钟 K 线历史（仅正市 RTH） |
+| `bars:5m:{sym}` | List | 5分钟 K 线历史（含 `mom_atr` 指标，仅正市） |
 | `position:{sym}` | String | 仓位 JSON（含 `stop_loss`） |
-| `settings:{sym}` | String | 策略开关 JSON（含 `st_trail`） |
+| `settings:{sym}` | String | 策略开关 JSON：`{"trail_mode": 0/1/2/3}` |
 | `order:stop:{sym}` | String | 活跃止损单 `{client_order_id, trigger_price}` — 重启恢复用 |
-| `kline:1m:{sym}` | PubSub | 实时 1m K 线推送 |
-| `kline:5m:{sym}` | PubSub | 实时 5m K 线推送 |
+| `kline:1m:{sym}` | PubSub | 实时 1m K 线推送（仅 RTH） |
+| `kline:5m:{sym}` | PubSub | 实时 5m K 线推送（含 `mom_atr`） |
 | `order:update` | PubSub | 订单状态变更推送 |
 | `account:funds` | String | 账户余额 JSON |
 | `engine:heartbeat` | PubSub | 引擎心跳（每 5s） |
+
+## 指标字段说明
+
+| 字段 | 所在 bar | 说明 |
+|------|---------|------|
+| `st_value` | M1/M5 | SuperTrend 值（M1:10,3.5 / M5:10,3.0） |
+| `st_dir` | M1/M5 | ST 方向：`1`=多头, `-1`=空头 |
+| `ema21` | M1/M5 | EMA21 |
+| `mom_atr` | M5 | 归一化15分钟动量 = `(C - C_2bars_ago) / ATR_14`（预热14根后有值） |

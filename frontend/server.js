@@ -54,6 +54,17 @@ app.get("/api/data/:symbol", async (req, res) => {
             return Array.from(map.values()).sort((a, b) => a.time - b.time);
         }
 
+        // 只保留美股正市时间（09:30-16:00 ET）的 bars
+        // bars.time 为 ET fake-UTC 秒，直接按当天秒偏移判断
+        function filterRTH(bars) {
+            const RTH_OPEN = 9 * 3600 + 30 * 60;  // 09:30 = 34200s
+            const RTH_CLOSE = 16 * 3600;             // 16:00 = 57600s
+            return bars.filter(b => {
+                const secOfDay = b.time % 86400;
+                return secOfDay >= RTH_OPEN && secOfDay < RTH_CLOSE;
+            });
+        }
+
         // 计算昨日 H/L/C（从 5m bars 中筛选昨日 ET 日期数据）
         // ET fake-UTC：bars.time 已是 ET fake-UTC 秒
         function calcPrevDay(m5Bars) {
@@ -79,8 +90,8 @@ app.get("/api/data/:symbol", async (req, res) => {
 
         res.json({
             symbol,
-            m1_bars: dedupBars(m1All).slice(-MAX_BARS),
-            m5_bars: dedupBars(m5All).slice(-MAX_BARS),
+            m1_bars: filterRTH(dedupBars(m1All)).slice(-MAX_BARS),
+            m5_bars: filterRTH(dedupBars(m5All)).slice(-MAX_BARS),
             position: posRaw ? JSON.parse(posRaw) : null,
             // 优先用引擎写入的日K数据，否则 fallback 到从5m bars计算
             prev_day: prevDayRaw ? JSON.parse(prevDayRaw) : calcPrevDay(m5All),
@@ -460,14 +471,26 @@ redisSub.on("ready", () => {
     redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*", "engine:*").catch(console.error);
 });
 
+// 判断当前时刻是否在美股正市（09:30-16:00 ET），用于实时推送过滤
+function isRTH() {
+    const now = Math.floor(Date.now() / 1000);
+    const month = new Date().getUTCMonth() + 1;
+    const etOffset = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
+    const etNow = now + etOffset;
+    const secOfDay = etNow % 86400;
+    const RTH_OPEN = 9 * 3600 + 30 * 60;  // 34200
+    const RTH_CLOSE = 16 * 3600;             // 57600
+    return secOfDay >= RTH_OPEN && secOfDay < RTH_CLOSE;
+}
+
 redisSub.on("pmessage", (_pattern, channel, message) => {
     try {
         const parsed = JSON.parse(message);
 
-        // kline:5m: 收盘事件 → 更新日内连续新高状态并广播
+        // kline:5m: 收盘事件 → 更新日内连续新高状态并广播（仅正市期间）
         if (channel.startsWith('kline:5m:')) {
             const sym = channel.split(':')[2];
-            if (sym && ALL_SYMBOLS.includes(sym)) {
+            if (sym && ALL_SYMBOLS.includes(sym) && isRTH()) {
                 const count = updateNHState(sym, parsed.close);
                 // 广播 nh:update 事件给前端（用于语音播报）
                 const nhPayload = JSON.stringify({
@@ -476,6 +499,12 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
                 });
                 wss.clients.forEach(c => c.readyState === 1 && c.send(nhPayload));
             }
+        }
+
+        // 盘前/盘后：拦截 kline 和 bars 实时推送，只透传其他频道（order/position/account/engine 等）
+        const isBarChannel = channel.startsWith('kline:') || channel.startsWith('bars:');
+        if (isBarChannel && !isRTH()) {
+            return;  // 非正市时段，丢弃行情推送
         }
 
         const payload = JSON.stringify({ channel, data: parsed });

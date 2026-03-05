@@ -40,7 +40,7 @@ from nautilus_trader.model.enums import (
 )
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
-from events import BarCollectedEvent
+from events import BarCollectedEvent, BarCollectedM5Event
 
 
 # ── Redis 配置 ────────────────────────────────────────────────────────────
@@ -129,6 +129,52 @@ class _STState:
         self._prev_lower_b = lower_b
         self._prev_dir     = st_dir
         return round(st_val, 4), st_dir, round(upper_b, 4), round(lower_b, 4)
+
+
+# ============================================================
+# 工具类 2b：M5 归一化15分钟动量状态机
+# ============================================================
+class _MomentumATRState:
+    """
+    每根 M5 bar 收盘时计算：
+      mom_atr = (close_now - close_2bars_ago) / ATR_14
+
+    其中：
+      - 15分钟滑动窗口 = 当前 M5 bar 距上上一根 M5 bar（3根*5min=15min）
+      - ATR_14 = 14周期 Wilder ATR 的均值（预热完成后输出非 None）
+
+    该值代表过去15分钟内相对于 ATR 的价格移动幅度，可用于多标的动量排序。
+    """
+
+    def __init__(self, atr_period: int = 14):
+        self.atr_period = atr_period
+        # 使用鹦鹉螺内置 ATR（Wilder 指数平滑，与 SuperTrend 一致）
+        self._atr = AverageTrueRange(atr_period, MovingAverageType.WILDER)
+        # 滑动 close 队列，保留最近3根（index 0=最旧，index 2=最新）
+        self._closes: list[float] = []
+
+    def update(self, h: float, lo: float, c: float
+               ) -> Optional[float]:
+        """
+        喂入 (h, lo, c)，返回 mom_atr（ATR 预热完成且有 ≥3 根历史后才输出）。
+        """
+        # 更新 ATR
+        self._atr.update_raw(h, lo, c)
+        # 维护 close 队列，只保最近3根
+        self._closes.append(c)
+        if len(self._closes) > 3:
+            self._closes.pop(0)
+
+        # 预热检查：ATR 就绪 + 至少累积了3根（可取 close_2bars_ago）
+        if not self._atr.initialized or len(self._closes) < 3:
+            return None
+
+        atr_val = self._atr.value
+        if atr_val == 0:
+            return None
+
+        mom = (self._closes[-1] - self._closes[0]) / atr_val
+        return round(mom, 4)
 
 
 # ============================================================
@@ -227,7 +273,8 @@ class BarLoggerStrategyConfig(StrategyConfig, frozen=True):
     instrument_ids: tuple[str, ...] = ()
     bar_step:       int   = 1
     st_period:      int   = 10
-    st_mult:        float = 3.5
+    st_mult:        float = 3.5    # M1 ST 乘数
+    st_mult_m5:     float = 3.0    # M5 ST 乘数（更敏感，与 TradingView 默认对齐）
     ema_period:     int   = 21
     history_days:   int   = 1
     backtest_mode:  bool  = False
@@ -265,6 +312,7 @@ class BarLoggerStrategy(Strategy):
         # 每个标的状态机（M5 维度）
         self._st_m5:  dict[str, _STState]  = {}
         self._ema_m5: dict[str, _EMAState] = {}
+        self._mom_m5: dict[str, _MomentumATRState] = {}  # M5 归一化动量（10, 3.0 ATR14）
 
         # 历史 bar 缓冲（按标的聚合， flush 时一次性覆盖写入 Redis）
         self._hist_m1: dict[str, list[dict]] = defaultdict(list)
@@ -363,7 +411,9 @@ class BarLoggerStrategy(Strategy):
         self.log.info(
             f"[Strategy] 初始化 {len(instrument_ids)} 个标的: "
             f"{[str(i) for i in instrument_ids]}  "
-            f"ST({self.config.st_period},{self.config.st_mult})  EMA{self.config.ema_period}"
+            f"M1-ST({self.config.st_period},{self.config.st_mult})  "
+            f"M5-ST({self.config.st_period},{self.config.st_mult_m5})  "
+            f"EMA{self.config.ema_period}"
         )
 
         # ──【修复】等待合约加载（针对 IBKR secdefnj 慢的情况） ──
@@ -413,8 +463,9 @@ class BarLoggerStrategy(Strategy):
             if sym not in self._st_m1:
                 self._st_m1[sym]     = _STState(self.config.st_period, self.config.st_mult)
                 self._ema_m1[sym]    = _EMAState(self.config.ema_period)
-                self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult)
+                self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult_m5)
                 self._ema_m5[sym]    = _EMAState(self.config.ema_period)
+                self._mom_m5[sym]    = _MomentumATRState(atr_period=14)
                 self._m5_bucket[sym] = _M5Bucket()
                 self.log.info(f"[Strategy][Async] {sym}: 状态机初始化完成")
 
@@ -577,6 +628,12 @@ class BarLoggerStrategy(Strategy):
         # ts_event 是 bar 开始时间（即 bar 所属分钟），直接使用
         et = self._et_fake_utc(data.ts_event)
 
+        # ─ 盘后 bar（≥16:00 ET）：直接跳过，不计算指标不写 Redis ─
+        RTH_CLOSE = 16 * 3600
+        if et % 86400 >= RTH_CLOSE:
+            self.log.debug(f"[HIST] {sym}: 跳过盘后 bar time={et}")
+            return
+
         n = len(self._hist_m1[sym])   # 当前已缓冲数量
         if n == 0:
             self.log.info(
@@ -623,10 +680,14 @@ class BarLoggerStrategy(Strategy):
             # 计算 M5 指标，但不写 Redis
             o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
             if sym not in self._st_m5:
-                self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult)
+                self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
                 self._ema_m5[sym] = _EMAState(self.config.ema_period)
+                self._mom_m5[sym] = _MomentumATRState(atr_period=14)
+            if sym not in self._mom_m5:
+                self._mom_m5[sym] = _MomentumATRState(atr_period=14)
             st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
             ema21_5 = self._ema_m5[sym].update(c5)
+            mom_atr5 = self._mom_m5[sym].update(h5, lo5, c5)
             m5_bar = {
                 **m5_out,
                 "ema21":    ema21_5,
@@ -634,6 +695,7 @@ class BarLoggerStrategy(Strategy):
                 "st_dir":   st_dir5,
                 "st_upper": st_up5,
                 "st_lower": st_lo5,
+                "mom_atr":  mom_atr5,
             }
             self._hist_m5[sym].append(m5_bar)
             self.log.debug(
@@ -763,13 +825,16 @@ class BarLoggerStrategy(Strategy):
         start_utc = self.clock.utc_now() - timedelta(minutes=45)
         self.log.info(f"[POLL] {sym}: 拉取最近 45min 数据 (Start={start_utc})...")
         self.request_bars(bar_type, start=start_utc)
-        
         # 递归安排下一次
         self._schedule_poll(sym)
 
     def _inc_update_redis(self, sym: str, bar_dict: dict) -> None:
-        """增量更新 Redis（去重 + M1 写入 + M5 聚合 + PUBLISH）"""
+        """增量更新 Redis（去重 + M1 写入 + M5 聚合 + PUBLISH），仅 RTH 正市数据"""
         if not self._redis: return
+        # 盘后 bar（≥16:00 ET）：不写 Redis，不影响指标
+        RTH_CLOSE = 16 * 3600
+        if bar_dict["time"] % 86400 >= RTH_CLOSE:
+            return
         try:
             key_m1 = f"bars:1m:{sym}"
             # 1. 去重检查：只处理比 Redis 中最后一根更晚的 bar
@@ -792,9 +857,11 @@ class BarLoggerStrategy(Strategy):
                 o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
                 st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
                 ema21_5 = self._ema_m5[sym].update(c5)
+                mom_atr5 = self._mom_m5[sym].update(h5, lo5, c5) if sym in self._mom_m5 else None
                 m5_bar = {
                     **m5_out, "symbol": sym, "ema21": ema21_5,
                     "st_value": st_val5, "st_dir": st_dir5, "st_upper": st_up5, "st_lower": st_lo5,
+                    "mom_atr": mom_atr5,
                 }
                 m5_json = json.dumps(m5_bar)
                 key_m5 = f"bars:5m:{sym}"
@@ -953,7 +1020,7 @@ class BarLoggerStrategy(Strategy):
 
         if sym not in self._st_m5:
             self.log.warning(f"[M5] {sym}: M5 状态机未初始化，临时创建")
-            self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult)
+            self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
             self._ema_m5[sym] = _EMAState(self.config.ema_period)
 
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
@@ -1018,6 +1085,16 @@ class BarLoggerStrategy(Strategy):
         except Exception as e:
             self.log.error(f"[M5] {sym}: ✗ Redis 写入失败: {e}")
 
+        # ★ 发布内部事件供 ExitManager 执行 M5 ST 跟踪止盈（publish M5 bar 才触发）
+        if publish:
+            bar_type = self._bar_types.get(sym)
+            iid_str = str(bar_type.instrument_id) if bar_type else f"{sym}.NASDAQ"
+            self.msgbus.publish(
+                "bar.collected.m5",
+                BarCollectedM5Event(sym, {**m5_bar, "instrument_id": iid_str})
+            )
+
+
     # ── QuoteTick 实时更新（P2）────────────────────────────────────
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """
@@ -1035,6 +1112,10 @@ class BarLoggerStrategy(Strategy):
           - on_bar() 收盘时设 _cur_bar[sym] = None，下一个 tick 会重新初始化
         """
         sym = tick.instrument_id.symbol.value
+        # 盘后 tick（≥16:00 ET）：不推送到前端
+        et_tick = self._et_fake_utc(tick.ts_event)
+        if not self._is_rth(et_tick):
+            return
         # 使用 bid/ask 中间价作为证券实时价格近似
         mid = (float(tick.bid_price) + float(tick.ask_price)) / 2
 

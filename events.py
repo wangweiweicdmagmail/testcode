@@ -40,3 +40,18 @@ class EMATrailSettingsEvent(Event):
         
         self.symbol = symbol
         self.active = active
+
+
+class BarCollectedM5Event(Event):
+    """
+    M5 K 线收盘时由 strategy.py 发布，供 ExitManager 执行 M5 ST 跟踪止盈。
+    携带 M5 bar 的 st_value / st_dir（参数 10, 3.0）。
+    """
+    def __init__(self, symbol: str, bar_dict: dict):
+        self._ts_event = time.time_ns()
+        self._ts_init  = time.time_ns()
+        self._id = UUID4()
+
+        self.symbol = symbol
+        self.bar = bar_dict  # 包含 M5 OHLC, st_value, st_dir, instrument_id 等
+

@@ -258,17 +258,17 @@ class OrderGatewayActor(Strategy):
     def _on_st_trail_change(self, event) -> None:
         """ST 跟踪止损开关变更"""
         self._st_trail_active[event.symbol] = event.active
+        status = "开启 ✓" if event.active else "关闭"
         self.log.info(
-            f"[Trail] {event.symbol} ST 跟踪止损已"
-            f"{'\u5f00启 ✓' if event.active else '关闭'}"
+            f"[Trail] {event.symbol} ST 跟踪止损已{status}"
         )
 
     def _on_ema_trail_change(self, event) -> None:
         """EMA21 跟踪止损开关变更"""
         self._ema_trail_active[event.symbol] = event.active
+        status = "开启 ✓" if event.active else "关闭"
         self.log.info(
-            f"[Trail] {event.symbol} EMA21 跟踪止损已"
-            f"{'\u5f00启 ✓' if event.active else '关闭'}"
+            f"[Trail] {event.symbol} EMA21 跟踪止损已{status}"
         )
 
     def _on_bar_collected_trail(self, event) -> None:
@@ -386,10 +386,12 @@ class OrderGatewayActor(Strategy):
             if abs(new_sl - current_sl) < 0.01:
                 continue
 
+            direction = "多" if pos.is_long else "空"
+            candidates_str = [(n, f"{v:.2f}") for n, v in candidate_sls]
             self.log.info(
                 f"[Trail] {sym}: [{best_name}] 止损价 {current_sl:.2f} → {new_sl:.2f}  "
-                f"({'\u591a' if pos.is_long else '\u7a7a'}头)  "
-                f"候选: {[(n, f'{v:.2f}') for n, v in candidate_sls]}"
+                f"({direction}头)  "
+                f"候选: {candidates_str}"
             )
 
             # 执行改单

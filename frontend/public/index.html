@@ -1010,14 +1010,21 @@
             <input type="checkbox" id="st-trail-toggle">
             <span class="slider"></span>
           </label>
-          <span id="st-trail-label">ST跟踪止盈</span>
+          <span id="st-trail-label">M1 ST跟踪</span>
+        </div>
+        <div class="toggle-wrap">
+          <label class="toggle">
+            <input type="checkbox" id="st-trail-m5-toggle">
+            <span class="slider"></span>
+          </label>
+          <span id="st-trail-m5-label">M5 ST跟踪</span>
         </div>
         <div class="toggle-wrap">
           <label class="toggle">
             <input type="checkbox" id="ema-trail-toggle">
             <span class="slider"></span>
           </label>
-          <span id="ema-trail-label">EMA跟踪止盈</span>
+          <span id="ema-trail-label">EMA跟踪</span>
         </div>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
@@ -2488,41 +2495,63 @@
       location.reload();
     });
 
-    // 跟踪止盈互斥 toggle（ST 和 EMA 只能选一）
+    // ─── 跟踪止盈开关（互斥，写 trail_mode: 0=关 1=M1-ST 2=M5-ST 3=EMA）───
     const stToggle = document.getElementById('st-trail-toggle');
+    const stM5Toggle = document.getElementById('st-trail-m5-toggle');
     const emaToggle = document.getElementById('ema-trail-toggle');
     const stLbl = document.getElementById('st-trail-label');
+    const stM5Lbl = document.getElementById('st-trail-m5-label');
     const emaLbl = document.getElementById('ema-trail-label');
 
-    async function setTrail(type, active) {
+    const TRAIL_COLOR = { st: '#26a69a', stM5: '#4ade80', ema: '#60a5fa' };
+
+    async function setTrailMode(mode) {
       await fetch(`/api/settings/${SYMBOL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [type]: active }),
+        body: JSON.stringify({ trail_mode: mode }),
       });
     }
 
+    function clearAllTrailUI() {
+      stToggle.checked = false; stLbl.style.color = '#787b86';
+      stM5Toggle.checked = false; stM5Lbl.style.color = '#787b86';
+      emaToggle.checked = false; emaLbl.style.color = '#787b86';
+    }
+
     stToggle.addEventListener('change', async e => {
+      clearAllTrailUI();
       if (e.target.checked) {
-        // 关闭 EMA trail
-        emaToggle.checked = false;
-        emaLbl.style.color = '#787b86';
-        await setTrail('ema_trail', false);
+        stToggle.checked = true;
+        stLbl.style.color = TRAIL_COLOR.st;
+        await setTrailMode(1);   // M1 ST
+      } else {
+        await setTrailMode(0);   // 关闭
       }
-      stLbl.style.color = e.target.checked ? '#26a69a' : '#787b86';
-      await setTrail('st_trail', e.target.checked);
+    });
+
+    stM5Toggle.addEventListener('change', async e => {
+      clearAllTrailUI();
+      if (e.target.checked) {
+        stM5Toggle.checked = true;
+        stM5Lbl.style.color = TRAIL_COLOR.stM5;
+        await setTrailMode(2);   // M5 ST
+      } else {
+        await setTrailMode(0);
+      }
     });
 
     emaToggle.addEventListener('change', async e => {
+      clearAllTrailUI();
       if (e.target.checked) {
-        // 关闭 ST trail
-        stToggle.checked = false;
-        stLbl.style.color = '#787b86';
-        await setTrail('st_trail', false);
+        emaToggle.checked = true;
+        emaLbl.style.color = TRAIL_COLOR.ema;
+        await setTrailMode(3);   // EMA M5
+      } else {
+        await setTrailMode(0);
       }
-      emaLbl.style.color = e.target.checked ? '#60a5fa' : '#787b86';
-      await setTrail('ema_trail', e.target.checked);
     });
+
 
     // ─── 标的切换 ────────────────────────────────────────────
     const symbolSelect = document.getElementById('symbol-select');
