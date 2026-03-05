@@ -489,7 +489,16 @@ class BarLoggerStrategy(Strategy):
             ).astimezone(timezone.utc)
 
             self.log.info(f"[Strategy][Async] {sym}: → request_bars(M1/DAY)")
-            self.request_bars(bar_type, start=hist_start_utc)
+            # 回测模式：必须加 end 参数，否则 IBKR 默认 end=now（当前时间）
+            # 若今天尚未开盘，则 IBKR 只返回目标日 04:00 → 今天 now 的数据，全部是盘前，RTH=0
+            if self.config.backtest_mode:
+                hist_end_utc = datetime(
+                    target_date.year, target_date.month, target_date.day,
+                    20, 0, 0, tzinfo=ZoneInfo("America/New_York")   # 16:00 ET + 4h 缓冲（IBKR end 是开区间）
+                ).astimezone(timezone.utc)
+                self.request_bars(bar_type, start=hist_start_utc, end=hist_end_utc)
+            else:
+                self.request_bars(bar_type, start=hist_start_utc)
 
             # 请求日K
             daily_bar_type = BarType(
