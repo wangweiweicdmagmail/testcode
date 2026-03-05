@@ -134,6 +134,9 @@ cd frontend && node server.js
 - **UI 稳定性修复（2026-03-05）** ✅：
   - 引擎心跳文字加 `min-width:4.5em`，防止在线/离线切换时工具栏抖动
   - 切换标的时不再重复播报"引擎已上线"（`sessionStorage` 跨页面保持在线状态）
+- **开仓重复打点修复（2026-03-06）** ✅：
+  - `FILLED` 事件和 `POSITION_OPENED` 事件均调用 `setEntryLine` + 加 marker，导致一次开仓出现两个箭头
+  - 修复：`POSITION_OPENED` 改为只在 `activeOrderLines.entryLine` 不存在时才补画（外部/重启恢复场景），不再重复推 marker
 
 
 ## Redis 数据结构
