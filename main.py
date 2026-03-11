@@ -143,6 +143,7 @@ GATEWAY_INSTRUMENTS_EXTRA = [
     # 半导体/其他
     "TSM.NYSE",
     "AVGO.NASDAQ",
+    "MU.NASDAQ",
     "PLTR.NYSE",
 ]
 
