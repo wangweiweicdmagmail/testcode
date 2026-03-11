@@ -2920,7 +2920,7 @@
         });
     }
 
-    chartEl.addEventListener('mousemove', (e) => {
+    document.addEventListener('mousemove', (e) => {
         if (!isDraggingLP) return;
         const rect = chartEl.getBoundingClientRect();
         const coord = e.clientY - rect.top;
