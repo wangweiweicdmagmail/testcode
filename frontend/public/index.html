@@ -2775,6 +2775,7 @@
             document.getElementById('lop-confirm').disabled = true;
             document.getElementById('lop-hint').textContent =
                 lpPrice == null ? '请在图表上拖动蓝色线设定入场价' : 'ATR 数据不足（需 ≥15 根 M1 bar）';
+            console.log('[LimitOrder] 计算敲置: lpPrice=', lpPrice, 'ATR14=', atr14);
             return;
         }
 
@@ -2820,6 +2821,14 @@
         document.getElementById('lop-hint').textContent =
             pct != null ? `占净资产 ${pct}%` : '';
 
+        console.log('[LimitOrder] 计算结果:', {
+            lpDir, lpPrice: lpPrice.toFixed(2),
+            atr14: atr14.toFixed(4), atrMult, rr,
+            stopDist: stopDist.toFixed(4),
+            slPrice: slPrice.toFixed(2), tpPrice: tpPrice.toFixed(2),
+            qty, tpQty, cost: cost.toFixed(0),
+        });
+
         return { slPrice, tpPrice, qty, tpQty };
     }
 
@@ -2831,8 +2840,10 @@
 
         // 默认入场价 = 当前收盘价
         lpPrice = latestClose || null;
-        // 方向根据 close vs EMA21 自动判等（简化：默认买入）
         lpDir = 'BUY';
+
+        console.log('[LimitMode] 进入限价模式, 初始入场价=', lpPrice,
+            '当前 M1 bar 数=', currentBars ? currentBars.length : 0);
 
         limitPanel.classList.add('active');
         if (lpPrice) {
@@ -2844,6 +2855,7 @@
     }
 
     function exitLimitMode() {
+        console.log('[LimitMode] 退出限价模式, lpPrice=', lpPrice);
         limitMode = false;
         isDraggingLP = false;
         lpPrice = null;
@@ -2894,6 +2906,7 @@
             isDraggingLP = false;
             document.body.style.cursor = '';
             if (dragCap) dragCap.classList.remove('active');
+            console.log('[LimitMode] 拖动结束, lpPrice=', lpPrice, 'lpDir=', lpDir);
         }
     });
 
@@ -2930,6 +2943,12 @@
 
         speak(`${SYMBOL} 限价单已下发，${lpDir === 'BUY' ? '做多' : '做空'} ${qty}股，限价${lpPrice.toFixed(2)}，止损${slPrice.toFixed(2)}`, true);
 
+        console.log('[LimitOrder] 确认下单 → POST /api/order:', {
+            symbol: SYMBOL, side: lpDir, qty, tpQty,
+            price: lpPrice, stop_loss: slPrice,
+            tp_price: tpPrice, entry_price: lpPrice,
+            order_type: 'LIMIT_BRACKET',
+        });
         try {
             const resp = await fetch(`/api/order/${SYMBOL}`, {
                 method: 'POST',

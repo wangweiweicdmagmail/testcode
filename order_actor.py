@@ -1046,6 +1046,7 @@ class OrderGatewayActor(Strategy):
                 tp_order,
                 entry_price,
                 instrument,
+                'LIMIT_BRACKET',  # 类型标记，用于 on_order_filled 中區分 BRACKET vs LIMIT_BRACKET
             )
 
             # 只提交入场单
@@ -1297,10 +1298,9 @@ class OrderGatewayActor(Strategy):
         if coid in self._pending_sl:
             pending = self._pending_sl.pop(coid)
 
-            if len(pending) == 4 and isinstance(pending[1], object) and \
-                    getattr(pending[1], 'order_type', None) is not None:
-                # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument) ──
-                sl_order, tp_order, entry_price, instrument = pending
+            if len(pending) == 5 and pending[4] == 'LIMIT_BRACKET':
+                # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument, 'LIMIT_BRACKET') ──
+                sl_order, tp_order, entry_price, instrument, _ = pending
                 self.log.info(
                     f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 已成交，"
                     f"提交止损={sl_order.client_order_id} SL@{sl_order.trigger_price} "
@@ -1346,7 +1346,7 @@ class OrderGatewayActor(Strategy):
             # 检查是否是 LIMIT_BRACKET 的止盈单成交
             coid_str = coid
 
-            # ─── 情况A：止盈单成交 → 取消止盈单 ──────────────────────
+            # ─── 情况A：止损单成交（止损触发）→ 反向取消止盈单 ─────────────────
             if coid_str in self._sl_to_tp:
                 tp_coid_to_cancel = self._sl_to_tp.pop(coid_str)
                 self._pending_tp.pop(tp_coid_to_cancel, None)  # 清除止盈记录
