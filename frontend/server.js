@@ -124,6 +124,8 @@ app.get("/api/data/:symbol", async (req, res) => {
             symbol,
             m1_bars: filterRTH(dedupBars(m1All)).slice(-MAX_BARS),
             m5_bars: filterRTH(dedupBars(m5All)).slice(-MAX_BARS),
+            // 含盘前预热数据的原始 M1 bars（供前端 ATR14 计算，不用于图表显示）
+            m1_atr_bars: dedupBars(m1All).slice(-50),
             position: posRaw ? JSON.parse(posRaw) : null,
             // 优先用引擎写入的日K数据，否则 fallback 到从5m bars计算
             prev_day: prevDayRaw ? JSON.parse(prevDayRaw) : calcPrevDay(m5All),

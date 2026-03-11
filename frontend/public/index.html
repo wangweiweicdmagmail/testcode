@@ -1493,7 +1493,8 @@
     let SYMBOL = (urlParams.get('symbol') || 'QQQ').toUpperCase();
 
     // ─── 全局状态：缓存数据和开仓模式 ──────────────────────────────────
-    let currentBars = [];   // 最近加载的 M1 bars
+    let currentBars = [];   // 最近加载的 M1 RTH bars（用于图表）
+    let atrBars = [];        // M1 bars 含盘前预热数据（用于 ATR14 计算）
     let latestST = null; // 最新 ST 值
     let latestSTDir = null; // 1=多头 -1=空头
     let latestClose = null; // 最新收盘价
@@ -1899,7 +1900,7 @@
           const err = await res.json();
           throw new Error(err.error);
         }
-        const { symbol, m1_bars, m5_bars, position, prev_day } = await res.json();
+        const { symbol, m1_bars, m5_bars, m1_atr_bars, position, prev_day } = await res.json();
 
         document.getElementById("symbol-label").textContent = symbol;
         document.getElementById("loading").style.display = "none";
@@ -1947,8 +1948,15 @@
         // 工具栏价格
         updateToolbar(m1_bars);
 
-        // 存储全局数据与最新 ST
+        // 存储全局数据
         currentBars = m1_bars;
+        // 存储含盘前预热数据的 bars 用于 ATR14 计算
+        if (m1_atr_bars && m1_atr_bars.length > 0) {
+            atrBars = m1_atr_bars;
+            console.log('[ATR] atrBars 已加载，共', m1_atr_bars.length, '根 bars（含盘前）');
+        } else {
+            atrBars = m1_bars;  // fallback
+        }
         latestClose = m1_bars[m1_bars.length - 1]?.close;
         const lastST = [...m1_bars].reverse().find(
           b => b.st_value != null && b.st_value !== 0 && b.st_dir != null
@@ -2702,8 +2710,10 @@
 
     // ─── ATR14（Wilder's Smoothed）计算 ───────────────────────────────
     function calcATR14(bars) {
-        if (!bars || bars.length < 15) return null;
-        const recent = bars.slice(-28);  // 多取一点数据保证 14 期预热
+        // 优先使用含盘前预热数据的 atrBars；bars 仅作 fallback
+        const src = (atrBars && atrBars.length >= 15) ? atrBars : (bars || []);
+        if (!src || src.length < 15) return null;
+        const recent = src.slice(-28);  // 多取一点保证预热充分
         // 第一个 ATR 用简单平均（第1~14根TR的均值）
         let tr;
         const trs = [];
