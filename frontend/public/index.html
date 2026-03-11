@@ -2273,7 +2273,7 @@
               case 'FILLED': {
                 if (orderType === 'MARKET' || orderType === '') {
                   const entryP = parseFloat(o.last_px);
-                  const filledQty = parseFloat(o.last_qty || o.quantity || 0);
+                  const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0); // 累计成交量
                   setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
                     currentPosition = {
@@ -2294,7 +2294,7 @@
                   // LIMIT_BRACKET 入场限价单成交 → 清除挂单面板，建立持仓
                   clearPendingEntry();
                   const entryP = parseFloat(o.last_px);
-                  const filledQty = parseFloat(o.last_qty || o.quantity || 0);
+                  const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0); // 累计成交量
                   setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
                     currentPosition = {

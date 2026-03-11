@@ -1306,8 +1306,8 @@ class OrderGatewayActor(Strategy):
                 # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument, 'LIMIT_BRACKET') ──
                 sl_order, tp_order, entry_price, instrument, _ = pending
 
-                # ✔ 用实际成交量重建止损单全仓）和止盈单（半仓）
-                actual_qty  = int(event.last_qty)  # 实际成交股数
+                # ✔ 用累计成交量（filled_qty）重建止损单全仓）和止盈单（半仓）
+                actual_qty  = int(event.filled_qty)  # 累计实际成交股数（非单笔 last_qty）
                 half_qty    = actual_qty // 2
                 sl_qty_new  = instrument.make_qty(Decimal(str(actual_qty)))
                 tp_qty_new  = instrument.make_qty(Decimal(str(half_qty)))
@@ -1350,8 +1350,8 @@ class OrderGatewayActor(Strategy):
                 # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
                 sl_order, sl_steps, sl_step_secs, instrument = pending
 
-                # ✔ 用实际成交量重建止损单
-                actual_qty = int(event.last_qty)
+                # ✔ 用累计成交量（filled_qty）重建止损单
+                actual_qty = int(event.filled_qty)  # 累计实际成交股数（非单笔 last_qty）
                 sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
                 sl_order_new = self.order_factory.stop_market(
                     instrument_id=sl_order.instrument_id,
