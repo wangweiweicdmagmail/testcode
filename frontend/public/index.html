@@ -2138,6 +2138,9 @@
           // 触发 input 事件，让限价单面板重新计算
           lopEl.dispatchEvent(new Event('input'));
         }
+        // 同步市价单最大亏损
+        const opEl = document.getElementById('op-max-loss');
+        if (opEl) opEl.value = maxLossVal;
       }
     }
 
