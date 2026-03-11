@@ -2178,18 +2178,24 @@
               case 'FILLED': {
                 if (orderType === 'MARKET' || orderType === '') {
                   const entryP = parseFloat(o.last_px);
-                  setEntryLine(entryP, o.side, qty);
+                  const filledQty = parseFloat(o.last_qty || o.quantity || 0); // ✔ 实际成交量
+                  setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
                     currentPosition = {
                       symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
-                      avg_px_open: entryP, quantity: qty,
+                      avg_px_open: entryP, quantity: filledQty,
                       unrealized_pnl: 0, stop_loss: null,
                     };
                     document.getElementById('position-panel').style.display = 'block';
                     refreshPositionPanel(currentPosition);
+                  } else {
+                    // 持仓已存在（部分成交第二笔），更新数量
+                    currentPosition.quantity = filledQty;
+                    currentPosition.avg_px_open = entryP;
+                    refreshPositionPanel(currentPosition);
                   }
                   speak(`${sym} ${sideLabel}订单成交，成交价 ${o.last_px}`, true);
-                  showToast(`✅ ${sym} ${sideLabel}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                  showToast(`✅ ${sym} ${sideLabel}成交 @${o.last_px} x${filledQty}`, 'ok');
                 } else if (orderType === 'STOP_MARKET') {
                   clearOrderLines();
                   clearPositionUI();
