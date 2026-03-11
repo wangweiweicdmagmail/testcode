@@ -2696,21 +2696,8 @@
     }
 
     // 进入开仓模式
-    async function enterOrderMode() {
-      // 异步获取真实账户余额
-      try {
-        const resp = await fetch('/api/account');
-        const data = await resp.json();
-        const usd = (data.balances || []).find(b => b.currency === 'USD') || (data.balances || [])[0];
-        accountInfo = {
-          ...data,
-          engine_online: !data.engine_offline,
-          total_equity:   usd ? usd.total : 0,
-          available_cash: usd ? usd.free  : 0,
-        };
-      } catch (e) {
-        accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
-      }
+    function enterOrderMode() {
+      // accountInfo 已由 updateAccountPanel（Redis SSE）实时维护，无需重新 HTTP fetch
 
       // 初始止损价：优先用 ST 值；如无则按当前价 ±1% 作为初始占位
       // 方向会在 recalcOrder() 内由 SL 与当前价的位置关系自动判定
