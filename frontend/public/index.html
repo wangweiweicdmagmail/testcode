@@ -635,8 +635,19 @@
     #drag-capture.active {
       display: block;
     }
+     /* 开仓对话框背景遮罩 */
+     #order-backdrop {
+       display: none;
+       position: fixed;
+       inset: 0;
+       background: rgba(0, 0, 0, .45);
+       z-index: 55;  /* 对话框 z-index:60 的下方 */
+       backdrop-filter: blur(1px);
+       transition: opacity .2s;
+     }
+     #order-backdrop.active { display: block; }
 
-    /* 浮动订单面板 */
+     /* 浮动订单面板 */
     #order-panel {
       display: none;
       position: fixed;
@@ -1221,6 +1232,8 @@
 
   <!-- 主区域：左K线 + 右指标 -->
   <div id="main-area">
+    <!-- 开仓对话框背景遮罩 -->
+    <div id="order-backdrop"></div>
 
     <div id="chart-container">
       <div id="loading">⏳ 加载数据中…</div>
@@ -2725,6 +2738,7 @@
       // 显示一体化控件
       slHandle.classList.add('active');
       orderPanel.classList.add('active');
+      document.getElementById('order-backdrop').classList.add('active');
 
       applySL(initSL);
       recalcOrder(); // 面板打开时立即计算仓位占比
@@ -2738,6 +2752,7 @@
       slHandle.classList.remove('active');
       dragCapture.classList.remove('active');
       orderPanel.classList.remove('active');
+      document.getElementById('order-backdrop').classList.remove('active');
       // 注意：不自动切 modifyMode，等用户点击止损线标签
     }
 
@@ -3054,6 +3069,7 @@
             '当前 M1 bar 数=', currentBars ? currentBars.length : 0);
 
         limitPanel.classList.add('active');
+        document.getElementById('order-backdrop').classList.add('active');
         if (lpPrice) {
             setLPLine(lpPrice);
             updateLPHandlePosition();
@@ -3068,6 +3084,7 @@
         isDraggingLP = false;
         lpPrice = null;
         limitPanel.classList.remove('active');
+        document.getElementById('order-backdrop').classList.remove('active');
         if (lpHandle) lpHandle.classList.remove('active');
         clearLPLines();
         document.body.style.cursor = '';
