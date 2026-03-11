@@ -144,6 +144,7 @@ GATEWAY_INSTRUMENTS_EXTRA = [
     "TSM.NYSE",
     "AVGO.NASDAQ",
     "MU.NASDAQ",
+    "NFLX.NASDAQ",
     "PLTR.NYSE",
 ]
 
