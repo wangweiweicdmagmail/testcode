@@ -2720,7 +2720,7 @@
       slPriceLine = candleSeries.createPriceLine({
         price: initSL,
         color: '#ef5350',
-        lineWidth: 1,
+        lineWidth: 4,
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
         title: `止损 ${initSL.toFixed(2)}`,
@@ -2731,6 +2731,7 @@
       orderPanel.classList.add('active');
 
       applySL(initSL);
+      recalcOrder(); // 面板打开时立即计算仓位占比
     }
 
     // 退出开仓模式
@@ -2758,7 +2759,7 @@
         modifyTempLine = candleSeries.createPriceLine({
           price: slPrice,
           color: '#ff9800',
-          lineWidth: 1,
+          lineWidth: 4,
           lineStyle: LightweightCharts.LineStyle.Dashed,
           axisLabelVisible: true,
           title: '→ 新止损',
