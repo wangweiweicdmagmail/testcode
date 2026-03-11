@@ -1319,6 +1319,10 @@
           <span class="lop-calc-label">仓位金额</span>
           <span class="lop-calc-val" id="lop-cost-val">—</span>
         </div>
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">仓位占比</span>
+          <span class="lop-calc-val blue" id="lop-pct-val">—</span>
+        </div>
 
         <div id="lop-hint" class="lop-hint"></div>
 
@@ -1399,6 +1403,10 @@
         <div class="op-field">
           <span class="op-label">开仓金额</span>
           <span id="op-cost" class="op-calc-val">—</span>
+        </div>
+        <div class="op-field">
+          <span class="op-label">仓位占比</span>
+          <span id="op-position-pct" class="op-calc-val blue">—</span>
         </div>
 
         <!-- 资金占比提示 -->
@@ -2585,11 +2593,21 @@
       const cost = qty * entry;
       opCost.textContent = qty > 0 ? `$${cost.toFixed(0)}` : '—';
       const displayTotal = total > 0 ? total : null;
+      // 仓位占比独立行
+      const opPosPctEl = document.getElementById('op-position-pct');
+      if (opPosPctEl) {
+        if (qty > 0 && displayTotal) {
+          const pct = cost / displayTotal * 100;
+          opPosPctEl.textContent = `${pct.toFixed(1)}%`;
+        } else {
+          opPosPctEl.textContent = '—';
+        }
+      }
       if (qty > 0 && displayTotal) {
         const pct = cost / displayTotal * 100;
-        opCapitalHint.textContent = `💡 占用 $${cost.toFixed(0)}  (账户$${(displayTotal / 10000).toFixed(1)}万的 ${pct.toFixed(1)}%)${accountInfo.engine_online === false ? '  ⚠ 引擎離线' : ''}`;
+        opCapitalHint.textContent = `${accountInfo.engine_online === false ? '⚠ 引擎离线' : ''}`;
       } else if (qty > 0) {
-        opCapitalHint.textContent = `💡 占用 $${cost.toFixed(0)}  (引擎未连接，资金校验已跳过)`;
+        opCapitalHint.textContent = `⚠ 引擎未连接，资金校验已跳过`;
       } else {
         opCapitalHint.textContent = '请先设置止损价';
       }
@@ -2957,6 +2975,14 @@
             qty > 0 ? `${qty} 股 (止盈 ${tpQty})` : '⚠️ <1股';
         document.getElementById('lop-cost-val').textContent =
             `$${cost.toLocaleString('en-US', {maximumFractionDigits: 0})}`;
+        // 仓位占比
+        const lopPctEl = document.getElementById('lop-pct-val');
+        if (total > 0 && cost > 0) {
+          const pct = cost / total * 100;
+          lopPctEl.textContent = `${pct.toFixed(1)}%`;
+        } else {
+          lopPctEl.textContent = '—';
+        }
 
         // 方向按钮同步
         setLpDir(lpDir);
