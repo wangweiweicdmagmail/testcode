@@ -1121,6 +1121,10 @@ class OrderGatewayActor(Strategy):
                     tp = getattr(order, "trigger_price", None)
                     if tp is not None:
                         msg["trigger_price"] = str(tp)
+                    # LIMIT 单有 price（挂单限价）
+                    lp = getattr(order, "price", None)
+                    if lp is not None:
+                        msg["price"] = str(lp)
             except Exception:
                 pass
             if extra:
@@ -1753,6 +1757,55 @@ class OrderGatewayActor(Strategy):
             self.log.error(f"[Close] 平仓失败: {e}")
             return {"error": str(e)}
 
+    async def _async_cancel_entry(self, symbol: str, client_order_id: str) -> dict:
+        """取消挂单中的限价入场单，并清理对应的 SL/TP 草稿（_pending_sl）。"""
+        try:
+            from nautilus_trader.model.identifiers import ClientOrderId
+            coid_obj = ClientOrderId(client_order_id)
+            order = self.cache.order(coid_obj)
+            if order is None:
+                return {"error": f"找不到订单 {client_order_id}"}
+            order_status = getattr(order.status, "name", str(order.status))
+            if order_status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"):
+                return {"error": f"订单 {client_order_id} 已处于终态 {order_status}，无法取消"}
+            # 取消入场单
+            self.cancel_order(order)
+            self.log.info(f"[Entry] 取消限价入场单 {client_order_id} ({symbol})")
+            # 清理 _pending_sl 中的 SL/TP 草稿
+            if client_order_id in self._pending_sl:
+                self._pending_sl.pop(client_order_id)
+                self.log.info(f"[Entry] 已清理 _pending_sl 草稿 {client_order_id}")
+            return {"status": "canceled", "client_order_id": client_order_id}
+        except Exception as e:
+            self.log.error(f"[Entry] 取消入场单失败: {e}")
+            return {"error": str(e)}
+
+    async def _async_modify_entry(self, symbol: str, client_order_id: str, price: float) -> dict:
+        """修改挂单中的限价入场单价格。"""
+        try:
+            from nautilus_trader.model.identifiers import ClientOrderId
+            coid_obj = ClientOrderId(client_order_id)
+            order = self.cache.order(coid_obj)
+            if order is None:
+                return {"error": f"找不到订单 {client_order_id}"}
+            order_status = getattr(order.status, "name", str(order.status))
+            if order_status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"):
+                return {"error": f"订单 {client_order_id} 已处于终态 {order_status}"}
+            instrument = self.cache.instrument(order.instrument_id)
+            if instrument is None:
+                return {"error": f"合约未加载"}
+            new_price = instrument.make_price(Decimal(str(price)))
+            self.modify_order(
+                order,
+                price=new_price,
+                trigger_price=None,
+            )
+            self.log.info(f"[Entry] 修改限价入场单 {client_order_id} 价格 → {new_price}")
+            return {"status": "modified", "client_order_id": client_order_id, "price": str(new_price)}
+        except Exception as e:
+            self.log.error(f"[Entry] 修改入场单失败: {e}")
+            return {"error": str(e)}
+
     async def _async_modify_stop(self, symbol: str, new_price: float) -> dict:
         """
         在引擎事件循环中修改该标的的活跃止损单触发价。
@@ -1928,6 +1981,47 @@ class OrderGatewayActor(Strategy):
                             return
                         future = asyncio.run_coroutine_threadsafe(
                             actor._async_modify_stop(symbol, float(price)), loop
+                        )
+                        result = future.result(timeout=5.0)
+                        code = 400 if "error" in result else 200
+                        self._send(code, result)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
+                    return
+
+                if self.path.startswith("/cancel-entry"):
+                    # POST /cancel-entry  body: {"symbol": "QQQ", "client_order_id": "..."}
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n)) if n > 0 else {}
+                        symbol = data.get("symbol", "").upper()
+                        coid = data.get("client_order_id", "")
+                        if not symbol or not coid:
+                            self._send(400, {"error": "缺少 symbol 或 client_order_id"})
+                            return
+                        future = asyncio.run_coroutine_threadsafe(
+                            actor._async_cancel_entry(symbol, coid), loop
+                        )
+                        result = future.result(timeout=5.0)
+                        code = 400 if "error" in result else 200
+                        self._send(code, result)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
+                    return
+
+                if self.path.startswith("/modify-entry"):
+                    # POST /modify-entry  body: {"symbol": "QQQ", "client_order_id": "...", "price": 123.45}
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n)) if n > 0 else {}
+                        symbol = data.get("symbol", "").upper()
+                        coid = data.get("client_order_id", "")
+                        price = data.get("price")
+                        if not symbol or not coid or price is None:
+                            self._send(400, {"error": "缺少 symbol, client_order_id 或 price"})
+                            return
+                        future = asyncio.run_coroutine_threadsafe(
+                            actor._async_modify_entry(symbol, coid, float(price)), loop
                         )
                         result = future.result(timeout=5.0)
                         code = 400 if "error" in result else 200

@@ -530,6 +530,38 @@ app.post('/api/modify-stop/:symbol', async (req, res) => {
     res.json({ ok: true, engine: result });
 });
 
+// POST /api/cancel-entry/:symbol — 取消挂单中的限价入场单
+app.post('/api/cancel-entry/:symbol', async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    const { client_order_id } = req.body;
+    if (!client_order_id) {
+        return res.status(400).json({ error: 'client_order_id 必填' });
+    }
+    const result = await proxyToEngine('POST', '/cancel-entry', { symbol, client_order_id },
+        { engine_offline: true });
+    if (result.engine_offline || result.error) {
+        return res.json({ ok: false, error: result.error || '引擎未启动' });
+    }
+    console.log(`✅ 取消限价入场单 [${symbol}] ${client_order_id}`);
+    res.json({ ok: true, engine: result });
+});
+
+// POST /api/modify-entry/:symbol — 修改挂单限价入场单价格
+app.post('/api/modify-entry/:symbol', async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    const { client_order_id, price } = req.body;
+    if (!client_order_id || price == null) {
+        return res.status(400).json({ error: 'client_order_id 和 price 必填' });
+    }
+    const result = await proxyToEngine('POST', '/modify-entry', { symbol, client_order_id, price: parseFloat(price) },
+        { engine_offline: true });
+    if (result.engine_offline || result.error) {
+        return res.json({ ok: false, error: result.error || '引擎未启动' });
+    }
+    console.log(`✅ 修改限价入场单 [${symbol}] ${client_order_id} → ${price}`);
+    res.json({ ok: true, engine: result });
+});
+
 // GET /api/settings/:symbol — 读取当前策略开关设置
 app.get("/api/settings/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();

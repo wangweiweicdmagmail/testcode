@@ -963,6 +963,41 @@
       font-weight: 700; color: #fff;
     }
 
+    /* 限价入场挂单面板（待成交） */
+    #pending-entry-panel {
+      display: none;
+      position: absolute;
+      top: 35px; right: 8px;
+      width: 200px;
+      background: rgba(20,22,30,.92);
+      border: 1px solid #f59e0b;
+      border-radius: 8px;
+      padding: 10px 12px;
+      z-index: 300;
+      color: #d1d4dc;
+      font-size: 12px;
+    }
+    #pending-entry-panel.active { display: block; }
+    #pending-entry-panel .pep-title {
+      font-size: 11px; font-weight: 700;
+      color: #f59e0b; margin-bottom: 8px;
+    }
+    #pending-entry-panel .pep-row {
+      display: flex; justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    #pending-entry-panel .pep-label { color: #787b86; }
+    #pending-entry-panel .pep-val   { color: #d1d4dc; font-weight: 600; }
+    #pending-entry-panel .pep-hint  { font-size: 10px; color: #787b86; margin: 6px 0; }
+    #pending-entry-panel .pep-cancel-btn {
+      width: 100%; padding: 5px 0;
+      background: rgba(239,83,80,.15); color: #ef5350;
+      border: 1px solid #ef5350; border-radius: 5px;
+      cursor: pointer; font-size: 12px; font-weight: 700;
+      margin-top: 6px;
+    }
+    #pending-entry-panel .pep-cancel-btn:hover { background: rgba(239,83,80,.3); }
+
     /* 限价单浮动面板 */
     #limit-order-panel {
       display: none;
@@ -1197,6 +1232,16 @@
           <div class="legend-dot" style="background:#ffffff"></div>
           <span style="color:#ffffff">EMA21(M5)</span>
         </div>
+      </div>
+
+      <!-- 限价入场挂单面板（待成交） -->
+      <div id="pending-entry-panel">
+        <div class="pep-title">⏳ 挂单待成交</div>
+        <div class="pep-row"><span class="pep-label">方向</span><span class="pep-val" id="pep-dir">—</span></div>
+        <div class="pep-row"><span class="pep-label">限价</span><span class="pep-val" id="pep-price">—</span></div>
+        <div class="pep-row"><span class="pep-label">数量</span><span class="pep-val" id="pep-qty">—</span></div>
+        <div class="pep-hint">拖动图表上黄色虚线可修改限价</div>
+        <button class="pep-cancel-btn" id="pep-cancel">✖ 取消挂单</button>
       </div>
 
       <!-- 限价单面板（独立于 #order-panel） -->
@@ -1513,7 +1558,13 @@
       slLine: null,      // 止损价 priceLine
       entryData: null,   // { price, side, qty }
       slData: null,      // { price, qty }
+      pendingLine: null, // 限价挂单价格线（黄色虚线）
     };
+
+    // 挂单待成交限价单状态
+    let pendingLimitOrder = null;  // null 或 { client_order_id, price, side, qty }
+    let isDraggingPending = false;  // 是否正在拖动黄色虚线
+
 
     // ─── 引擎心跳状态 ──────────────────────────────────────────
     let lastHbTime = 0;       // 上次收到 engine:heartbeat 的时间戳（ms）
@@ -1543,6 +1594,45 @@
         currentPosition.avg_px_open = price;
         refreshPositionPanel(currentPosition);
       }
+    }
+
+    // ─── 限价挂单价格线（黄色虚线） ─────────────────────────────
+    function setPendingEntryLine(price, side, qty) {
+      // 清旧线
+      if (activeOrderLines.pendingLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.pendingLine); } catch(e) {}
+        activeOrderLines.pendingLine = null;
+      }
+      if (!price) return;
+      const isLong = side === 'BUY';
+      activeOrderLines.pendingLine = candleSeries.createPriceLine({
+        price,
+        color: '#f59e0b',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `⏳${isLong ? '多' : '空'} @${price.toFixed(2)} x${qty}`,
+      });
+    }
+
+    function clearPendingEntry() {
+      if (activeOrderLines.pendingLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.pendingLine); } catch(e) {}
+        activeOrderLines.pendingLine = null;
+      }
+      pendingLimitOrder = null;
+      document.getElementById('pending-entry-panel').classList.remove('active');
+    }
+
+    function showPendingEntryPanel(o) {
+      const { client_order_id, price, side, quantity } = o;
+      const isLong = side === 'BUY';
+      pendingLimitOrder = { client_order_id, price: parseFloat(price), side, qty: parseFloat(quantity) };
+      setPendingEntryLine(parseFloat(price), side, parseFloat(quantity));
+      document.getElementById('pep-dir').textContent = isLong ? '▲ 做多' : '▼ 做空';
+      document.getElementById('pep-price').textContent = parseFloat(price).toFixed(2);
+      document.getElementById('pep-qty').textContent = `${parseFloat(quantity)} 股`;
+      document.getElementById('pending-entry-panel').classList.add('active');
     }
 
     function setSlLine(price, qty) {
@@ -2169,6 +2259,11 @@
                     speak(`${sym} 止损单已接受`, true);
                     showToast(`✅ ${sym} 止损单已接受 #${id}`, 'ok');
                   }
+                } else if (orderType === 'LIMIT' && o.status === 'ACCEPTED' && o.price) {
+                  // LIMIT_BRACKET 入场限价单挂单成功 → 显示挂单面板
+                  showPendingEntryPanel(o);
+                  speak(`${sym} 限价挂单已成功 @${parseFloat(o.price).toFixed(2)}`, true);
+                  showToast(`⏳ ${sym} 限价单已挂出 @${parseFloat(o.price).toFixed(2)} x${qty}`, 'ok');
                 } else if (o.status === 'ACCEPTED') {
                   speak(`${sym} 订单已接受`, true);
                   showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
@@ -2178,7 +2273,7 @@
               case 'FILLED': {
                 if (orderType === 'MARKET' || orderType === '') {
                   const entryP = parseFloat(o.last_px);
-                  const filledQty = parseFloat(o.last_qty || o.quantity || 0); // ✔ 实际成交量
+                  const filledQty = parseFloat(o.last_qty || o.quantity || 0);
                   setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
                     currentPosition = {
@@ -2189,13 +2284,29 @@
                     document.getElementById('position-panel').style.display = 'block';
                     refreshPositionPanel(currentPosition);
                   } else {
-                    // 持仓已存在（部分成交第二笔），更新数量
                     currentPosition.quantity = filledQty;
                     currentPosition.avg_px_open = entryP;
                     refreshPositionPanel(currentPosition);
                   }
                   speak(`${sym} ${sideLabel}订单成交，成交价 ${o.last_px}`, true);
                   showToast(`✅ ${sym} ${sideLabel}成交 @${o.last_px} x${filledQty}`, 'ok');
+                } else if (orderType === 'LIMIT') {
+                  // LIMIT_BRACKET 入场限价单成交 → 清除挂单面板，建立持仓
+                  clearPendingEntry();
+                  const entryP = parseFloat(o.last_px);
+                  const filledQty = parseFloat(o.last_qty || o.quantity || 0);
+                  setEntryLine(entryP, o.side, filledQty);
+                  if (!currentPosition) {
+                    currentPosition = {
+                      symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
+                      avg_px_open: entryP, quantity: filledQty,
+                      unrealized_pnl: 0, stop_loss: null,
+                    };
+                    document.getElementById('position-panel').style.display = 'block';
+                    refreshPositionPanel(currentPosition);
+                  }
+                  speak(`${sym} ${sideLabel}限价单成交，成交价 ${o.last_px}`, true);
+                  showToast(`✅ ${sym} 限价成交 @${o.last_px} x${filledQty}`, 'ok');
                 } else if (orderType === 'STOP_MARKET') {
                   clearOrderLines();
                   clearPositionUI();
@@ -2255,6 +2366,12 @@
                     activeOrderLines.slData = null;
                   }
                   showToast(`⛔ ${sym} 止损单已撤销 #${id}`, 'info');
+                } else if (orderType === 'LIMIT' && pendingLimitOrder &&
+                           o.client_order_id === pendingLimitOrder.client_order_id) {
+                  // 限价入场单被取消 → 清除挂单面板
+                  clearPendingEntry();
+                  showToast(`⛔ ${sym} 限价挂单已取消 #${id}`, 'info');
+                  speak(`${sym} 限价挂单已取消`, true);
                 } else {
                   showToast(`⛔ ${sym} 订单已取消 #${id}`, 'info');
                 }
@@ -2969,6 +3086,83 @@
     // 面板内关闭/取消按钮
     document.getElementById('lop-close').addEventListener('click', exitLimitMode);
     document.getElementById('lop-cancel').addEventListener('click', exitLimitMode);
+
+    // 挂单面板 - 取消挂单按钮
+    document.getElementById('pep-cancel').addEventListener('click', async () => {
+        if (!pendingLimitOrder) return;
+        const { client_order_id } = pendingLimitOrder;
+        try {
+            const resp = await fetch(`/api/cancel-entry/${SYMBOL}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_order_id }),
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                showToast(`❌ 取消失败：${data.error}`, 'warn');
+                return;
+            }
+            // 乐观清除（CANCELED 事件也会触发 clearPendingEntry）
+            clearPendingEntry();
+            showToast(`✅ 限价挂单已取消`, 'ok');
+            console.log('[pep-cancel] 取消挂单成功', data);
+        } catch (e) {
+            showToast(`❌ 取消请求异常：${e.message}`, 'warn');
+        }
+    });
+
+    // 挂单面板 - 拖动图表黄色虚线修改限价
+    // 通过 document mousemove + mouseup 追踪（与止损拖动同样的方式）
+    let isPendingLineDrag = false;
+    chartEl.addEventListener('mousedown', (e) => {
+        if (!pendingLimitOrder || !activeOrderLines.pendingLine) return;
+        const rect = chartEl.getBoundingClientRect();
+        const coord = e.clientY - rect.top;
+        const price = candleSeries.coordinateToPrice(coord);
+        if (price == null) return;
+        // 如果点击位置接近黄色虚线（±1%），则启动拖动
+        const diff = Math.abs(price - pendingLimitOrder.price);
+        if (diff / pendingLimitOrder.price < 0.01) {
+            isPendingLineDrag = true;
+            document.body.style.cursor = 'ns-resize';
+            e.preventDefault();
+        }
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isPendingLineDrag || !pendingLimitOrder) return;
+        const rect = chartEl.getBoundingClientRect();
+        const coord = e.clientY - rect.top;
+        const price = candleSeries.coordinateToPrice(coord);
+        if (price == null) return;
+        const newPrice = Math.round(price * 100) / 100;
+        pendingLimitOrder.price = newPrice;
+        setPendingEntryLine(newPrice, pendingLimitOrder.side, pendingLimitOrder.qty);
+        document.getElementById('pep-price').textContent = newPrice.toFixed(2);
+    });
+
+    document.addEventListener('mouseup', async () => {
+        if (!isPendingLineDrag || !pendingLimitOrder) return;
+        isPendingLineDrag = false;
+        document.body.style.cursor = '';
+        const { client_order_id, price } = pendingLimitOrder;
+        console.log('[pep-drag] 修改限价 →', price);
+        try {
+            const resp = await fetch(`/api/modify-entry/${SYMBOL}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_order_id, price }),
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                showToast(`❌ 修改限价失败：${data.error}`, 'warn');
+            } else {
+                showToast(`✅ 限价已修改 @${price.toFixed(2)}`, 'ok');
+            }
+        } catch (e) {
+            showToast(`❌ 修改请求异常：${e.message}`, 'warn');
+        }
+    });
 
     // 参数变化 → 重算
     ['lop-max-loss','lop-atr-mult','lop-rr'].forEach(id =>
