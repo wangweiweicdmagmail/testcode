@@ -2134,6 +2134,10 @@
         elTs.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       }
 
+      // 同步账户净值到 accountInfo，供市价单/限价单计算函数使用
+      accountInfo.total_equity   = usd.total;
+      accountInfo.available_cash = usd.free;
+
       // 自动计算最大亏损 = 净值 × 0.2%，四舍五入到100美元倍数
       const equity = usd.total;
       if (equity > 0) {
