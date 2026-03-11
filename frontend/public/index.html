@@ -2555,6 +2555,24 @@
 
     function recalcOrder() {
       const entry = latestClose || 0;
+
+      // 仓位占比：即使没有止损价也可以估算（按最大亏损反推股数）
+      const preTotal = accountInfo.total_equity || 0;
+      const maxLossNow = parseFloat(document.getElementById('op-max-loss')?.value) || 0;
+      const prePosPctEl = document.getElementById('op-position-pct');
+      if (prePosPctEl) {
+        if (entry > 0 && preTotal > 0 && maxLossNow > 0) {
+          const slVal = parseFloat(document.getElementById('op-sl-input')?.value) || 0;
+          const riskPS = slVal > 0 ? Math.abs(entry - slVal) : 0;
+          const qtyEst = riskPS > 0 ? Math.floor(maxLossNow / riskPS) : Math.floor(maxLossNow / (entry * 0.01));
+          const costEst = qtyEst * entry;
+          const pctEst = costEst / preTotal * 100;
+          prePosPctEl.textContent = pctEst > 0 ? `${pctEst.toFixed(1)}%` : '—';
+        } else {
+          prePosPctEl.textContent = '—';
+        }
+      }
+
       if (!slPrice || !entry) return;
 
       // 方向判断：止损在当前价下方 = 做多，上方 = 做空
