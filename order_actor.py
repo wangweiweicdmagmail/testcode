@@ -1595,6 +1595,10 @@ class OrderGatewayActor(Strategy):
                 stop_loss=data.get("stop_loss"),
                 sl_steps=data.get("sl_steps", []),
                 sl_step_secs=int(data.get("sl_step_secs", 60)),
+                # LIMIT_BRACKET 新增字段
+                tp_price=data.get("tp_price"),
+                tp_qty=data.get("tp_qty"),
+                entry_price=data.get("entry_price"),
             )
             # ★ 标准 MessageBus 发布
             self.msgbus.publish(
