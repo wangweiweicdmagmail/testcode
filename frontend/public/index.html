@@ -1275,9 +1275,9 @@
         <div class="lop-field">
           <span class="lop-label">止损单位</span>
           <select id="lop-atr-mult">
-            <option value="1" selected>1× ATR14</option>
+            <option value="1">1× ATR14</option>
             <option value="2">2× ATR14</option>
-            <option value="3">3× ATR14</option>
+            <option value="3" selected>3× ATR14</option>
           </select>
         </div>
 
@@ -2136,6 +2136,20 @@
       if (elTs && data.ts) {
         const d = new Date(data.ts * 1000);
         elTs.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+
+      // 自动计算最大亏损 = 净值 × 0.2%，四舍五入到100美元倍数
+      const equity = usd.total;
+      if (equity > 0) {
+        const rawLoss = equity * 0.002;                   // 0.2%
+        const roundedLoss = Math.round(rawLoss / 100) * 100; // 四舍五入到100倍数
+        const maxLossVal = Math.max(roundedLoss, 100);    // 最小100美元
+        const lopEl = document.getElementById('lop-max-loss');
+        if (lopEl) {
+          lopEl.value = maxLossVal;
+          // 触发 input 事件，让限价单面板重新计算
+          lopEl.dispatchEvent(new Event('input'));
+        }
       }
     }
 
