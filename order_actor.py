@@ -1301,17 +1301,43 @@ class OrderGatewayActor(Strategy):
             if len(pending) == 5 and pending[4] == 'LIMIT_BRACKET':
                 # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument, 'LIMIT_BRACKET') ──
                 sl_order, tp_order, entry_price, instrument, _ = pending
-                self.log.info(
-                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 已成交，"
-                    f"提交止损={sl_order.client_order_id} SL@{sl_order.trigger_price} "
-                    f"止盈={tp_order.client_order_id} TP@{tp_order.price}x{tp_order.quantity}"
+
+                # ✔ 用实际成交量重建止损单全仓）和止盈单（半仓）
+                actual_qty  = int(event.last_qty)  # 实际成交股数
+                half_qty    = actual_qty // 2
+                sl_qty_new  = instrument.make_qty(Decimal(str(actual_qty)))
+                tp_qty_new  = instrument.make_qty(Decimal(str(half_qty)))
+
+                # 重建止损单（保留原有 trigger_price 和 side）
+                sl_order_new = self.order_factory.stop_market(
+                    instrument_id=sl_order.instrument_id,
+                    order_side=sl_order.side,
+                    quantity=sl_qty_new,
+                    trigger_price=sl_order.trigger_price,
+                    time_in_force=TimeInForce.GTC,
+                    tags=self._fa_tags(),
                 )
-                self.submit_order(sl_order)
-                self.submit_order(tp_order)
+                # 重建止盈单（保留原有 price 和 side）
+                tp_order_new = self.order_factory.limit(
+                    instrument_id=tp_order.instrument_id,
+                    order_side=tp_order.side,
+                    quantity=tp_qty_new,
+                    price=tp_order.price,
+                    time_in_force=TimeInForce.GTC,
+                    tags=self._fa_tags(),
+                )
+
+                self.log.info(
+                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 已成交 实际成交={actual_qty}股，"
+                    f"提交止损={sl_order_new.client_order_id} SL@{sl_order_new.trigger_price}x{actual_qty} "
+                    f"止盈={tp_order_new.client_order_id} TP@{tp_order_new.price}x{half_qty}"
+                )
+                self.submit_order(sl_order_new)
+                self.submit_order(tp_order_new)
                 # 双向关联：止盈单 coid ↔ 止损单 coid
-                sl_coid = sl_order.client_order_id.value
-                tp_coid = tp_order.client_order_id.value
-                self._pending_tp[tp_coid] = (sl_coid, entry_price, instrument, sl_order.quantity)
+                sl_coid = sl_order_new.client_order_id.value
+                tp_coid = tp_order_new.client_order_id.value
+                self._pending_tp[tp_coid] = (sl_coid, entry_price, instrument, sl_order_new.quantity)
                 self._sl_to_tp[sl_coid]   = tp_coid
                 self.log.info(
                     f"[SL/TP] 双向关联已建立: SL={sl_coid} ↔ TP={tp_coid}  入场价={entry_price}"
@@ -1319,22 +1345,33 @@ class OrderGatewayActor(Strategy):
             else:
                 # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
                 sl_order, sl_steps, sl_step_secs, instrument = pending
-                self.log.info(
-                    f"[SL] BRACKET 入场单 {coid} 已成交，"
-                    f"正在提交止损单 {sl_order.client_order_id} "
-                    f"@ trigger_price={sl_order.trigger_price}  "
-                    f"qty={sl_order.quantity}  止损设置步={sl_steps}  "
-                    f"设置间隔={sl_step_secs}s"
+
+                # ✔ 用实际成交量重建止损单
+                actual_qty = int(event.last_qty)
+                sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
+                sl_order_new = self.order_factory.stop_market(
+                    instrument_id=sl_order.instrument_id,
+                    order_side=sl_order.side,
+                    quantity=sl_qty_new,
+                    trigger_price=sl_order.trigger_price,
+                    time_in_force=TimeInForce.GTC,
+                    tags=self._fa_tags(),
                 )
-                self.submit_order(sl_order)
-                self.log.info(f"[SL] submit_order 已调用，止损单={sl_order.client_order_id}")
+
+                self.log.info(
+                    f"[SL] BRACKET 入场单 {coid} 已成交 实际成交={actual_qty}股（原定{sl_order.quantity}股），"
+                    f"提交止损单 {sl_order_new.client_order_id} "
+                    f"@ trigger_price={sl_order_new.trigger_price}"
+                )
+                self.submit_order(sl_order_new)
+                self.log.info(f"[SL] submit_order 已调用，止损单={sl_order_new.client_order_id}")
                 # 止损价定时修改任务
                 for i, new_sl in enumerate(sl_steps):
                     delay = sl_step_secs * (i + 1)
                     self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
                     task = asyncio.ensure_future(
                         self._schedule_sl_modify(
-                            sl_order_id=sl_order.client_order_id.value,
+                            sl_order_id=sl_order_new.client_order_id.value,
                             instrument=instrument,
                             new_trigger_price=Decimal(str(new_sl)),
                             delay_secs=delay,
