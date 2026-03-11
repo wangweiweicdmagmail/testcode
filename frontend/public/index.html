@@ -1028,25 +1028,29 @@
     }
     .lop-field {
       display: flex; justify-content: space-between;
-      align-items: center; margin-bottom: 7px;
+      align-items: center; height: 30px; margin-bottom: 4px;
     }
     .lop-label {
       font-size: 14px; color: #a0a4ae;
+      min-width: 90px; flex-shrink: 0;
     }
     .lop-field input, .lop-field select {
       background: #1e222d; border: 1px solid #2a2e39;
       border-radius: 4px; color: #d1d4dc;
-      font-size: 12px; padding: 4px 8px;
-      text-align: right;
+      font-size: 13px; padding: 4px 8px;
+      text-align: right; height: 26px; box-sizing: border-box;
     }
     .lop-field input { width: 90px; }
     .lop-field select { width: 110px; cursor: pointer; }
     .lop-divider { height: 1px; background: #2a2e39; margin: 8px 0; }
     .lop-calc-row {
       display: flex; justify-content: space-between;
-      align-items: center; margin-bottom: 4px;
+      align-items: center; height: 30px; margin-bottom: 4px;
     }
-    .lop-calc-label { font-size: 14px; color: #a0a4ae; }
+    .lop-calc-label {
+      font-size: 14px; color: #a0a4ae;
+      min-width: 90px; flex-shrink: 0;
+    }
     .lop-calc-val {
       font-size: 14px; font-weight: 700;
       font-family: 'Roboto Mono', monospace, sans-serif; color: #d1d4dc;
@@ -2028,10 +2032,10 @@
           }
         }
 
-        // 开盘区间（前15分钟 OR High / OR Low）
-        addOpeningRange(m1_bars);
-        // 昨日围栏（PDH / PDL / PDC）
-        addPrevDayLines(prev_day);
+        // 开盘区间（前15分钟 OR High / OR Low）— 暂时隐藏
+        // addOpeningRange(m1_bars);
+        // 昨日围栏（PDH / PDL / PDC）— 暂时隐藏
+        // addPrevDayLines(prev_day);
 
         // 仓位线
         addPositionLines(position);
