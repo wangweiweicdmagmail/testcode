@@ -2701,7 +2701,13 @@
       try {
         const resp = await fetch('/api/account');
         const data = await resp.json();
-        accountInfo = { ...data, engine_online: !data.engine_offline };
+        const usd = (data.balances || []).find(b => b.currency === 'USD') || (data.balances || [])[0];
+        accountInfo = {
+          ...data,
+          engine_online: !data.engine_offline,
+          total_equity:   usd ? usd.total : 0,
+          available_cash: usd ? usd.free  : 0,
+        };
       } catch (e) {
         accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
       }
