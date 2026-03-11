@@ -1037,6 +1037,20 @@
     .lop-dir-badge.buy  { background: rgba(38,166,154,.18); color: #26a69a; border: 1px solid #26a69a; }
     .lop-dir-badge.sell { background: rgba(239,83,80,.18);  color: #ef5350; border: 1px solid #ef5350; }
     .lop-hint { font-size: 10px; color: #787b86; margin-top: 5px; text-align: center; }
+    /* 方向手动切换按鑰组 */
+    .lop-dir-row {
+      display: flex; gap: 6px; margin-bottom: 10px;
+    }
+    .lop-dir-btn {
+      flex: 1; padding: 5px 0;
+      border-radius: 6px; border: 1px solid transparent;
+      font-size: 12px; font-weight: 700; cursor: pointer;
+      background: #1e222d; color: #787b86;
+      transition: all .15s;
+    }
+    .lop-dir-btn.buy.active  { background: rgba(38,166,154,.18); color: #26a69a; border-color: #26a69a; }
+    .lop-dir-btn.sell.active { background: rgba(239,83,80,.18);  color: #ef5350; border-color: #ef5350; }
+    .lop-dir-btn:hover:not(.active) { background: #363a46; color: #d1d4dc; }
   </style>
 </head>
 
@@ -1192,8 +1206,11 @@
           <button class="lop-close-btn" id="lop-close">✕</button>
         </div>
 
-        <!-- 方向 badge（只读，自动判断） -->
-        <div id="lop-dir-badge" class="lop-dir-badge buy">▲ 做多</div>
+        <!-- 方向手动选择，可点击切换 -->
+        <div class="lop-dir-row">
+          <button class="lop-dir-btn buy active" id="lop-dir-buy">▲ 做多</button>
+          <button class="lop-dir-btn sell" id="lop-dir-sell">▼ 做空</button>
+        </div>
 
         <!-- 限价入场价（拖动图表环形设定） -->
         <div class="lop-field">
@@ -2802,10 +2819,8 @@
         document.getElementById('lop-cost-val').textContent =
             `$${cost.toLocaleString('en-US', {maximumFractionDigits: 0})}`;
 
-        // 方向 badge 更新
-        const badge = document.getElementById('lop-dir-badge');
-        badge.textContent = lpDir === 'BUY' ? '▲ 做多' : '▼ 做空';
-        badge.className   = `lop-dir-badge ${lpDir === 'BUY' ? 'buy' : 'sell'}`;
+        // 方向按钮同步
+        setLpDir(lpDir);
         // 确认按钮文字
         const confirmBtn = document.getElementById('lop-confirm');
         confirmBtn.textContent = lpDir === 'BUY' ? '确认做多限价单' : '确认做空限价单';
@@ -2832,6 +2847,13 @@
         return { slPrice, tpPrice, qty, tpQty };
     }
 
+    // ─── 方向切换辅助函数 ─────────────────────────────────────
+    function setLpDir(dir) {
+        lpDir = dir;
+        document.getElementById('lop-dir-buy').classList.toggle('active', dir === 'BUY');
+        document.getElementById('lop-dir-sell').classList.toggle('active', dir === 'SELL');
+    }
+
     // ─── 进入 / 退出限价模式 ──────────────────────────────────────────────
     function enterLimitMode() {
         // 如果市价单模式开着，先退出
@@ -2841,6 +2863,7 @@
         // 默认入场价 = 当前收盘价
         lpPrice = latestClose || null;
         lpDir = 'BUY';
+        setLpDir('BUY');  // 默认做多
 
         console.log('[LimitMode] 进入限价模式, 初始入场价=', lpPrice,
             '当前 M1 bar 数=', currentBars ? currentBars.length : 0);
@@ -2894,8 +2917,7 @@
         const price = candleSeries.coordinateToPrice(coord);
         if (price == null) return;
         lpPrice = Math.round(price * 100) / 100;
-        // 根据入场价相对收盘价自动判断方向
-        if (latestClose) lpDir = lpPrice < latestClose ? 'BUY' : 'SELL';
+        // 拖动时不强制覆盖方向（用户已手动选择）
         setLPLine(lpPrice);
         updateLPHandlePosition();
         updateLimitCalc();
@@ -2919,6 +2941,14 @@
     document.getElementById('btn-limit-open').addEventListener('click', () => {
         if (limitMode) { exitLimitMode(); return; }
         enterLimitMode();
+    });
+
+    // 方向切换按钮（做多/做空）
+    document.getElementById('lop-dir-buy').addEventListener('click', () => {
+        setLpDir('BUY'); updateLimitCalc();
+    });
+    document.getElementById('lop-dir-sell').addEventListener('click', () => {
+        setLpDir('SELL'); updateLimitCalc();
     });
 
     // 面板内关闭/取消按钮
