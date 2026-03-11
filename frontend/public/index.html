@@ -639,10 +639,11 @@
     /* 浮动订单面板 */
     #order-panel {
       display: none;
-      position: absolute;
-      top: 35px;
-      left: 10px;
-      width: 210px;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 260px;
       background: rgba(19, 23, 34, .95);
       border: 1px solid #2a2e39;
       border-radius: 10px;
@@ -1002,10 +1003,11 @@
     /* 限价单浮动面板 */
     #limit-order-panel {
       display: none;
-      position: absolute;
-      top: 35px;
-      left: 10px;
-      width: 230px;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 270px;
       background: rgba(19, 23, 34, .97);
       border: 1px solid #3d7eff44;
       border-radius: 10px;
