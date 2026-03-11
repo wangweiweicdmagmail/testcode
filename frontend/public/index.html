@@ -2009,28 +2009,12 @@
         // SuperTrend 按段断开
         createSegmentedST(m1_bars);
 
-        // M5 EMA21 折线（白色实线加粗）
+        // M5 EMA21 折线 — 暂时隐藏
         if (ema21M5Series) {
           chart.removeSeries(ema21M5Series);
           ema21M5Series = null;
         }
-        if (m5_bars && m5_bars.length) {
-          const ema21Data = m5_bars
-            .filter(b => b.ema21 != null)
-            .map(b => ({ time: b.time, value: b.ema21 }));
-          if (ema21Data.length) {
-            ema21M5Series = chart.addLineSeries({
-              color: '#ffffff',
-              lineWidth: 2,
-              lineStyle: 0,  // 0 = Solid
-              crosshairMarkerVisible: false,
-              lastValueVisible: false,
-              priceLineVisible: false,
-              title: '',
-            });
-            ema21M5Series.setData(ema21Data);
-          }
-        }
+        // if (m5_bars && m5_bars.length) { ... }
 
         // 开盘区间（前15分钟 OR High / OR Low）— 暂时隐藏
         // addOpeningRange(m1_bars);
