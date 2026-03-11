@@ -1700,7 +1700,7 @@ class OrderGatewayActor(Strategy):
                 f"avg_px={target_pos.avg_px_open}"
             )
 
-            # 1. 取消所有该标的的活跃止损单
+            # 1. 取消所有该标的的活跃止损单（STOP_MARKET）和止盈单（LIMIT）
             TERMINAL_STATUS = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"}
             canceled_count = 0
             for order in self.cache.orders():
@@ -1710,10 +1710,20 @@ class OrderGatewayActor(Strategy):
                 type_name = getattr(order.order_type, "name", str(order.order_type))
                 if order_status in TERMINAL_STATUS:
                     continue
-                if type_name == "STOP_MARKET":
-                    self.log.info(f"[Close] 取消止损单 {order.client_order_id}")
+                if type_name in ("STOP_MARKET", "LIMIT"):
+                    self.log.info(f"[Close] 取消 {type_name} 单 {order.client_order_id}")
                     self.cancel_order(order)
                     canceled_count += 1
+
+            # 清理 LIMIT_BRACKET 内部映射表（避免内存泄漏）
+            sym_upper = symbol.upper()
+            for tp_coid in list(self._pending_tp.keys()):
+                tp_order_obj = self.cache.order(ClientOrderId(tp_coid))
+                if tp_order_obj and tp_order_obj.instrument_id.symbol.value == sym_upper:
+                    entry = self._pending_tp.pop(tp_coid)
+                    sl_coid = entry[0]
+                    self._sl_to_tp.pop(sl_coid, None)
+                    self.log.info(f"[Close] 清理 _pending_tp 映射 TP={tp_coid} SL={sl_coid}")
 
             # 2. 提交反向市价单
             close_order = self.order_factory.market(
@@ -1729,7 +1739,7 @@ class OrderGatewayActor(Strategy):
                 f"[Close] ✅ 平仓单已提交  "
                 f"ClientOrderId={close_order.client_order_id}  "
                 f"side={side_str}  qty={quantity}  {instrument_id}  "
-                f"已取消止损单数量={canceled_count}"
+                f"已取消订单数量={canceled_count}"
             )
             return {
                 "status": "accepted",
