@@ -62,7 +62,7 @@ app.use(express.json());
 
 // REST API：获取所有数据（M3: 最多返回最近 500 根 K 线，避免大 JSON 打爆 Node）
 const MAX_BARS = 500;
-const ALL_SYMBOLS = ["NVDA", "AAPL", "GOOG", "AVGO", "SPY", "TSLA", "PLTR", "AMZN", "AMD", "META", "MSFT", "QQQ", "TSM"];
+const ALL_SYMBOLS = ["NVDA", "AAPL", "GOOG", "AVGO", "SPY", "TSLA", "PLTR", "AMZN", "AMD", "META", "MSFT", "QQQ", "TSM", "MU"];
 
 app.get("/api/data/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
@@ -415,6 +415,7 @@ const SYMBOL_MAP = {
     MSFT: 'MSFT.NASDAQ',
     QQQ: 'QQQ.NASDAQ',
     TSM: 'TSM.NYSE',
+    MU: 'MU.NASDAQ',
 };
 
 /**
