@@ -2138,14 +2138,20 @@
             return;
           }
 
-          // ── 5分钟新高事件（server.js 计算后广播）──
-          if (channel === 'nh:update') {
+          // ── 5分钟高低突破事件（server.js 计算后广播 hl:update）──
+          if (channel === 'hl:update') {
             loadIndicators();  // 刷新右侧面板
             const o = payload;
-            if (o.count >= 1) {  // 任何一次新高都播报
-              const tag = o.count === 1 ? '创日内新高'
-                : o.count <= 3 ? `连续${o.count}次新高`
-                  : `强势！连续${o.count}次新高`;
+            const s = o.score ?? 0;
+            if (s >= 1) {
+              const tag = s === 1 ? '创日内新高'
+                : s <= 3 ? `连续${s}次新高`
+                  : `强势！连续${s}次新高`;
+              speak(`${o.symbol} ${tag}`, true);
+            } else if (s <= -1) {
+              const tag = s === -1 ? '创日内新低'
+                : s >= -3 ? `连续${Math.abs(s)}次新低`
+                  : `弱势！连续${Math.abs(s)}次新低`;
               speak(`${o.symbol} ${tag}`, true);
             }
           }
@@ -2645,7 +2651,7 @@
         const byM1 = [...rows].sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));
         const byM5 = [...rows].sort((a, b) => (b.st_score_m5 ?? 0) - (a.st_score_m5 ?? 0));
         const byEma = [...rows].sort((a, b) => (b.ema_score ?? 0) - (a.ema_score ?? 0));
-        const byNH = [...rows].sort((a, b) => (b.nh_score ?? 0) - (a.nh_score ?? 0));
+        const byNH = [...rows].sort((a, b) => (b.hl_score ?? 0) - (a.hl_score ?? 0));
         const byMom = [...rows].sort((a, b) => (b.mom_atr ?? -Infinity) - (a.mom_atr ?? -Infinity));
         const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
         const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
@@ -2663,7 +2669,7 @@
           byEma.map(r => indEmaRow(r.symbol, r.ema_score,
             (r.ema_score ?? 0) >= 0 ? '#f59e0b' : '#fb923c', maxEma)).join('');
         const nhEl = document.getElementById('ind-nh');
-        if (nhEl) nhEl.innerHTML = byNH.map(r => indNHRow(r.symbol, r.nh_score ?? 0)).join('');
+        if (nhEl) nhEl.innerHTML = byNH.map(r => indNHRow(r.symbol, r.hl_score ?? 0)).join('');
       } catch (e) { /* 静默失败，不影响主图 */ }
     }
     // 每30秒自动刷新指标面板

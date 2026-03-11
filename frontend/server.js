@@ -172,12 +172,19 @@ function etDayKey() {
 }
 
 // 从 Redis 5m bars 重建今日 hlState（服务重启后恢复）
+// 只参考盘中 RTH（09:30-16:00 ET）数据，不包含盘前数据
 function calcHLScore(m5Bars) {
     if (!m5Bars || !m5Bars.length) return { score: 0, dayHigh: null, dayLow: null };
     const etOff = getETOffsetSec();
     const etNow = Date.now() / 1000 + etOff;
     const etMidnight = etNow - (etNow % 86400);
-    const todayBars = m5Bars.filter(b => b.time >= etMidnight);
+    const RTH_OPEN = 9 * 3600 + 30 * 60;  // 34200s = 09:30 ET
+    const RTH_CLOSE = 16 * 3600;            // 57600s = 16:00 ET
+    // 只保留今日 RTH 期间的 M5 bar，不含盘前盘后
+    const todayBars = m5Bars.filter(b => {
+        const secOfDay = b.time % 86400;
+        return b.time >= etMidnight && secOfDay >= RTH_OPEN && secOfDay < RTH_CLOSE;
+    });
     if (!todayBars.length) return { score: 0, dayHigh: null, dayLow: null };
 
     let dayHigh = -Infinity, dayLow = Infinity, score = 0;
@@ -217,6 +224,31 @@ function updateHLState(symbol, close) {
         }
     }
     return hlState[symbol].score;
+}
+
+// ─── EMA 分类：根据过去6根 M5 bar 收盘价相对 EMA21/EMA9 的位置判断行情状态 ─────
+// 返回：'rocket_bull' | 'bull' | 'mixed' | 'bear' | 'rocket_bear' | 'insufficient'
+//
+// 注：过滤条件只要求 ema21 != null，不强制 ema9 != null。
+// 当 ema9 为 null（引擎刚启动期间初始根），allAboveEma9 / allBelowEma9 因为
+// `b.ema9 != null && ...` 的二次检查会自动判定为 false，安全降级到
+// bull / bear / mixed，不会产生误报，无需额外处理。
+function calcEMAClassify(m5Bars) {
+    // 取最后 6 根有 ema21 的 bar（ema9 允许部分为 null，见上方注释）
+    const recent = m5Bars.filter(b => b.ema21 != null).slice(-6);
+    if (recent.length < 6) return 'insufficient';
+
+    // allAboveEma9 / allBelowEma9：ema9 为 null 的 bar 不满足条件，自动降级
+    const allAboveEma9  = recent.every(b => b.ema9 != null && b.close > b.ema9);
+    const allBelowEma9  = recent.every(b => b.ema9 != null && b.close < b.ema9);
+    const allAboveEma21 = recent.every(b => b.close > b.ema21);
+    const allBelowEma21 = recent.every(b => b.close < b.ema21);
+
+    if (allAboveEma9)  return 'rocket_bull';  // 极速↑：6根全在 EMA9 上方
+    if (allBelowEma9)  return 'rocket_bear';  // 极速↓：6根全在 EMA9 下方
+    if (allAboveEma21) return 'bull';          // 多头：6根全在 EMA21 上方
+    if (allBelowEma21) return 'bear';          // 空头：6根全在 EMA21 下方
+    return 'mixed';                            // 震荡：混合状态
 }
 
 app.get("/api/indicators", async (req, res) => {
@@ -268,6 +300,16 @@ app.get("/api/indicators", async (req, res) => {
                     return null;
                 })(),
                 hl_score: hlResult.score ?? 0,  // 日内高低突破信号：+N=连续新高 -N=连续新低 0=震荡
+                ema_diff_int: (() => {
+                    // 取最后一根有 ema_diff_int 字段的 M5 bar
+                    for (let i = m5.length - 1; i >= 0; i--) {
+                        if (m5[i].ema_diff_int != null) return m5[i].ema_diff_int;
+                    }
+                    return null;
+                })(),  // M5 (EMA9-EMA21) 1小时均值积分 / M5_ATR14
+                ema_classify: calcEMAClassify(m5),  // 过去6根M5位置分类
+                last_m1_time: lastM1 ? lastM1.time : null,   // 最新M1 bar ET fake-UTC秒
+                last_m5_time: lastM5 ? lastM5.time : null,   // 最新M5 bar ET fake-UTC秒
                 st_dir_m1: lastM1.st_dir,
                 st_dir_m5: lastM5 ? lastM5.st_dir : null,
                 st_val_m1: lastM1.st_value,
@@ -275,6 +317,18 @@ app.get("/api/indicators", async (req, res) => {
             };
 
         }));
+
+        // ── 后处理：计算相对 QQQ 的动量背离分 ──────────────────────────
+        // div_mom = mom_atr(stock) - mom_atr(QQQ)
+        // 正值：该标的比 QQQ 相对强（QQQ 杀跌但该股抗跌/上涨）
+        // 负值：该标的比 QQQ 相对弱
+        const qqq = results.find(r => r.symbol === 'QQQ' && r.mom_atr != null);
+        const qqqMom = qqq ? qqq.mom_atr : null;
+        results.forEach(r => {
+            r.div_mom = (r.mom_atr != null && qqqMom != null)
+                ? parseFloat((r.mom_atr - qqqMom).toFixed(4))
+                : null;
+        });
 
         // 排序：优先按 M1 ST 积分降序
         results.sort((a, b) => (b.st_score_m1 ?? 0) - (a.st_score_m1 ?? 0));

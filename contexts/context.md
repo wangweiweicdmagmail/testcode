@@ -143,6 +143,28 @@ cd frontend && node server.js
 - **isRTH() 冬令时 DST 判断错误（2026-03-06）** ✅：
   - `month >= 3 → -4h` 的简化规则在 DST 切换日（3月第二个周日）前的冬令时期间算出错误的 ET 时间（15:12 被算成 16:12），导致 `isRTH()` 返回 false，屏蔽所有 kline 实时推送，前端必须手动刷新
   - 修复：新增 `getETInfo()` / `getETOffsetSec()` 工具函数，使用 `Intl.DateTimeFormat('America/New_York')` 精确处理 DST 边界，替换 `isRTH()`、`etDayKey()`、`calcHLScore()`、`calcPrevDay()` 中所有简化偏移计算
+- **hl_score 新高新低混入盘前数据（2026-03-11）** ✅：
+  - `calcHLScore`（重建路径）用凌晨 00:00 ET 作为今日起点，将盘前 M5 bar 也纳入新高/新低基准比较，导致信号不准确
+  - 修复：`calcHLScore` 中过滤条件改为只保留今日 RTH 期间（09:30–16:00 ET）的 M5 bar，确保新高/新低仅与盘中数据对比
+- **新指标：EMA 差值积分 `ema_diff_int`（2026-03-11）** ✅：
+  - 后端 `strategy.py` 新增 `_ema9_m5`（EMA9 on M5）、`_atr_m5`（ATR14 on M5）、`_ema_diff_win`（滑动窗口）
+  - 公式（方案B）：`ema_diff_int = mean(最近≤12根的 EMA9-EMA21) / M5_ATR14`
+  - 抽取公共方法 `_push_ema_diff_int(sym, ema9, ema21)` 统一管理滚动窗口，历史/增量/实时三条路径均调用该方法
+  - 写入 `bars:5m:{sym}.ema_diff_int`；`/api/indicators` 暴露 `ema_diff_int`
+  - `indicators.html` 新增「EMA 差值积分」面板，颜色随 EMA 分类（5档）变化
+- **新指标：EMA 行情分类 `ema_classify`（2026-03-11）** ✅：
+  - `server.js` 新增 `calcEMAClassify(m5Bars)`：取最后 6 根有 EMA21 的 M5 bar，判断相对 EMA9/EMA21 的位置
+  - 返回值：`rocket_bull`（6根全在EMA9上）/ `bull`（全在EMA21上）/ `mixed` / `bear`（全在EMA21下）/ `rocket_bear`（全在EMA9下）/ `insufficient`
+  - EMA9 为 null 时自动降级（不会误报），已在注释中说明
+- **新指标：动量背离 `div_mom`（2026-03-11）** ✅：
+  - `server.js` 后处理计算：`div_mom = mom_atr(stock) - mom_atr(QQQ)`
+  - 正值=该标的比 QQQ 相对强（抗跌/独涨）；负值=相对弱（跟跌/补跌）
+  - `indicators.html` 新增「动量背离」面板（原动量窗口位置），颜色编码：绿=强，红=弱；含 4 档标签（抗跌/独强/跟跌/补跌）
+- **代码审查改进（2026-03-11）** ✅：
+  - `indicators.html`：删除 `ct-div` DOM 重复赋值（冗余 Bug）
+  - `strategy.py`：抽取 `_push_ema_diff_int` 公共方法，消除三处重复的 ema_diff_int 计算逻辑（约30行重复代码）
+  - `server.js`：`calcEMAClassify` 补充 `ema9=null` 时自动降级的注释说明
+- **hl_score 事件频道重命名** ✅：前端 `index.html` 监听频道从 `nh:update` 改为 `hl:update`，新高/新低语音播报均已覆盖
 
 
 ## Redis 数据结构
@@ -150,7 +172,7 @@ cd frontend && node server.js
 | Key | 类型 | 内容 |
 |-----|------|------|
 | `bars:1m:{sym}` | List | 1分钟 K 线历史（仅正市 RTH） |
-| `bars:5m:{sym}` | List | 5分钟 K 线历史（含 `mom_atr` 指标，仅正市） |
+| `bars:5m:{sym}` | List | 5分钟 K 线历史（含 `mom_atr`/`ema9`/`ema_diff_int` 指标，仅正市） |
 | `position:{sym}` | String | 仓位 JSON（含 `stop_loss`） |
 | `settings:{sym}` | String | 策略开关 JSON：`{"trail_mode": 0/1/2/3}` |
 | `order:stop:{sym}` | String | 活跃止损单 `{client_order_id, trigger_price}` — 重启恢复用 |
@@ -167,7 +189,9 @@ cd frontend && node server.js
 | `st_value` | M1/M5 | SuperTrend 值（M1:10,3.5 / M5:10,3.0） |
 | `st_dir` | M1/M5 | ST 方向：`1`=多头, `-1`=空头 |
 | `ema21` | M1/M5 | EMA21 |
+| `ema9` | M5 | EMA9（供分类和差值积分使用，EMA 预热完成前为 null） |
 | `mom_atr` | M5 | 归一化15分钟动量 = `(M5_close₀ - M5_open₋₂) / M1_ATR_14`（3根M5组成15分K线实体，M1 ATR归一化；⩾3根M5 bar且M1 ATR预热后有值） |
+| `ema_diff_int` | M5 | EMA差值积分 = `mean(最近≤12根的 EMA9-EMA21) / M5_ATR14`（约1小时窗口，ATR预热完成后有值） |
 
 ## /api/indicators 返回字段
 
@@ -175,6 +199,11 @@ cd frontend && node server.js
 |------|------|
 | `st_score_m1` | M1 ST 积分（连续多头+N，连续空头-N） |
 | `st_score_m5` | M5 ST 积分 |
-| `ema_score` | EMA 偏离积分 |
-| `mom_atr` | 15分钟动量信号 |
-| `hl_score` | 日内高低突破信号：+N=连续创新高，-N=连续创新低，0=无突破 |
+| `ema_score` | EMA 偏离积分 = `(M5_close - EMA21) / ATR10` |
+| `mom_atr` | 15分钟动量信号（归一化） |
+| `hl_score` | 日内高低突破信号：+N=连续创新高，-N=连续创新低，0=无突破（仅 RTH 数据） |
+| `ema_diff_int` | EMA差值积分（最新值） |
+| `ema_classify` | EMA行情分类：`rocket_bull`/`bull`/`mixed`/`bear`/`rocket_bear`/`insufficient` |
+| `div_mom` | 动量背离分 = `mom_atr(stock) - mom_atr(QQQ)`，正值=相对强，负值=相对弱 |
+| `last_m1_time` | 最新 M1 bar 的 ET fake-UTC 秒 |
+| `last_m5_time` | 最新 M5 bar 的 ET fake-UTC 秒 |

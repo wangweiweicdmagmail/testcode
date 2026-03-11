@@ -58,13 +58,13 @@
             color: #2962ff;
         }
 
-        /* ── 五表并排布局 ── */
+        /* ── 六表并排布局 ── */
         #main {
             display: grid;
-            grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
-            gap: 16px;
-            padding: 24px 20px;
-            max-width: 1900px;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 12px;
+            padding: 20px 16px;
+            max-width: 2200px;
             margin: 0 auto;
         }
 
@@ -90,6 +90,15 @@
             gap: 8px;
         }
 
+        /* 卡片右上角数据时间 */
+        .ct-time {
+            margin-left: auto;
+            font-size: 10px;
+            color: #4b5563;
+            font-weight: 400;
+            font-variant-numeric: tabular-nums;
+        }
+
         .card-title .dot {
             width: 8px;
             height: 8px;
@@ -100,12 +109,6 @@
             font-size: 11px;
             color: #4b5563;
             margin-top: 4px;
-        }
-
-        #update-time {
-            font-size: 11px;
-            color: #4b5563;
-            float: right;
         }
 
         /* ── 表格样式 ── */
@@ -260,26 +263,53 @@
     </div>
 
     <div id="main">
-        <!-- 动量窗口（第一列） -->
+        <!-- 动量背离（原动量窗口位置） -->
         <div class="score-card">
             <div class="card-header">
                 <div class="card-title">
-                    <span class="dot" style="background:#f43f5e"></span>
-                    动量窗口
-                    <span id="update-time" style="margin-left:auto;font-size:10px;color:#4b5563">—</span>
+                    <span class="dot" style="background:#26a69a"></span>
+                    动量背离
+                    <span id="ct-div" class="ct-time">—</span>
                 </div>
-                <div class="card-sub">(M5_close₀ − M5_open₋₂) ÷ M1_ATR₁₄ · 3根M5组合成15分K线实体</div>
+                <div class="card-sub">mom_atr(stock) − mom_atr(QQQ) · 正=相对强 负=相对弱</div>
             </div>
             <table>
                 <thead>
                     <tr>
                         <th style="width:24px">#</th>
                         <th>标的</th>
-                        <th class="right">实值</th>
-                        <th>强度</th>
+                        <th class="right">背离分</th>
+                        <th>强弱</th>
                     </tr>
                 </thead>
-                <tbody id="tbody-mom">
+                <tbody id="tbody-div">
+                    <tr>
+                        <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- EMA 差值积分（新指标：M5 EMA9-EMA21 半小时积分/ATR） -->
+        <div class="score-card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="dot" style="background:#818cf8"></span>
+                    EMA 差值积分
+                    <span id="ct-edi" class="ct-time">—</span>
+                </div>
+                <div class="card-sub">Σ₁₂(EMA9−EMA21) ÷ M5_ATR₁₄ · 1小时EMA金叉/死叉强度</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:24px">#</th>
+                        <th>标的</th>
+                        <th class="right">积分</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody-edi">
                     <tr>
                         <td colspan="4" class="empty"><span class="spinner"></span>加载中…</td>
                     </tr>
@@ -293,6 +323,7 @@
                 <div class="card-title">
                     <span class="dot" style="background:#26a69a"></span>
                     M1 SuperTrend 积分
+                    <span id="ct-m1" class="ct-time">—</span>
                 </div>
                 <div class="card-sub">1分钟 ST 做多 +1/棒 · 做空 -1/棒</div>
             </div>
@@ -319,6 +350,7 @@
                 <div class="card-title">
                     <span class="dot" style="background:#60a5fa"></span>
                     M5 SuperTrend 积分
+                    <span id="ct-m5" class="ct-time">—</span>
                 </div>
                 <div class="card-sub">5分钟 ST 做多 +1/棒 · 做空 -1/棒</div>
             </div>
@@ -345,6 +377,7 @@
                 <div class="card-title">
                     <span class="dot" style="background:#f59e0b"></span>
                     EMA 偏离积分
+                    <span id="ct-ema" class="ct-time">—</span>
                 </div>
                 <div class="card-sub">(M5 收盘 − EMA21) ÷ ATR₁₀ · 正 = 价格在上方</div>
             </div>
@@ -371,6 +404,7 @@
                 <div class="card-title">
                     <span class="dot" style="background:#a78bfa"></span>
                     日内高低突破
+                    <span id="ct-nh" class="ct-time">—</span>
                 </div>
                 <div class="card-sub">M5收盘 创新高+1 创新低-1 无突破归零</div>
             </div>
@@ -390,10 +424,24 @@
                 </tbody>
             </table>
         </div>
+
     </div>
 
     <script>
         const REFRESH_MS = 10_000;
+
+        // ET fake-UTC 秒 → "HH:MM ET" 字符串
+        function fmtBarTime(etSec) {
+            if (!etSec) return '—';
+            const h = Math.floor((etSec % 86400) / 3600);
+            const m = Math.floor((etSec % 3600) / 60);
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ET`;
+        }
+
+        // 取 data 里某个时间字段的最大值
+        function maxTime(data, field) {
+            return Math.max(...data.map(r => r[field] || 0)) || null;
+        }
 
         function badge(dir) {
             if (dir === 1) return '<span class="badge badge-bull">▲ 多</span>';
@@ -529,18 +577,84 @@
       `;
         }
 
+        function buildEdiRow(rank, sym, val, maxAbs, classify) {
+            // 分类颜色和标签配置
+            const classifyMap = {
+                rocket_bull: { bg: 'rgba(52,211,153,.13)', bar: '#34d399', label: '<span class="badge" style="background:rgba(52,211,153,.25);color:#34d399">🚀极速↑</span>' },
+                bull: { bg: 'rgba(38,166,154,.08)', bar: '#26a69a', label: '<span class="badge badge-bull">🟢多头</span>' },
+                mixed: { bg: '', bar: '#787b86', label: '<span style="color:#4b5563">⚪震荡</span>' },
+                bear: { bg: 'rgba(239,83,80,.08)', bar: '#ef5350', label: '<span class="badge badge-bear">🔴空头</span>' },
+                rocket_bear: { bg: 'rgba(244,63,94,.15)', bar: '#f43f5e', label: '<span class="badge" style="background:rgba(244,63,94,.25);color:#f43f5e">💥极速↓</span>' },
+                insufficient: { bg: '', bar: '#4b5563', label: '<span style="color:#4b5563">—</span>' },
+            };
+            const cfg = classifyMap[classify] || classifyMap.mixed;
+
+            const abs = Math.abs(val ?? 0);
+            const pct = Math.min(100, maxAbs > 0 ? (abs / maxAbs) * 100 : 0).toFixed(1);
+            const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
+            // 小数字颜色随分类走
+            const scoreColor = cfg.bar;
+
+            return `
+        <tr style="${cfg.bg ? 'background:' + cfg.bg + ';' : ''}border-top:1px solid #2a2e3944">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${scoreColor}">${display}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${cfg.bar}"></div>
+            </div>
+          </td>
+          <td>${cfg.label}</td>
+        </tr>
+      `;
+        }
+
+        function buildDivRow(rank, sym, val, maxAbs) {
+            // val >0 相对强（抗跌/独涨），val <0 相对弱（跟跌/补跌）
+            const isBull = (val ?? 0) >= 0;
+            const abs = Math.abs(val ?? 0);
+            const color = val == null ? '#4b5563'
+                : abs < 0.1 ? '#787b86'
+                    : isBull ? '#26a69a' : '#ef5350';   // 绿=强 红=弱
+            const pct = Math.min(100, maxAbs > 0 ? (abs / maxAbs) * 100 : 0).toFixed(1);
+            const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
+            const label = val == null ? '<span style="color:#4b5563">—</span>'
+                : sym === 'QQQ' ? '<span style="color:#4b5563">基准</span>'
+                    : abs < 0.1 ? '<span style="color:#787b86">⚪跟随</span>'
+                        : isBull
+                            ? (abs < 0.5 ? '<span class="badge badge-bull">↑抗跌</span>'
+                                : '<span class="badge badge-bull">🔥独强</span>')
+                            : (abs < 0.5 ? '<span class="badge badge-bear">↓跟跌</span>'
+                                : '<span class="badge badge-bear">💧补跌</span>');
+            const cls = val != null && val >= 0.1 ? 'bull' : val != null && val <= -0.1 ? 'bear' : '';
+            return `
+        <tr class="${cls}">
+          <td><span class="rank">${rank}</span></td>
+          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td class="right">
+            <span class="score" style="color:${color}">${display}</span>
+            <div class="bar-bg">
+              <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+            </div>
+          </td>
+          <td>${label}</td>
+        </tr>
+      `;
+        }
+
         function buildMomRow(rank, sym, mom, maxAbs) {
             const val = mom != null ? mom : null;
             const isBull = (val ?? 0) >= 0;
             const color = val == null ? '#4b5563'
-                : Math.abs(val) < 0.5 ? '#787b86'
-                    : isBull ? '#f43f5e' : '#60a5fa';
+                : Math.abs(val) < 0.3 ? '#787b86'
+                    : isBull ? '#26a69a' : '#ef5350';   // 绿=正动量 红=负动量
             const pct = Math.min(100, maxAbs > 0 ? (Math.abs(val ?? 0) / maxAbs) * 100 : 0).toFixed(1);
             const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
             const strength = val == null ? '<span style="color:#4b5563">—</span>'
                 : Math.abs(val) < 0.3 ? '<span style="color:#4b5563">⚪排队中</span>'
                     : Math.abs(val) < 0.8 ? (isBull ? '<span class="badge badge-bull">⬆硬拉</span>' : '<span class="badge badge-bear">⬇下涌</span>')
-                        : (isBull ? '<span class="badge badge-bull">🚀强势</span>' : '<span class="badge badge-bear">🔴崩涧</span>');
+                        : (isBull ? '<span class="badge badge-bull">🚀强势</span>' : '<span class="badge badge-bear">🔴崩湧</span>');
             const cls = val != null && val >= 0.3 ? 'bull' : val != null && val <= -0.3 ? 'bear' : '';
             return `
         <tr class="${cls}">
@@ -597,19 +711,33 @@
                 // 语音检测
                 checkHLVoice(data);
 
+                // div_mom 动量背离排行（相对 QQQ 的10分钟动量差）
+                const byDiv = [...data].sort((a, b) => (b.div_mom ?? -Infinity) - (a.div_mom ?? -Infinity));
+                const maxDiv = Math.max(0.01, ...byDiv.map(r => Math.abs(r.div_mom ?? 0)));
+                document.getElementById('tbody-div').innerHTML = byDiv.map((r, i) =>
+                    buildDivRow(i + 1, r.symbol, r.div_mom, maxDiv)
+                ).join('');
 
-                // mom_atr 全车动势排行
-                const byMom = [...data].sort((a, b) => (b.mom_atr ?? -Infinity) - (a.mom_atr ?? -Infinity));
-                const maxMom = Math.max(0.01, ...byMom.map(r => Math.abs(r.mom_atr ?? 0)));
-                document.getElementById('tbody-mom').innerHTML = byMom.map((r, i) =>
-                    buildMomRow(i + 1, r.symbol, r.mom_atr, maxMom)
+                // ema_diff_int 排行（M5 EMA9-EMA21 半小时积分/ATR）
+                const byEdi = [...data].sort((a, b) => (b.ema_diff_int ?? -Infinity) - (a.ema_diff_int ?? -Infinity));
+                const maxEdi = Math.max(0.01, ...byEdi.map(r => Math.abs(r.ema_diff_int ?? 0)));
+                document.getElementById('tbody-edi').innerHTML = byEdi.map((r, i) =>
+                    buildEdiRow(i + 1, r.symbol, r.ema_diff_int, maxEdi, r.ema_classify)
                 ).join('');
 
 
-                const now = new Date();
-                document.getElementById('update-time').textContent =
-                    `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+                // ── 更新各卡片数据时间 ──────────────────────────────────
+                const tm5 = fmtBarTime(maxTime(data, 'last_m5_time'));
+                const tm1 = fmtBarTime(maxTime(data, 'last_m1_time'));
+                // 更新各卡片右上角数据时间戳（M1卡片用 tm1，其余用 tm5）
+                document.getElementById('ct-div').textContent = tm5;
+                document.getElementById('ct-edi').textContent = tm5;
+                document.getElementById('ct-m1').textContent = tm1;
+                document.getElementById('ct-m5').textContent = tm5;
+                document.getElementById('ct-ema').textContent = tm5;
+                document.getElementById('ct-nh').textContent  = tm5;
 
+                const now = new Date();
             } catch (e) {
                 ['tbody-m1', 'tbody-m5', 'tbody-ema'].forEach(id => {
                     document.getElementById(id).innerHTML =

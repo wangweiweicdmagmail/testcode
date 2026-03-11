@@ -136,37 +136,37 @@ class _STState:
 class _MomentumATRState:
     """
     每根 M5 bar 收盘时计算：
-      mom_atr = (M5_close_now - M5_open_2bars_ago) / M1_ATR_14
+      mom_atr = (M5_close_now - M5_open_1bar_ago) / M1_ATR_14
 
     其中：
-      - 15分钟K线实体 = 当前 M5 bar 的收盘价 − 2根 M5 bar 之前的开盘价
-        （相当于把3根 M5 bar 组合成一根 15分钟 K 线，取其实体大小）
+      - 10分钟K线实体 = 当前 M5 bar 的收盘价 − 上一根 M5 bar 的开盘价
+        （相当于把2根 M5 bar 组合成一根 10分钟 K 线，取其实体大小）
       - M1_ATR_14 = 外部传入的 M1 ATR（14周期 Wilder 平滑），每根 M1 bar 更新
 
-    该值代表过去15分钟内相对于 ATR 的价格移动幅度，可用于多标的动量排序。
+    该值代表过去10分钟内相对于 ATR 的价格移动幅度，可用于多标的动量排序和背离计算。
     """
 
     def __init__(self):
-        # 滑动 M5 bar open 队列，保留最近3根（index 0=最旧，index 2=最新）
-        # 用 open（而非 close）构成 15分钟K线的起始价
+        # 滑动 M5 bar open 队列，保留最近2根（index 0=最旧，index 1=最新）
+        # 用 open（而非 close）构成 10分钟K线的起始价
         self._opens: list[float] = []
 
     def update(self, o: float, c: float, m1_atr: Optional[float]
                ) -> Optional[float]:
         """
         喂入 M5 bar 的 (open, close) 及当前 M1_ATR，
-        返回 mom_atr（M1_ATR 有效且累积 ≥3 根 M5 bar 后才输出）。
+        返回 mom_atr（M1_ATR 有效且累积 ≥2 根 M5 bar 后才输出）。
         """
-        # 维护 M5 bar open 队列，只保最近3根
+        # 维护 M5 bar open 队列，只保最近2根
         self._opens.append(o)
-        if len(self._opens) > 3:
+        if len(self._opens) > 2:
             self._opens.pop(0)
 
-        # 预热检查：M1 ATR 有值 + 至少累积了3根 M5 bar（可取 open_2bars_ago）
-        if m1_atr is None or m1_atr == 0 or len(self._opens) < 3:
+        # 预热检查：M1 ATR 有值 + 至少累积了2根 M5 bar（可取 open_1bar_ago）
+        if m1_atr is None or m1_atr == 0 or len(self._opens) < 2:
             return None
 
-        # 15分钟K线实体 = 当前 close − 最早那根 M5 bar 的 open
+        # 10分钟K线实体 = 当前 close − 上一根 M5 bar 的 open
         mom = (c - self._opens[0]) / m1_atr
         return round(mom, 4)
 
@@ -305,7 +305,10 @@ class BarLoggerStrategy(Strategy):
 
         # 每个标的状态机（M5 维度）
         self._st_m5:  dict[str, _STState]  = {}
-        self._ema_m5: dict[str, _EMAState] = {}
+        self._ema_m5: dict[str, _EMAState] = {}  # EMA21 on M5
+        self._ema9_m5: dict[str, _EMAState] = {}  # EMA9 on M5（供 ema_diff_int 使用）
+        self._atr_m5: dict[str, AverageTrueRange] = {}  # ATR14 on M5（供 ema_diff_int 归一化）
+        self._ema_diff_win: dict[str, list] = {}  # 滚动最多12根 (EMA9-EMA21) 窗口（1小时积分）
         self._mom_m5: dict[str, _MomentumATRState] = {}  # M5 归一化动量（15分钟K线实体/M1_ATR）
 
         # 每个标的 M1 ATR（14周期 Wilder，按 M1 bar 更新，供 mom_atr 使用）
@@ -353,6 +356,30 @@ class BarLoggerStrategy(Strategy):
         dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
         et_minutes = dt.hour * 60 + dt.minute
         return (9 * 60 + 30) <= et_minutes < (16 * 60)   # [09:30, 16:00)
+
+    def _push_ema_diff_int(self, sym: str, ema9: float | None, ema21: float | None) -> float | None:
+        """向滑动窗口追加 (EMA9-EMA21) 并计算归一化积分。
+
+        算法（方案B）：始终用实际根数求均值，窗口上限 12 根（约 1 小时）。
+        - 若 ema9 / ema21 任一为 None（预热未完成），窗口不更新，返回 None
+        - 若 M5 ATR14 未初始化或 ATR=0，返回 None（不除零）
+        - ema9 不在窗口中时（如未完成 bar 不喂入 EMA9），不调用此方法，上层直接取上一根值
+
+        返回：round(mean(win[-12:]) / ATR14, 4)  或  None
+        """
+        if ema9 is None or ema21 is None:
+            return None
+        win = self._ema_diff_win.setdefault(sym, [])
+        win.append(ema9 - ema21)
+        if len(win) > 12:
+            win.pop(0)
+        atr_state = self._atr_m5.get(sym)
+        if atr_state is None or not atr_state.initialized:
+            return None
+        atr_val = atr_state.value
+        if not atr_val or atr_val <= 0:
+            return None
+        return round(sum(win) / len(win) / atr_val, 4)
 
     # ── 生命周期 ──────────────────────────────────────────────────────
     def on_start(self) -> None:
@@ -458,13 +485,16 @@ class BarLoggerStrategy(Strategy):
 
             # 初始化状态机（如果之前没初始化过）
             if sym not in self._st_m1:
-                self._st_m1[sym]     = _STState(self.config.st_period, self.config.st_mult)
-                self._ema_m1[sym]    = _EMAState(self.config.ema_period)
-                self._st_m5[sym]     = _STState(self.config.st_period, self.config.st_mult_m5)
-                self._ema_m5[sym]    = _EMAState(self.config.ema_period)
-                self._mom_m5[sym]    = _MomentumATRState()
-                self._atr_m1[sym]    = AverageTrueRange(14, MovingAverageType.WILDER)  # M1 ATR 供动量窗口使用
-                self._m5_bucket[sym] = _M5Bucket()
+                self._st_m1[sym]       = _STState(self.config.st_period, self.config.st_mult)
+                self._ema_m1[sym]      = _EMAState(self.config.ema_period)
+                self._st_m5[sym]       = _STState(self.config.st_period, self.config.st_mult_m5)
+                self._ema_m5[sym]      = _EMAState(self.config.ema_period)   # EMA21 on M5
+                self._ema9_m5[sym]     = _EMAState(9)                         # EMA9 on M5
+                self._atr_m5[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)  # ATR14 on M5
+                self._ema_diff_win[sym] = []                                   # 滚动6根差值窗口
+                self._mom_m5[sym]      = _MomentumATRState()
+                self._atr_m1[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)  # M1 ATR 供动量窗口使用
+                self._m5_bucket[sym]   = _M5Bucket()
                 self.log.info(f"[Strategy][Async] {sym}: 状态机初始化完成")
 
             # 构造 BarType 并请求历史数据
@@ -700,26 +730,36 @@ class BarLoggerStrategy(Strategy):
             # 计算 M5 指标，但不写 Redis
             o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
             if sym not in self._st_m5:
-                self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
-                self._ema_m5[sym] = _EMAState(self.config.ema_period)
-                self._mom_m5[sym] = _MomentumATRState()
+                self._st_m5[sym]       = _STState(self.config.st_period, self.config.st_mult_m5)
+                self._ema_m5[sym]      = _EMAState(self.config.ema_period)
+                self._ema9_m5[sym]     = _EMAState(9)
+                self._atr_m5[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)
+                self._ema_diff_win[sym] = []
+                self._mom_m5[sym]      = _MomentumATRState()
             if sym not in self._mom_m5:
                 self._mom_m5[sym] = _MomentumATRState()
             if sym not in self._atr_m1:
                 self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
             st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
             ema21_5 = self._ema_m5[sym].update(c5)
+            ema9_5  = self._ema9_m5[sym].update(c5)
+            # 更新 M5 ATR
+            self._atr_m5[sym].update_raw(h5, lo5, c5)
+            # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
+            ema_diff_int = self._push_ema_diff_int(sym, ema9_5, ema21_5)
             # 获取当前 M1 ATR 值（已按每根 M1 bar 更新）
             m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
             mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val)
             m5_bar = {
                 **m5_out,
-                "ema21":    ema21_5,
-                "st_value": st_val5,
-                "st_dir":   st_dir5,
-                "st_upper": st_up5,
-                "st_lower": st_lo5,
-                "mom_atr":  mom_atr5,
+                "ema21":        ema21_5,
+                "ema9":         ema9_5,         # EMA9 on M5（供前端分类判断）
+                "st_value":     st_val5,
+                "st_dir":       st_dir5,
+                "st_upper":     st_up5,
+                "st_lower":     st_lo5,
+                "mom_atr":      mom_atr5,
+                "ema_diff_int": ema_diff_int,  # 30分钟EMA差值积分 / M5_ATR14
             }
             self._hist_m5[sym].append(m5_bar)
             self.log.debug(
@@ -789,18 +829,21 @@ class BarLoggerStrategy(Strategy):
                     # 未完成 bar 仅用于展示：复用最后一根完整 M5 的指标值，不调用 update()
                     # 原因：未完成 bar 的 close 此时只是临时值，后续实时 on_bar() 还会继续更新；
                     # 若此处调用 update() 会将这个临时 close 喂入 EMA/ST 状态机，导致累计偏差
-                    ema21_5 = prev_complete_m5.get("ema21")    if prev_complete_m5 else None
-                    st_val5 = prev_complete_m5.get("st_value") if prev_complete_m5 else 0.0
-                    st_dir5 = prev_complete_m5.get("st_dir")   if prev_complete_m5 else -1
-                    st_up5  = prev_complete_m5.get("st_upper") if prev_complete_m5 else 0.0
-                    st_lo5  = prev_complete_m5.get("st_lower") if prev_complete_m5 else 0.0
+                    ema21_5       = prev_complete_m5.get("ema21")        if prev_complete_m5 else None
+                    st_val5       = prev_complete_m5.get("st_value")     if prev_complete_m5 else 0.0
+                    st_dir5       = prev_complete_m5.get("st_dir")       if prev_complete_m5 else -1
+                    st_up5        = prev_complete_m5.get("st_upper")     if prev_complete_m5 else 0.0
+                    st_lo5        = prev_complete_m5.get("st_lower")     if prev_complete_m5 else 0.0
+                    ema_diff_int5 = prev_complete_m5.get("ema_diff_int") if prev_complete_m5 else None
                     m5_bars.append({
                         **last_m5,
-                        "ema21":    ema21_5,
-                        "st_value": st_val5,
-                        "st_dir":   st_dir5,
-                        "st_upper": st_up5,
-                        "st_lower": st_lo5,
+                        "ema21":        ema21_5,
+                        "ema9":         None,          # 未完成 bar 不计算 EMA9
+                        "st_value":     st_val5,
+                        "st_dir":       st_dir5,
+                        "st_upper":     st_up5,
+                        "st_lower":     st_lo5,
+                        "ema_diff_int": ema_diff_int5,
                     })
                     self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket（仅展示）  C={c5:.2f}  EMA21={ema21_5}")
 
@@ -881,12 +924,18 @@ class BarLoggerStrategy(Strategy):
                 o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
                 st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
                 ema21_5 = self._ema_m5[sym].update(c5)
+                ema9_5  = self._ema9_m5[sym].update(c5) if sym in self._ema9_m5 else None
+                # 更新 M5 ATR
+                if sym in self._atr_m5:
+                    self._atr_m5[sym].update_raw(h5, lo5, c5)
+                # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
+                ema_diff_int5 = self._push_ema_diff_int(sym, ema9_5, ema21_5)
                 m1_atr_val = self._atr_m1[sym].value if sym in self._atr_m1 and self._atr_m1[sym].initialized else None
                 mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val) if sym in self._mom_m5 else None
                 m5_bar = {
-                    **m5_out, "symbol": sym, "ema21": ema21_5,
+                    **m5_out, "symbol": sym, "ema21": ema21_5, "ema9": ema9_5,
                     "st_value": st_val5, "st_dir": st_dir5, "st_upper": st_up5, "st_lower": st_lo5,
-                    "mom_atr": mom_atr5,
+                    "mom_atr": mom_atr5, "ema_diff_int": ema_diff_int5,
                 }
                 m5_json = json.dumps(m5_bar)
                 key_m5 = f"bars:5m:{sym}"
@@ -1049,8 +1098,11 @@ class BarLoggerStrategy(Strategy):
 
         if sym not in self._st_m5:
             self.log.warning(f"[M5] {sym}: M5 状态机未初始化，临时创建")
-            self._st_m5[sym]  = _STState(self.config.st_period, self.config.st_mult_m5)
-            self._ema_m5[sym] = _EMAState(self.config.ema_period)
+            self._st_m5[sym]       = _STState(self.config.st_period, self.config.st_mult_m5)
+            self._ema_m5[sym]      = _EMAState(self.config.ema_period)
+            self._ema9_m5[sym]     = _EMAState(9)
+            self._atr_m5[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)
+            self._ema_diff_win[sym] = []
 
         # 动量窗口状态机（如果不存在则临时初始化）
         if sym not in self._mom_m5:
@@ -1060,6 +1112,11 @@ class BarLoggerStrategy(Strategy):
 
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
         ema21_m5 = self._ema_m5[sym].update(c)
+        ema9_m5  = self._ema9_m5[sym].update(c)
+        # 更新 M5 ATR
+        self._atr_m5[sym].update_raw(h, lo, c)
+        # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
+        ema_diff_int = self._push_ema_diff_int(sym, ema9_m5, ema21_m5)
         # 动量 = (当前M5 close − 2根前M5 bar的open) / M1_ATR_14（15分钟K线实体归一化）
         m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
         mom_atr = self._mom_m5[sym].update(o, c, m1_atr_val)
@@ -1081,13 +1138,15 @@ class BarLoggerStrategy(Strategy):
 
         m5_bar = {
             **m5_raw,
-            "ema21":    ema21_m5,
-            "st_value": st_val,
-            "st_dir":   st_dir,
-            "st_upper": st_up,
-            "st_lower": st_lo,
-            "nh_score": nh_score,   # 日内连续新高计数（跌破清零）
-            "mom_atr":  mom_atr,    # 归一化动量窗口 = (C₀-C₋₂)/ATR₁₄
+            "ema21":        ema21_m5,
+            "ema9":         ema9_m5,      # EMA9 on M5（供前端分类判断）
+            "st_value":     st_val,
+            "st_dir":       st_dir,
+            "st_upper":     st_up,
+            "st_lower":     st_lo,
+            "nh_score":     nh_score,     # 日内连续新高计数（跌破清零）
+            "mom_atr":      mom_atr,      # 归一化动量窗口 = (C₀-C₋₂)/ATR₁₄
+            "ema_diff_int": ema_diff_int, # 30分钟EMA差值积分/M5_ATR14
         }
 
         self.log.info(
