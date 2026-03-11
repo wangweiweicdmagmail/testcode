@@ -69,11 +69,15 @@ class ExternalOrderCommand(Event):
         instrument_id: str,
         side: str,            # "BUY" | "SELL"
         qty: int,
-        order_type: str = "MARKET",  # "MARKET" | "LIMIT" | "BRACKET"
+        order_type: str = "MARKET",  # "MARKET" | "LIMIT" | "BRACKET" | "LIMIT_BRACKET"
         price: float | None = None,
-        stop_loss: float | None = None,    # BRACKET: 止损触发价
+        stop_loss: float | None = None,    # BRACKET/LIMIT_BRACKET: 止损触发价
         sl_steps: list | None = None,     # BRACKET: 依次修改的止损价列表 [602, 603]
         sl_step_secs: int = 60,           # BRACKET: 两次修改的间隔秒数
+        # ── LIMIT_BRACKET 新增字段 ───────────────────────────────
+        tp_price: float | None = None,     # 半仓止盈限价
+        tp_qty: int | None = None,         # 止盈股数（通常为 floor(qty/2)）
+        entry_price: float | None = None,  # 入场价（止盈触发后用于将止损移到保本）
     ) -> None:
         # Cython Event 子类：直接设置私有属性，不调 super().__init__()
         self._id = UUID4()
@@ -88,12 +92,18 @@ class ExternalOrderCommand(Event):
         self.stop_loss = stop_loss
         self.sl_steps = sl_steps or []
         self.sl_step_secs = sl_step_secs
+        # LIMIT_BRACKET 字段
+        self.tp_price = tp_price
+        self.tp_qty = int(tp_qty) if tp_qty is not None else None
+        self.entry_price = entry_price  # 备忘入场价，止盈触发后将剩余半仓止损移到此价
 
     def __repr__(self) -> str:
         return (
             f"ExternalOrderCommand("
             f"{self.order_type} {self.side} {self.qty}x {self.instrument_id}"
-            f"{f' @ {self.price}' if self.price else ''})"
+            f"{f' @ {self.price}' if self.price else ''}"
+            f"{f' SL={self.stop_loss}' if self.stop_loss else ''}"
+            f"{f' TP={self.tp_price}x{self.tp_qty}' if self.tp_price else ''})"
         )
 
 
@@ -155,6 +165,12 @@ class OrderGatewayActor(Strategy):
         # 跟踪止损开关状态（sym -> bool）
         self._st_trail_active: dict[str, bool] = {}
         self._ema_trail_active: dict[str, bool] = {}
+        # ── LIMIT_BRACKET 止盈/止盈联动字典 ──────────────────────
+        # tp_coid -> (sl_coid, entry_price, instrument, sl_remaining_qty)
+        # 止盈单成交时：修改 SL 单（数量减半 + 止损移至入场价）
+        self._pending_tp: dict[str, tuple] = {}
+        # sl_coid -> tp_coid（止损单成交时：反向取消止盈单）
+        self._sl_to_tp:   dict[str, str]   = {}
 
 
     # ------------------------------------------------------------------
@@ -977,6 +993,71 @@ class OrderGatewayActor(Strategy):
                 f"止损待入场单成交后提交 @ {event.stop_loss}"
             )
 
+        elif event.order_type == "LIMIT_BRACKET":
+            # 限价入场 + 全仓止损 + 半仓止盈
+            # 入场单成交后才依次提交 SL/TP，避免挑价单与止损单互刻
+            if event.price is None:
+                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 price")
+                return
+            if event.stop_loss is None:
+                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 stop_loss")
+                return
+            if event.tp_price is None or event.tp_qty is None:
+                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 tp_price 和 tp_qty")
+                return
+
+            # 入场单（LIMIT，GTC）
+            entry_order = self.order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=order_side,
+                quantity=quantity,
+                price=instrument.make_price(Decimal(str(event.price))),
+                time_in_force=TimeInForce.GTC,
+                tags=self._fa_tags(),
+            )
+
+            # 止损单（全仓 STOP_MARKET）
+            sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
+            sl_order = self.order_factory.stop_market(
+                instrument_id=instrument_id,
+                order_side=sl_side,
+                quantity=quantity,
+                trigger_price=instrument.make_price(Decimal(str(event.stop_loss))),
+                time_in_force=TimeInForce.GTC,
+                tags=self._fa_tags(),
+            )
+
+            # 止盈单（半仓 LIMIT）
+            tp_side = sl_side  # 平仓方向和止损相同
+            tp_qty  = instrument.make_qty(Decimal(event.tp_qty))
+            tp_order = self.order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=tp_side,
+                quantity=tp_qty,
+                price=instrument.make_price(Decimal(str(event.tp_price))),
+                time_in_force=TimeInForce.GTC,
+                tags=self._fa_tags(),
+            )
+
+            entry_price = event.entry_price or event.price  # 备忘入场价，止盈触发后用于保本
+            # 将 SL + TP + entry_price 存入待提交字典
+            self._pending_sl[entry_order.client_order_id.value] = (
+                sl_order,
+                tp_order,
+                entry_price,
+                instrument,
+            )
+
+            # 只提交入场单
+            self.submit_order(entry_order)
+            self.log.info(
+                f"[Gateway] LIMIT_BRACKET 入场单已提交 | "
+                f"Entry={entry_order.client_order_id} LIMIT {order_side.name} qty={quantity} "
+                f"price={event.price} {instrument_id} | "
+                f"止损={event.stop_loss} | 止盈={event.tp_price}x{event.tp_qty} | "
+                f"入场单成交后自动提交 SL/TP"
+            )
+
         else:
             self.log.error(f"[Gateway] 不支持的订单类型: {event.order_type}")
             return
@@ -1211,35 +1292,124 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.warning(f"[SL] on_order_filled 清除止损记录失败: {e}")
 
-        # BRACKET：入场单成交后自动提交止损单
+        # BRACKET 或 LIMIT_BRACKET：入场单成交后自动提交止损单
         coid = event.client_order_id.value
         if coid in self._pending_sl:
-            sl_order, sl_steps, sl_step_secs, instrument = self._pending_sl.pop(coid)
-            self.log.info(
-                f"[SL] BRACKET 入场单 {coid} 已成交，"
-                f"正在提交止损单 {sl_order.client_order_id} "
-                f"@ trigger_price={sl_order.trigger_price}  "
-                f"qty={sl_order.quantity}  止损设置步={sl_steps}  "
-                f"设置间隔={sl_step_secs}s"
-            )
-            self.submit_order(sl_order)
-            self.log.info(f"[SL] submit_order 已调用，止损单={sl_order.client_order_id}")
-            # 止损价定时修改任务
-            for i, new_sl in enumerate(sl_steps):
-                delay = sl_step_secs * (i + 1)
-                self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
-                task = asyncio.ensure_future(
-                    self._schedule_sl_modify(
-                        sl_order_id=sl_order.client_order_id.value,
-                        instrument=instrument,
-                        new_trigger_price=Decimal(str(new_sl)),
-                        delay_secs=delay,
-                        step_index=i + 1,
-                    )
+            pending = self._pending_sl.pop(coid)
+
+            if len(pending) == 4 and isinstance(pending[1], object) and \
+                    getattr(pending[1], 'order_type', None) is not None:
+                # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument) ──
+                sl_order, tp_order, entry_price, instrument = pending
+                self.log.info(
+                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 已成交，"
+                    f"提交止损={sl_order.client_order_id} SL@{sl_order.trigger_price} "
+                    f"止盈={tp_order.client_order_id} TP@{tp_order.price}x{tp_order.quantity}"
                 )
-                self._sl_tasks.append(task)
+                self.submit_order(sl_order)
+                self.submit_order(tp_order)
+                # 双向关联：止盈单 coid ↔ 止损单 coid
+                sl_coid = sl_order.client_order_id.value
+                tp_coid = tp_order.client_order_id.value
+                self._pending_tp[tp_coid] = (sl_coid, entry_price, instrument, sl_order.quantity)
+                self._sl_to_tp[sl_coid]   = tp_coid
+                self.log.info(
+                    f"[SL/TP] 双向关联已建立: SL={sl_coid} ↔ TP={tp_coid}  入场价={entry_price}"
+                )
+            else:
+                # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
+                sl_order, sl_steps, sl_step_secs, instrument = pending
+                self.log.info(
+                    f"[SL] BRACKET 入场单 {coid} 已成交，"
+                    f"正在提交止损单 {sl_order.client_order_id} "
+                    f"@ trigger_price={sl_order.trigger_price}  "
+                    f"qty={sl_order.quantity}  止损设置步={sl_steps}  "
+                    f"设置间隔={sl_step_secs}s"
+                )
+                self.submit_order(sl_order)
+                self.log.info(f"[SL] submit_order 已调用，止损单={sl_order.client_order_id}")
+                # 止损价定时修改任务
+                for i, new_sl in enumerate(sl_steps):
+                    delay = sl_step_secs * (i + 1)
+                    self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
+                    task = asyncio.ensure_future(
+                        self._schedule_sl_modify(
+                            sl_order_id=sl_order.client_order_id.value,
+                            instrument=instrument,
+                            new_trigger_price=Decimal(str(new_sl)),
+                            delay_secs=delay,
+                            step_index=i + 1,
+                        )
+                    )
+                    self._sl_tasks.append(task)
         else:
-            self.log.info(f"[SL] 成交单 {coid} 不在 _pending_sl 中（非 BRACKET 入场单或已处理）")
+            # 检查是否是 LIMIT_BRACKET 的止盈单成交
+            coid_str = coid
+
+            # ─── 情况A：止盈单成交 → 取消止盈单 ──────────────────────
+            if coid_str in self._sl_to_tp:
+                tp_coid_to_cancel = self._sl_to_tp.pop(coid_str)
+                self._pending_tp.pop(tp_coid_to_cancel, None)  # 清除止盈记录
+                tp_order_to_cancel = self.cache.order(ClientOrderId(tp_coid_to_cancel))
+                if tp_order_to_cancel and tp_order_to_cancel.is_open:
+                    try:
+                        self.cancel_order(tp_order_to_cancel)
+                        self.log.info(
+                            f"[SL/TP] 止损已触发，自动取消止盈单 {tp_coid_to_cancel}"
+                        )
+                    except Exception as e:
+                        self.log.error(f"[SL/TP] 取消止盈单失败: {e}")
+                else:
+                    self.log.info(
+                        f"[SL/TP] 止损触发，止盈单 {tp_coid_to_cancel} 已不活跃（可能已成交或撤销）"
+                    )
+
+            # ─── 情况B：止盈单成交 → 修改 SL（减半 + 保本）────────────
+            elif coid_str in self._pending_tp:
+                sl_coid, entry_price, instrument, orig_sl_qty = self._pending_tp.pop(coid_str)
+                self._sl_to_tp.pop(sl_coid, None)  # 清除止损单反向映射
+                sl_order = self.cache.order(ClientOrderId(sl_coid))
+                if sl_order and sl_order.is_open:
+                    try:
+                        # 数量减半（剩余半仓）
+                        half_qty = instrument.make_qty(
+                            Decimal(str(int(orig_sl_qty) // 2))
+                        )
+                        # 止损价移至入场价（保本）
+                        breakeven_price = instrument.make_price(
+                            Decimal(str(entry_price))
+                        )
+                        self.modify_order(
+                            order=sl_order,
+                            quantity=half_qty,
+                            trigger_price=breakeven_price,
+                        )
+                        self.log.info(
+                            f"[SL/TP] 半仓止盈已触发，止损单已修改: "
+                            f"数量 {orig_sl_qty} → {half_qty}，"
+                            f"止损价 → 保本价 {breakeven_price}"
+                        )
+                        # 同步更新 Redis order:stop 记录中的价格
+                        sym = sl_order.instrument_id.symbol.value
+                        if self._redis:
+                            try:
+                                stored = self._redis.get(f"order:stop:{sym}")
+                                if stored:
+                                    data = json.loads(stored)
+                                    data["trigger_price"] = str(entry_price)
+                                    self._redis.set(f"order:stop:{sym}", json.dumps(data))
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        self.log.error(
+                            f"[SL/TP] 半仓止盈后修改 SL 失败: {e}  sl_coid={sl_coid}"
+                        )
+                else:
+                    self.log.warning(
+                        f"[SL/TP] 止盈已触发，但止损单 {sl_coid} 已不活跃，跳过保本修改"
+                    )
+            else:
+                self.log.info(f"[SL] 成交单 {coid} 不在 _pending_sl 中（非 BRACKET 入场单或已处理）")
 
 
     def on_order_partially_filled(self, event) -> None:

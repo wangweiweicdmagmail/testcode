@@ -921,6 +921,122 @@
     .acct-flash {
       animation: acct-flash 1.2s ease-out;
     }
+
+    /* ─── 限价单开仓 UI ──────────────────────────────────────── */
+    .btn-limit-open {
+      background: #3d7eff;
+      color: #fff;
+    }
+
+    /* 限价入场价格把手（蓝色，区别于红色止损把手） */
+    #lp-handle {
+      display: none;
+      position: absolute;
+      right: 58px;
+      transform: translateY(-50%);
+      align-items: center;
+      gap: 6px;
+      background: #3d7eff;
+      border-radius: 20px;
+      padding: 6px 14px 6px 10px;
+      cursor: ns-resize;
+      z-index: 49;
+      user-select: none;
+      box-shadow: 0 2px 10px rgba(61, 126, 255, .55);
+      white-space: nowrap;
+    }
+    #lp-handle.active {
+      display: flex;
+      animation: pulse-blue 2s infinite;
+    }
+    @keyframes pulse-blue {
+      0%   { box-shadow: 0 0 0 0 rgba(61,126,255,.5), 0 2px 10px rgba(61,126,255,.55); }
+      70%  { box-shadow: 0 0 0 8px rgba(61,126,255,0), 0 2px 10px rgba(61,126,255,.55); }
+      100% { box-shadow: 0 0 0 0 rgba(61,126,255,0),  0 2px 10px rgba(61,126,255,.55); }
+    }
+    #lp-handle:active { animation: none; box-shadow: 0 0 0 4px rgba(61,126,255,.35); }
+    #lp-handle .lp-label {
+      font-size: 11px; color: rgba(255,255,255,.75); font-weight: 500; letter-spacing: .04em;
+    }
+    #lp-handle .lp-price {
+      font-size: 14px; font-family: 'Roboto Mono', monospace, sans-serif;
+      font-weight: 700; color: #fff;
+    }
+
+    /* 限价单浮动面板 */
+    #limit-order-panel {
+      display: none;
+      position: absolute;
+      top: 35px;
+      left: 10px;
+      width: 230px;
+      background: rgba(19, 23, 34, .97);
+      border: 1px solid #3d7eff44;
+      border-radius: 10px;
+      padding: 16px;
+      z-index: 60;
+      box-shadow: 0 8px 28px rgba(0,0,0,.6), 0 0 0 1px rgba(61,126,255,.15);
+      backdrop-filter: blur(6px);
+    }
+    #limit-order-panel.active { display: block; }
+    .lop-header {
+      display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 10px;
+    }
+    .lop-title {
+      font-size: 13px; font-weight: 700; color: #a0b4ff;
+      letter-spacing: .04em;
+    }
+    .lop-close-btn {
+      background: none; border: none; color: #787b86;
+      font-size: 15px; cursor: pointer; padding: 0 2px;
+    }
+    .lop-field {
+      display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 7px;
+    }
+    .lop-label {
+      font-size: 11px; color: #787b86;
+    }
+    .lop-field input, .lop-field select {
+      background: #1e222d; border: 1px solid #2a2e39;
+      border-radius: 4px; color: #d1d4dc;
+      font-size: 12px; padding: 4px 8px;
+      text-align: right;
+    }
+    .lop-field input { width: 90px; }
+    .lop-field select { width: 110px; cursor: pointer; }
+    .lop-divider { height: 1px; background: #2a2e39; margin: 8px 0; }
+    .lop-calc-row {
+      display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 4px;
+    }
+    .lop-calc-label { font-size: 11px; color: #787b86; }
+    .lop-calc-val {
+      font-size: 12px; font-weight: 700;
+      font-family: 'Roboto Mono', monospace, sans-serif; color: #d1d4dc;
+    }
+    .lop-calc-val.up   { color: #26a69a; }
+    .lop-calc-val.down { color: #ef5350; }
+    .lop-calc-val.blue { color: #60a5fa; }
+    .lop-footer { display: flex; gap: 8px; margin-top: 12px; }
+    .lop-btn {
+      flex: 1; padding: 7px 0; border: none; border-radius: 5px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: opacity .15s;
+    }
+    .lop-btn:hover { opacity: .82; }
+    .lop-btn.cancel  { background: #2a2e39; color: #d1d4dc; }
+    .lop-btn.confirm { background: #3d7eff; color: #fff; }
+    .lop-btn.confirm.sell { background: #ef5350; }
+    .lop-dir-badge {
+      display: inline-block; padding: 3px 12px; border-radius: 12px;
+      font-size: 12px; font-weight: 700; margin-bottom: 10px;
+      letter-spacing: .04em;
+    }
+    .lop-dir-badge.buy  { background: rgba(38,166,154,.18); color: #26a69a; border: 1px solid #26a69a; }
+    .lop-dir-badge.sell { background: rgba(239,83,80,.18);  color: #ef5350; border: 1px solid #ef5350; }
+    .lop-hint { font-size: 10px; color: #787b86; margin-top: 5px; text-align: center; }
   </style>
 </head>
 
@@ -1021,6 +1137,7 @@
         </select>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
+        <button class="btn btn-limit-open" id="btn-limit-open">限价单⬇</button>
         <button class="btn btn-close" id="btn-close">平仓</button>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <!-- 引擎心跳指示器 -->
@@ -1066,6 +1183,93 @@
           <div class="legend-dot" style="background:#ffffff"></div>
           <span style="color:#ffffff">EMA21(M5)</span>
         </div>
+      </div>
+
+      <!-- 限价单面板（独立于 #order-panel） -->
+      <div id="limit-order-panel">
+        <div class="lop-header">
+          <span class="lop-title">🟦 限价单夈</span>
+          <button class="lop-close-btn" id="lop-close">✕</button>
+        </div>
+
+        <!-- 方向 badge（只读，自动判断） -->
+        <div id="lop-dir-badge" class="lop-dir-badge buy">▲ 做多</div>
+
+        <!-- 限价入场价（拖动图表环形设定） -->
+        <div class="lop-field">
+          <span class="lop-label">限价入场价</span>
+          <span id="lop-entry-display" class="lop-calc-val blue">— 拖动设定</span>
+        </div>
+
+        <!-- 最大亏损（可输入） -->
+        <div class="lop-field">
+          <span class="lop-label">最大亏损 ($)</span>
+          <input type="number" id="lop-max-loss" value="100" min="1" step="10">
+        </div>
+
+        <!-- 止损单位 - N倍 ATR14 -->
+        <div class="lop-field">
+          <span class="lop-label">止损单位</span>
+          <select id="lop-atr-mult">
+            <option value="0.5">0.5× ATR14</option>
+            <option value="1.0" selected>1.0× ATR14</option>
+            <option value="1.5">1.5× ATR14</option>
+            <option value="2.0">2.0× ATR14</option>
+          </select>
+        </div>
+
+        <!-- 盈亏比（半仓止盈） -->
+        <div class="lop-field">
+          <span class="lop-label">半仓盈亏比</span>
+          <select id="lop-rr">
+            <option value="2">1 : 2</option>
+            <option value="3" selected>1 : 3</option>
+            <option value="4">1 : 4</option>
+            <option value="5">1 : 5</option>
+          </select>
+        </div>
+
+        <div class="lop-divider"></div>
+
+        <!-- 自动计算结果（只读） -->
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">M1 ATR14</span>
+          <span class="lop-calc-val" id="lop-atr-val">—</span>
+        </div>
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">止损价</span>
+          <span class="lop-calc-val down" id="lop-sl-val">—</span>
+        </div>
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">半仓止盈价</span>
+          <span class="lop-calc-val up" id="lop-tp-val">—</span>
+        </div>
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">建议股数</span>
+          <span class="lop-calc-val" id="lop-qty-val">—</span>
+        </div>
+        <div class="lop-calc-row">
+          <span class="lop-calc-label">仓位金额</span>
+          <span class="lop-calc-val" id="lop-cost-val">—</span>
+        </div>
+
+        <div id="lop-hint" class="lop-hint"></div>
+
+        <div class="lop-footer">
+          <button class="lop-btn cancel" id="lop-cancel">取消</button>
+          <button class="lop-btn confirm" id="lop-confirm">确认限价单</button>
+        </div>
+      </div>
+
+      <!-- 限价入场价格把手（蓝色，可拖动） -->
+      <div id="lp-handle" title="上下拖动设定限价入场价">
+        <svg width="12" height="16" viewBox="0 0 12 16" fill="none" style="flex-shrink:0;opacity:.9">
+          <path d="M6 0L10 5H2L6 0Z" fill="white" />
+          <path d="M6 16L2 11H10L6 16Z" fill="white" />
+          <rect x="5" y="5" width="2" height="6" rx="1" fill="white" opacity=".5" />
+        </svg>
+        <span class="lp-label">限价</span>
+        <span class="lp-price">—</span>
       </div>
 
       <!-- 止损一体化拖动控件 -->
@@ -2460,9 +2664,309 @@
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateHandlePosition());
     chart.priceScale('right').applyOptions({});
 
-    // ─── 仓位操作按钮逻辑 ───────────────────────
-    const openModal = document.getElementById('open-modal');
+    // ─────────────────────────────────────────────────────────────────────
+    // 限价单开仓模块（LIMIT_BRACKET）
+    // 独立于现有市价单开仓逻辑，互不干扰
+    // ─────────────────────────────────────────────────────────────────────
 
+    // 限价模式状态
+    let limitMode = false;          // 是否在限价单模式
+    let lpPrice = null;             // 当前限价入场价
+    let lpPriceLine = null;         // 图表上的蓝色入场价格线
+    let lpSLLine = null;            // 灰色止损预览线
+    let lpTPLine = null;            // 绿色止盈预览线
+    let lpDir = 'BUY';              // 方向：'BUY'|'SELL'（自动根据 close/lpPrice 判断）
+    let isDraggingLP = false;       // 是否正在拖动限价线
+
+    const limitPanel  = document.getElementById('limit-order-panel');
+    const lpHandle    = document.getElementById('lp-handle');
+    const lpPriceVal  = lpHandle ? lpHandle.querySelector('.lp-price')  : null;
+    const dragCap     = document.getElementById('drag-capture');  // 复用现有透明覆盖层
+
+    // ─── ATR14（Wilder's Smoothed）计算 ───────────────────────────────
+    function calcATR14(bars) {
+        if (!bars || bars.length < 15) return null;
+        const recent = bars.slice(-28);  // 多取一点数据保证 14 期预热
+        // 第一个 ATR 用简单平均（第1~14根TR的均值）
+        let tr;
+        const trs = [];
+        for (let i = 1; i < recent.length; i++) {
+            const h = recent[i].high, l = recent[i].low, pc = recent[i - 1].close;
+            tr = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+            trs.push(tr);
+        }
+        if (trs.length < 14) return null;
+        // 初始 ATR（前14个TR简单平均）
+        let atr = trs.slice(0, 14).reduce((s, v) => s + v, 0) / 14;
+        // Wilder 平滑
+        for (let i = 14; i < trs.length; i++) {
+            atr = (atr * 13 + trs[i]) / 14;
+        }
+        return atr;
+    }
+
+    // ─── 蓝色限价线辅助 ──────────────────────────────────────────────────
+    function setLPLine(price) {
+        if (lpPriceLine) {
+            try { candleSeries.removePriceLine(lpPriceLine); } catch (_) {}
+            lpPriceLine = null;
+        }
+        if (!price) return;
+        lpPriceLine = candleSeries.createPriceLine({
+            price,
+            color: '#3d7eff',
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `⬇ 限价 @${price.toFixed(2)}`,
+        });
+    }
+
+    function setLPSlPreview(price) {
+        if (lpSLLine) {
+            try { candleSeries.removePriceLine(lpSLLine); } catch (_) {}
+            lpSLLine = null;
+        }
+        if (!price) return;
+        lpSLLine = candleSeries.createPriceLine({
+            price,
+            color: '#ef535088',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `SL ${price.toFixed(2)}`,
+        });
+    }
+
+    function setLPTpPreview(price) {
+        if (lpTPLine) {
+            try { candleSeries.removePriceLine(lpTPLine); } catch (_) {}
+            lpTPLine = null;
+        }
+        if (!price) return;
+        lpTPLine = candleSeries.createPriceLine({
+            price,
+            color: '#26a69a88',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `TP½ ${price.toFixed(2)}`,
+        });
+    }
+
+    function clearLPLines() {
+        setLPLine(null); setLPSlPreview(null); setLPTpPreview(null);
+    }
+
+    // ─── 实时计算（ATR / 止损价 / 止盈价 / 股数 / 金额）───────────────────
+    function updateLimitCalc() {
+        const atr14 = calcATR14(currentBars);
+        const atrMult = parseFloat(document.getElementById('lop-atr-mult').value) || 1.0;
+        const rr      = parseFloat(document.getElementById('lop-rr').value) || 3;
+        const maxLoss = parseFloat(document.getElementById('lop-max-loss').value) || 100;
+
+        document.getElementById('lop-atr-val').textContent =
+            atr14 != null ? atr14.toFixed(4) : 'ATR 数据不足';
+
+        if (!lpPrice || atr14 == null) {
+            ['lop-sl-val','lop-tp-val','lop-qty-val','lop-cost-val'].forEach(id =>
+                document.getElementById(id).textContent = '—'
+            );
+            document.getElementById('lop-confirm').disabled = true;
+            document.getElementById('lop-hint').textContent =
+                lpPrice == null ? '请在图表上拖动蓝色线设定入场价' : 'ATR 数据不足（需 ≥15 根 M1 bar）';
+            return;
+        }
+
+        const stopDist = atr14 * atrMult;
+        const slPrice = lpDir === 'BUY' ? lpPrice - stopDist : lpPrice + stopDist;
+        const tpPrice = lpDir === 'BUY' ? lpPrice + stopDist * rr : lpPrice - stopDist * rr;
+
+        // 股数：由最大亏损 / 每股止损距离计算
+        const available = accountInfo.available_cash || 0;
+        const total     = accountInfo.total_equity   || 0;
+        const cashCap   = available > 0 ? Math.min(available * 0.9, total) : Infinity;
+        const qtyByLoss = Math.floor(maxLoss / stopDist);
+        const qtyByCash = cashCap < Infinity && lpPrice > 0 ? Math.floor(cashCap / lpPrice) : Infinity;
+        const qty = Math.min(qtyByLoss, qtyByCash);
+        const tpQty = Math.floor(qty / 2);  // 半仓止盈
+        const cost  = qty * lpPrice;
+
+        document.getElementById('lop-sl-val').textContent =
+            `${slPrice.toFixed(2)} (${(((lpPrice - slPrice) / lpPrice) * 100).toFixed(2)}%)`;
+        document.getElementById('lop-tp-val').textContent =
+            `${tpPrice.toFixed(2)} (+${(stopDist * rr).toFixed(2)})`;
+        document.getElementById('lop-qty-val').textContent =
+            qty > 0 ? `${qty} 股 (止盈 ${tpQty})` : '⚠️ <1股';
+        document.getElementById('lop-cost-val').textContent =
+            `$${cost.toLocaleString('en-US', {maximumFractionDigits: 0})}`;
+
+        // 方向 badge 更新
+        const badge = document.getElementById('lop-dir-badge');
+        badge.textContent = lpDir === 'BUY' ? '▲ 做多' : '▼ 做空';
+        badge.className   = `lop-dir-badge ${lpDir === 'BUY' ? 'buy' : 'sell'}`;
+        // 确认按钮文字
+        const confirmBtn = document.getElementById('lop-confirm');
+        confirmBtn.textContent = lpDir === 'BUY' ? '确认做多限价单' : '确认做空限价单';
+        confirmBtn.className   = `lop-btn confirm${lpDir === 'SELL' ? ' sell' : ''}`;
+        confirmBtn.disabled    = (qty < 1);
+
+        // 更新止损/止盈预览线
+        setLPSlPreview(slPrice);
+        setLPTpPreview(tpPrice);
+
+        // 资金提示
+        const pct = total > 0 ? (cost / total * 100).toFixed(1) : null;
+        document.getElementById('lop-hint').textContent =
+            pct != null ? `占净资产 ${pct}%` : '';
+
+        return { slPrice, tpPrice, qty, tpQty };
+    }
+
+    // ─── 进入 / 退出限价模式 ──────────────────────────────────────────────
+    function enterLimitMode() {
+        // 如果市价单模式开着，先退出
+        if (orderMode) exitOrderMode();
+        limitMode = true;
+
+        // 默认入场价 = 当前收盘价
+        lpPrice = latestClose || null;
+        // 方向根据 close vs EMA21 自动判等（简化：默认买入）
+        lpDir = 'BUY';
+
+        limitPanel.classList.add('active');
+        if (lpPrice) {
+            setLPLine(lpPrice);
+            updateLPHandlePosition();
+            if (lpHandle) lpHandle.classList.add('active');
+        }
+        updateLimitCalc();
+    }
+
+    function exitLimitMode() {
+        limitMode = false;
+        isDraggingLP = false;
+        lpPrice = null;
+        limitPanel.classList.remove('active');
+        if (lpHandle) lpHandle.classList.remove('active');
+        clearLPLines();
+        document.body.style.cursor = '';
+        if (dragCap) dragCap.classList.remove('active');
+    }
+
+    // ─── 把手位置同步 ──────────────────────────────────────────────────
+    function updateLPHandlePosition() {
+        if (!limitMode || !lpHandle || !lpPrice) return;
+        const coord = candleSeries.priceToCoordinate(lpPrice);
+        if (coord === null) return;
+        const chartRect = chartEl.getBoundingClientRect();
+        lpHandle.style.top = `${coord}px`;
+        if (lpPriceVal) lpPriceVal.textContent = lpPrice.toFixed(2);
+    }
+
+    // ─── 鼠标拖动逻辑（复用 chartEl 上的 mousemove/mouseup）────────────────
+    if (lpHandle) {
+        lpHandle.addEventListener('mousedown', (e) => {
+            if (!limitMode) return;
+            isDraggingLP = true;
+            e.preventDefault();
+            document.body.style.cursor = 'ns-resize';
+            if (dragCap) dragCap.classList.add('active');
+        });
+    }
+
+    chartEl.addEventListener('mousemove', (e) => {
+        if (!isDraggingLP) return;
+        const rect = chartEl.getBoundingClientRect();
+        const coord = e.clientY - rect.top;
+        const price = candleSeries.coordinateToPrice(coord);
+        if (price == null) return;
+        lpPrice = Math.round(price * 100) / 100;
+        // 根据入场价相对收盘价自动判断方向
+        if (latestClose) lpDir = lpPrice < latestClose ? 'BUY' : 'SELL';
+        setLPLine(lpPrice);
+        updateLPHandlePosition();
+        updateLimitCalc();
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (isDraggingLP) {
+            isDraggingLP = false;
+            document.body.style.cursor = '';
+            if (dragCap) dragCap.classList.remove('active');
+        }
+    });
+
+    // 图表缩放时同步把手位置
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+        if (limitMode) updateLPHandlePosition();
+    });
+
+    // ─── 「限价单」按钮 ─────────────────────────────────────────────────
+    document.getElementById('btn-limit-open').addEventListener('click', () => {
+        if (limitMode) { exitLimitMode(); return; }
+        enterLimitMode();
+    });
+
+    // 面板内关闭/取消按钮
+    document.getElementById('lop-close').addEventListener('click', exitLimitMode);
+    document.getElementById('lop-cancel').addEventListener('click', exitLimitMode);
+
+    // 参数变化 → 重算
+    ['lop-max-loss','lop-atr-mult','lop-rr'].forEach(id =>
+        document.getElementById(id).addEventListener('input', updateLimitCalc)
+    );
+
+    // ─── 确认下限价单 ─────────────────────────────────────────────────
+    document.getElementById('lop-confirm').addEventListener('click', async () => {
+        const calc = updateLimitCalc();
+        if (!calc || !lpPrice) {
+            showToast('⚠️ 参数不完整，无法下单', 'warn'); return;
+        }
+        const { slPrice, tpPrice, qty, tpQty } = calc;
+        if (qty < 1) {
+            showToast('⚠️ 股数不足，请调整参数', 'warn'); return;
+        }
+
+        speak(`${SYMBOL} 限价单已下发，${lpDir === 'BUY' ? '做多' : '做空'} ${qty}股，限价${lpPrice.toFixed(2)}，止损${slPrice.toFixed(2)}`, true);
+
+        try {
+            const resp = await fetch(`/api/order/${SYMBOL}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    side: lpDir,
+                    qty,
+                    price: lpPrice,
+                    stop_loss: slPrice,
+                    tp_price: tpPrice,
+                    tp_qty: tpQty,
+                    entry_price: lpPrice,
+                    order_type: 'LIMIT_BRACKET',
+                }),
+            });
+            const result = await resp.json();
+            if (result.engine_offline || result.error) {
+                speak(`限价单失败，${result.error || '引擎未连接'}`, true);
+                showToast(`⚠️ 引擎未连接或出错: ${result.error || '请启动引擎'}`, 'warn');
+            } else {
+                speak(`${SYMBOL} 限价单已受理`, true);
+                showToast(
+                    `✅ ${SYMBOL} ${lpDir === 'BUY' ? '做多' : '做空'} x${qty} ` +
+                    `限价$${lpPrice.toFixed(2)} SL$${slPrice.toFixed(2)} TP$${tpPrice.toFixed(2)}x${tpQty} 已挂出`,
+                    'ok'
+                );
+                // 在图表上留下一条蓝色入场等待线（不关闭面板，让用户继续调整）
+            }
+        } catch (e) {
+            speak('网络错误，限价单失败', true);
+            showToast(`网络错误: ${e.message}`, 'warn');
+        }
+
+        exitLimitMode();
+    });
+
+    // ─── 开仓按钮 → 进入止损拖动开仓模式 ─────────────────────────────────
     // 开仓按钮 → 进入止损拖动开仓模式
     document.getElementById('btn-open').addEventListener('click', () => {
       enterOrderMode();

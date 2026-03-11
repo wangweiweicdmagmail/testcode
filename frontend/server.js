@@ -479,14 +479,19 @@ app.post('/api/order/:symbol', async (req, res) => {
     if (!instrumentId) {
         return res.status(400).json({ error: `未知标的: ${symbol}，支持: ${Object.keys(SYMBOL_MAP).join(', ')}` });
     }
-    const { side, qty, stop_loss, order_type = 'BRACKET' } = req.body;
+    const { side, qty, stop_loss, order_type = 'BRACKET', price, tp_price, tp_qty, entry_price } = req.body;
     if (!side || !qty) {
         return res.status(400).json({ error: 'side 和 qty 必填' });
     }
     const payload = { instrument_id: instrumentId, side, qty: parseInt(qty), order_type };
-    if (stop_loss != null) payload.stop_loss = parseFloat(stop_loss);
+    if (stop_loss  != null) payload.stop_loss   = parseFloat(stop_loss);
+    // LIMIT / LIMIT_BRACKET 额外参数透传
+    if (price      != null) payload.price        = parseFloat(price);
+    if (tp_price   != null) payload.tp_price     = parseFloat(tp_price);
+    if (tp_qty     != null) payload.tp_qty       = parseInt(tp_qty);
+    if (entry_price != null) payload.entry_price = parseFloat(entry_price);
 
-    console.log(`📤 下单代理 → ${instrumentId} ${side} x${qty} SL=${stop_loss} type=${order_type}`);
+    console.log(`📤 下单代理 → ${instrumentId} ${side} x${qty} SL=${stop_loss} TP=${tp_price}x${tp_qty} type=${order_type}`);
     const data = await proxyToEngine('POST', '/order', payload, { error: '引擎未启动', engine_offline: true });
     res.json(data);
 });
