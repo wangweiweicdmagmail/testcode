@@ -236,10 +236,6 @@
       transform: rotate(-90deg);
     }
 
-    .ind-card.collapsed table {
-      display: none;
-    }
-
     .ind-card-head .dot {
       width: 7px;
       height: 7px;
@@ -729,12 +725,15 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 8px;
+      height: 30px;
+      margin-bottom: 4px;
     }
 
     .op-label {
-      font-size: 11px;
-      color: #787b86;
+      font-size: 14px;
+      color: #a0a4ae;
+      min-width: 90px;
+      flex-shrink: 0;
     }
 
     .op-field input {
@@ -743,9 +742,11 @@
       border: 1px solid #2a2e39;
       border-radius: 4px;
       color: #d1d4dc;
-      font-size: 12px;
+      font-size: 13px;
       padding: 4px 8px;
       text-align: right;
+      height: 26px;
+      box-sizing: border-box;
     }
 
     .op-field input:focus {
@@ -839,7 +840,7 @@
 
     /* 只读计算值（股数、风险、金额） */
     .op-calc-val {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 700;
       font-family: 'Roboto Mono', monospace, sans-serif;
       color: #d1d4dc;
