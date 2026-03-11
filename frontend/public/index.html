@@ -1069,7 +1069,8 @@
     }
     .lop-btn:hover { opacity: .82; }
     .lop-btn.cancel  { background: #2a2e39; color: #d1d4dc; }
-    .lop-btn.confirm { background: #3d7eff; color: #fff; }
+    .lop-btn.confirm { background: #26a69a; color: #fff; }
+    .lop-btn.confirm.buy  { background: #26a69a; }
     .lop-btn.confirm.sell { background: #ef5350; }
     .lop-dir-badge {
       display: inline-block; padding: 3px 12px; border-radius: 12px;
@@ -3008,7 +3009,7 @@
         // 确认按钮文字
         const confirmBtn = document.getElementById('lop-confirm');
         confirmBtn.textContent = lpDir === 'BUY' ? '确认做多限价单' : '确认做空限价单';
-        confirmBtn.className   = `lop-btn confirm${lpDir === 'SELL' ? ' sell' : ''}`;
+        confirmBtn.className   = `lop-btn confirm${lpDir === 'SELL' ? ' sell' : ' buy'}`;
         confirmBtn.disabled    = (qty < 1);
 
         // 更新止损/止盈预览线
