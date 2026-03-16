@@ -171,6 +171,10 @@ class OrderGatewayActor(Strategy):
         self._pending_tp: dict[str, tuple] = {}
         # sl_coid -> tp_coid（止损单成交时：反向取消止盈单）
         self._sl_to_tp:   dict[str, str]   = {}
+        # FA Group 拆单累计器：{entry_coid: accumulated_filled_qty}
+        # IBKR FA Group 每个子账户成交都触发一次 on_order_filled，
+        # 需要累计到达委托量后才真正创建 SL/TP
+        self._fill_accumulator: dict[str, int] = {}
 
 
     # ------------------------------------------------------------------
@@ -1286,28 +1290,55 @@ class OrderGatewayActor(Strategy):
         )
         self._pub_order("FILLED", event)
 
-        # 止损单成交（被触发平仓）→ 清除 Redis 持久化记录
-        # 修复：原代码遗漏此处，导致重启后可能误用已成交的旧止损单 ID
+        # 止损单成交（被触发平仓）→ 清除 Redis 止损单记录 + 仓位记录 + 推送平仓事件
+        # ★ 双保险：不依赖 on_position_closed（FA Group 场景下 NautilusTrader 可能不触发该回调）
         try:
             order = self.cache.order(event.client_order_id)
             if order and getattr(order.order_type, "name", "") == "STOP_MARKET":
                 sym = order.instrument_id.symbol.value
+                # 1. 清除止损单持久化记录
                 self._clear_stop_order(sym, str(event.client_order_id))
-                self.log.info(f"[SL] 止损单已成交触发，清除 Redis 记录: {sym}")
+                self.log.info(f"[SL] 止损单已成交触发，清除 Redis 止损记录: {sym}")
+                # 2. 清除 Redis 仓位记录（防止前端刷新页面后重新显示已平仓的仓位线）
+                if self._redis:
+                    self._redis.delete(f"position:{sym}")
+                    # 3. 推送 position:update closed=true（前端实时清除价格线和仓位面板）
+                    self._redis.publish("position:update", json.dumps({
+                        "symbol": sym,
+                        "closed": True,
+                    }))
+                    self.log.info(f"[SL] 仓位已清除 Redis 并推送 position:update closed=True: {sym}")
         except Exception as e:
-            self.log.warning(f"[SL] on_order_filled 清除止损记录失败: {e}")
+            self.log.warning(f"[SL] on_order_filled 清除止损/仓位记录失败: {e}")
 
         # BRACKET 或 LIMIT_BRACKET：入场单成交后自动提交止损单
+        # ★ FA Group 累计器：IBKR 每个子账户成交都触发 on_order_filled，
+        #   必须累计到达委托量才创建 SL/TP，防止首笔小额成交就建错误数量的止损/止盈
         coid = event.client_order_id.value
         if coid in self._pending_sl:
+            # 累积本次成交量
+            self._fill_accumulator[coid] = self._fill_accumulator.get(coid, 0) + int(event.last_qty)
+            total_filled = self._fill_accumulator[coid]
+            # 取委托总量（用于判断是否完全成交）
+            _entry_order = self.cache.order(event.client_order_id)
+            requested_qty = int(_entry_order.quantity) if _entry_order else total_filled
+
+            if total_filled < requested_qty:
+                # 尚未全量成交，等待后续成交报告
+                self.log.info(
+                    f"[BRACKET] 入场单 {coid} 部分成交 {total_filled}/{requested_qty}股，等待全量成交..."
+                )
+                return  # 不 pop，继续等待
+
+            # 全量成交，清理累计器并继续
+            self._fill_accumulator.pop(coid, None)
+            actual_qty = total_filled
             pending = self._pending_sl.pop(coid)
 
             if len(pending) == 5 and pending[4] == 'LIMIT_BRACKET':
                 # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument, 'LIMIT_BRACKET') ──
                 sl_order, tp_order, entry_price, instrument, _ = pending
 
-                # ✔ 用累计成交量（filled_qty）重建止损单全仓）和止盈单（半仓）
-                actual_qty  = int(event.filled_qty)  # 累计实际成交股数（非单笔 last_qty）
                 half_qty    = actual_qty // 2
                 sl_qty_new  = instrument.make_qty(Decimal(str(actual_qty)))
                 tp_qty_new  = instrument.make_qty(Decimal(str(half_qty)))
@@ -1332,7 +1363,7 @@ class OrderGatewayActor(Strategy):
                 )
 
                 self.log.info(
-                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 已成交 实际成交={actual_qty}股，"
+                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 全量成交={actual_qty}股，"
                     f"提交止损={sl_order_new.client_order_id} SL@{sl_order_new.trigger_price}x{actual_qty} "
                     f"止盈={tp_order_new.client_order_id} TP@{tp_order_new.price}x{half_qty}"
                 )
@@ -1350,8 +1381,6 @@ class OrderGatewayActor(Strategy):
                 # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
                 sl_order, sl_steps, sl_step_secs, instrument = pending
 
-                # ✔ 用累计成交量（filled_qty）重建止损单
-                actual_qty = int(event.filled_qty)  # 累计实际成交股数（非单笔 last_qty）
                 sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
                 sl_order_new = self.order_factory.stop_market(
                     instrument_id=sl_order.instrument_id,
@@ -1363,7 +1392,7 @@ class OrderGatewayActor(Strategy):
                 )
 
                 self.log.info(
-                    f"[SL] BRACKET 入场单 {coid} 已成交 实际成交={actual_qty}股（原定{sl_order.quantity}股），"
+                    f"[SL] BRACKET 入场单 {coid} 全量成交={actual_qty}股（原定{sl_order.quantity}股），"
                     f"提交止损单 {sl_order_new.client_order_id} "
                     f"@ trigger_price={sl_order_new.trigger_price}"
                 )

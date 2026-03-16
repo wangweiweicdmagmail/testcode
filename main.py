@@ -17,6 +17,47 @@
 """
 import argparse
 import os
+import sys
+import signal
+import atexit
+
+# ============================================================
+# 单例保护：确保只有一个引擎进程在运行
+# ============================================================
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.engine.pid')
+
+def _cleanup_pid():
+    """进程退出时清理 PID 文件"""
+    try:
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.remove(PID_FILE)
+    except Exception:
+        pass
+
+def _check_singleton():
+    """检查是否已有引擎实例在运行"""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            print(f"\n❌ 引擎已在运行中 (PID={old_pid})")
+            print(f"   如需重启，请先执行: kill {old_pid}")
+            print(f"   如需强制启动，请删除: {PID_FILE}\n")
+            sys.exit(1)
+        except ProcessLookupError:
+            pass
+        except ValueError:
+            pass
+
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    atexit.register(_cleanup_pid)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+_check_singleton()
 
 from nautilus_trader.adapters.interactive_brokers.common import IB
 from nautilus_trader.adapters.interactive_brokers.config import IBMarketDataTypeEnum
@@ -169,7 +210,7 @@ instrument_provider_config = InteractiveBrokersInstrumentProviderConfig(
 # ============================================================
 config_node = TradingNodeConfig(
     trader_id="HELLO-WORLD-001",
-    logging=LoggingConfig(log_level="INFO", log_colors=True),
+    logging=LoggingConfig(log_level="INFO", log_colors=True, log_directory="logs"),
     data_clients={
         IB: InteractiveBrokersDataClientConfig(
             ibg_host=IBG_HOST,

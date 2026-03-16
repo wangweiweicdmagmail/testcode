@@ -207,3 +207,32 @@ cd frontend && node server.js
 | `div_mom` | 动量背离分 = `mom_atr(stock) - mom_atr(QQQ)`，正值=相对强，负值=相对弱 |
 | `last_m1_time` | 最新 M1 bar 的 ET fake-UTC 秒 |
 | `last_m5_time` | 最新 M5 bar 的 ET fake-UTC 秒 |
+
+## 变更日志
+
+- **修复：市价单/限价单多次执行成交量错误（2026-03-17）** ✅：
+  - **根因**：IBKR FA Group 每个子账户成交都触发一次 `on_order_filled`，`event.last_qty` 只是最后一笔成交量，导致 SL/TP 数量为拆分后的最小子批次量（如35股→止损18股）
+  - **修复1 (`order_actor.py`)**：新增 `_fill_accumulator` 字典，在 `on_order_filled` 中累计每次成交量，只有当累计量 ≥ 委托总量（`order.quantity`）时才真正创建 SL/TP 止损/止盈单；中间的部分成交直接 `return` 等待
+  - **修复2 (`order_actor.py`)**：`STOP_MARKET` 止损单成交时，引擎主动 `redis.delete(position:{sym})` 并 `publish position:update {closed:true}`，双保险清除 Redis 仓位和前端价格线（不依赖 `on_position_closed` 回调，该回调在 FA Group 场景可能不触发）
+  - **修复3 (`order_actor.py`)**：`OrderFilled.filled_qty` 属性不存在，统一改为 `event.last_qty`；最终由 `_fill_accumulator` 做累计，彻底规避属性不存在问题
+
+- **修复：`OrderFilled.filled_qty` 属性不存在引发崩溃（2026-03-17）** ✅：
+  - `on_order_filled` 里 `event.filled_qty` 不是 `OrderFilled` 事件的属性；之前的临时修复误用 `event.last_qty`（单笔成交量），现由 `_fill_accumulator` 取代
+
+- **止损单成交后仓位线不消失（2026-03-17）** ✅：
+  - 原因：NautilusTrader `on_position_closed` 在 FA Group 场景下未必触发，Redis `position:{sym}` 残留，刷新页面后重新渲染仓位线
+  - 修复：止损单 `on_order_filled` 分支直接清除 Redis 仓位记录并推送 `position:update closed=true`
+
+- **前端：浮盈实时刷新（每 tick 而非每分钟）（2026-03-17）** ✅：
+  - `index.html` `bars:1m:tick:` 处理器中，每次 tick 到达即计算并调用 `refreshPositionPanel`（原来只在 `kline:1m:` 收盘才刷新）
+
+- **前端：止盈线 UI 优化（2026-03-17）** ✅：
+  - 新增 `setTpLine` / `clearTpLine` 函数，止盈线样式：绿色 `#26a69a`、虚线、`lineWidth: 4`（与止损线一致）
+  - 标签显示 `◎ 止盈 @价格 x数量`，不再显示"开多/开空"
+  - `ACCEPTED` 事件：根据"已有持仓 + 方向相反"判断为止盈单 → 调用 `setTpLine`；否则为入场挂单 → `showPendingEntryPanel`
+  - `FILLED` 事件：同样逻辑区分止盈成交和入场成交，止盈成交调用 `clearTpLine` 并播报"止盈单成交"
+  - `clearOrderLines` 一并清除 `tpLine`
+
+- **引擎稳定性：`main.py` 单例保护 + 日志持久化（本会话初期）** ✅：
+  - 添加 PID 文件（`.engine.pid`）防止多实例并发
+  - `LoggingConfig` 设置 `log_directory="logs"`，引擎日志永久保存在 `logs/` 目录

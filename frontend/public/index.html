@@ -1585,8 +1585,10 @@
     let activeOrderLines = {
       entryLine: null,   // 入场价 priceLine
       slLine: null,      // 止损价 priceLine
+      tpLine: null,      // 止盈价 priceLine
       entryData: null,   // { price, side, qty }
       slData: null,      // { price, qty }
+      tpData: null,      // { price, qty }
       pendingLine: null, // 限价挂单价格线（黄色虚线）
     };
 
@@ -1696,10 +1698,41 @@
         try { candleSeries.removePriceLine(activeOrderLines.slLine); } catch (e) { }
         activeOrderLines.slLine = null;
       }
+      if (activeOrderLines.tpLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.tpLine); } catch (e) { }
+        activeOrderLines.tpLine = null;
+      }
       activeOrderLines.entryData = null;
       activeOrderLines.slData = null;
+      activeOrderLines.tpData = null;
       // 清除止损线时退出 modifyMode
       exitModifyMode();
+    }
+
+    // 止盈价格线（绿色虚线，lineWidth:4，与止损线风格一致）
+    function setTpLine(price, qty) {
+      if (activeOrderLines.tpLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.tpLine); } catch (e) { }
+        activeOrderLines.tpLine = null;
+      }
+      if (!price) return;
+      activeOrderLines.tpLine = candleSeries.createPriceLine({
+        price,
+        color: '#26a69a',
+        lineWidth: 4,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `◎ 止盈 @${price.toFixed(2)} x${qty}`,
+      });
+      activeOrderLines.tpData = { price, qty };
+    }
+
+    function clearTpLine() {
+      if (activeOrderLines.tpLine) {
+        try { candleSeries.removePriceLine(activeOrderLines.tpLine); } catch (e) { }
+        activeOrderLines.tpLine = null;
+        activeOrderLines.tpData = null;
+      }
     }
 
     // ─── 语音提醒模块 ─────────────────────────────────────
@@ -2294,10 +2327,21 @@
                     showToast(`✅ ${sym} 止损单已接受 #${id}`, 'ok');
                   }
                 } else if (orderType === 'LIMIT' && o.status === 'ACCEPTED' && o.price) {
-                  // LIMIT_BRACKET 入场限价单挂单成功 → 显示挂单面板
-                  showPendingEntryPanel(o);
-                  speak(`${sym} 限价挂单已成功 @${parseFloat(o.price).toFixed(2)}`, true);
-                  showToast(`⏳ ${sym} 限价单已挂出 @${parseFloat(o.price).toFixed(2)} x${qty}`, 'ok');
+                  // 区分：止盈单（已有持仓且方向相反）vs 入场限价挂单
+                  const isTP = currentPosition &&
+                    ((currentPosition.side === 'LONG' && o.side === 'SELL') ||
+                     (currentPosition.side === 'SHORT' && o.side === 'BUY'));
+                  if (isTP) {
+                    // 止盈限价单挂出 → 画止盈线
+                    setTpLine(parseFloat(o.price), qty);
+                    speak(`${sym} 止盈单已挂出，价格 ${parseFloat(o.price).toFixed(2)}`, true);
+                    showToast(`🎯 ${sym} 止盈单已挂出 @${parseFloat(o.price).toFixed(2)} x${qty}`, 'ok');
+                  } else {
+                    // 入场限价挂单
+                    showPendingEntryPanel(o);
+                    speak(`${sym} 限价挂单已成功 @${parseFloat(o.price).toFixed(2)}`, true);
+                    showToast(`⏳ ${sym} 限价单已挂出 @${parseFloat(o.price).toFixed(2)} x${qty}`, 'ok');
+                  }
                 } else if (o.status === 'ACCEPTED') {
                   speak(`${sym} 订单已接受`, true);
                   showToast(`✅ ${sym} 订单已接受 #${id}`, 'ok');
@@ -2307,7 +2351,7 @@
               case 'FILLED': {
                 if (orderType === 'MARKET' || orderType === '') {
                   const entryP = parseFloat(o.last_px);
-                  const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0); // 累计成交量
+                  const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0);
                   setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
                     currentPosition = {
@@ -2325,22 +2369,34 @@
                   speak(`${sym} ${sideLabel}订单成交，成交价 ${o.last_px}`, true);
                   showToast(`✅ ${sym} ${sideLabel}成交 @${o.last_px} x${filledQty}`, 'ok');
                 } else if (orderType === 'LIMIT') {
-                  // LIMIT_BRACKET 入场限价单成交 → 清除挂单面板，建立持仓
-                  clearPendingEntry();
-                  const entryP = parseFloat(o.last_px);
-                  const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0); // 累计成交量
-                  setEntryLine(entryP, o.side, filledQty);
-                  if (!currentPosition) {
-                    currentPosition = {
-                      symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
-                      avg_px_open: entryP, quantity: filledQty,
-                      unrealized_pnl: 0, stop_loss: null,
-                    };
-                    document.getElementById('position-panel').style.display = 'block';
-                    refreshPositionPanel(currentPosition);
+                  // 区分：止盈单成交 vs 入场限价单成交
+                  const isTP = currentPosition &&
+                    ((currentPosition.side === 'LONG' && o.side === 'SELL') ||
+                     (currentPosition.side === 'SHORT' && o.side === 'BUY'));
+                  if (isTP) {
+                    // 止盈单成交 → 清除止盈线
+                    clearTpLine();
+                    const tpFilledQty = parseFloat(o.last_qty || o.quantity || 0);
+                    speak(`${sym} 止盈单成交，成交价 ${o.last_px}`, true);
+                    showToast(`🎯 ${sym} 止盈成交 @${o.last_px} x${tpFilledQty}`, 'ok');
+                  } else {
+                    // 入场限价单成交 → 清除挂单面板，建立持仓
+                    clearPendingEntry();
+                    const entryP = parseFloat(o.last_px);
+                    const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0);
+                    setEntryLine(entryP, o.side, filledQty);
+                    if (!currentPosition) {
+                      currentPosition = {
+                        symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
+                        avg_px_open: entryP, quantity: filledQty,
+                        unrealized_pnl: 0, stop_loss: null,
+                      };
+                      document.getElementById('position-panel').style.display = 'block';
+                      refreshPositionPanel(currentPosition);
+                    }
+                    speak(`${sym} ${sideLabel}限价单成交，成交价 ${o.last_px}`, true);
+                    showToast(`✅ ${sym} 限价成交 @${o.last_px} x${filledQty}`, 'ok');
                   }
-                  speak(`${sym} ${sideLabel}限价单成交，成交价 ${o.last_px}`, true);
-                  showToast(`✅ ${sym} 限价成交 @${o.last_px} x${filledQty}`, 'ok');
                 } else if (orderType === 'STOP_MARKET') {
                   clearOrderLines();
                   clearPositionUI();
@@ -2470,6 +2526,14 @@
               high: payload.high, low: payload.low, close: payload.close,
             });
             latestClose = payload.close;
+            // 实时刷新浮盈（每个 tick 更新，不等到 kline:1m 收盘）
+            if (currentPosition) {
+              currentPosition.unrealized_pnl =
+                (latestClose - (currentPosition.avg_px_open ?? currentPosition.entry_price)) *
+                currentPosition.quantity *
+                (currentPosition.side === 'SHORT' ? -1 : 1);
+              refreshPositionPanel(currentPosition);
+            }
             return;
           }
 
