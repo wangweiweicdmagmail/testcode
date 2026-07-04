@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>四宫格主控台</title>
     <link rel="stylesheet" href="/shared/status-bar.css">
+    <link rel="stylesheet" href="/shared/approval-ui.css">
     <script
         src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -91,6 +92,75 @@
             outline: 2px solid rgba(239, 83, 80, .55);
             outline-offset: -2px;
             box-shadow: inset 0 0 0 1px rgba(239, 83, 80, .25);
+        }
+
+        /* 待审批聚焦：脉冲 + 其他格淡化 */
+        #grid.grid-approval-mode .cell:not(.cell-approval-focus) {
+            opacity: 0.42;
+            filter: saturate(0.65);
+            transition: opacity .35s, filter .35s;
+        }
+
+        .cell.cell-approval-focus {
+            outline: 3px solid #ef5350;
+            outline-offset: -3px;
+            box-shadow: 0 0 0 1px rgba(239, 83, 80, .4), 0 0 28px rgba(239, 83, 80, .35);
+            z-index: 2;
+            animation: approval-pulse 1.6s ease-in-out infinite;
+        }
+
+        @keyframes approval-pulse {
+            0%, 100% { box-shadow: 0 0 0 1px rgba(239, 83, 80, .35), 0 0 18px rgba(239, 83, 80, .25); }
+            50% { box-shadow: 0 0 0 2px rgba(239, 83, 80, .65), 0 0 32px rgba(239, 83, 80, .45); }
+        }
+
+        .alpha-approval-ribbon {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 10px;
+            background: linear-gradient(90deg, rgba(239, 83, 80, .28), rgba(239, 83, 80, .08));
+            border-bottom: 1px solid rgba(239, 83, 80, .45);
+            font-size: 11px;
+            color: #ffcdd2;
+            flex-shrink: 0;
+        }
+
+        .alpha-approval-ribbon.hidden { display: none; }
+
+        .alpha-approval-ribbon .ribbon-tag {
+            background: #ef5350;
+            color: #fff;
+            font-weight: 700;
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            letter-spacing: .5px;
+        }
+
+        .alpha-approval-ribbon .ribbon-body { color: #ffe0e0; flex: 1; }
+
+        .alpha-approval-ribbon .ribbon-hint {
+            color: #ef9a9a;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+
+        .alpha-actions.alpha-actions-highlight {
+            padding: 6px;
+            margin: -2px -4px 4px;
+            border-radius: 4px;
+            background: rgba(239, 83, 80, .12);
+            border: 1px solid rgba(239, 83, 80, .35);
+        }
+
+        .c-btn-alpha.approve-live {
+            animation: approve-btn-glow 1.4s ease-in-out infinite;
+        }
+
+        @keyframes approve-btn-glow {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 83, 80, .4); }
+            50% { box-shadow: 0 0 10px 2px rgba(239, 83, 80, .55); }
         }
 
         .cell.cell-alpha-wait {
@@ -208,6 +278,7 @@
 
         .astep.done { color: #787b86; }
         .astep.active { color: #2962ff; font-weight: 700; }
+        .astep.active-pending { color: #ef5350; font-weight: 700; }
 
         .alpha-detail {
             font-size: 11px;
@@ -234,7 +305,7 @@
             cursor: pointer;
         }
 
-        .c-btn-alpha.approve { background: #26a69a; color: #fff; }
+        .c-btn-alpha.approve-live { background: #ef5350; color: #fff; }
         .c-btn-alpha.reject { background: #2a2e39; color: #d1d4dc; border: 1px solid #434651; }
         .c-btn-alpha.cancel { background: #434651; color: #d1d4dc; }
 
@@ -727,7 +798,10 @@
     <div id="grid"></div>
 
     <script src="/shared/api-auth.js"></script>
+    <script src="/shared/alpha-copy.js"></script>
+    <script src="/shared/approval-modal.js"></script>
     <script src="/shared/status-bar.js"></script>
+    <script src="/shared/alpha-workflow.js"></script>
     <script src="/shared/alpha-cell.js"></script>
     <script>
         // ─── 语音提醒（由 Status Bar 铃铛控制）────────────────────
@@ -840,11 +914,15 @@
             return bestIdx;
         }
 
-        function autoAssignSymbolToGrid(sym, source) {
+        function autoAssignSymbolToGrid(sym, source, extra = {}) {
             sym = String(sym).toUpperCase();
             if (!SYMBOL_UNIVERSE.includes(sym)) return false;
             if (DEFAULT_SYMBOLS.includes(sym)) {
-                focusCell(sym);
+                if (window.AlphaWorkflow) {
+                    AlphaWorkflow.setApprovalFocus(sym, extra.proposal || null);
+                } else {
+                    focusCell(sym);
+                }
                 return true;
             }
             const slotIdx = pickReplacementSlot(sym);
@@ -852,6 +930,14 @@
                 speak(`${sym} 无法显示，四宫格已满`, true);
                 showToast(`⚠️ 四宫格保护中，无法显示 ${sym}`, 'warn');
                 return false;
+            }
+            if (window.AlphaWorkflow) {
+                AlphaWorkflow.stashForReload({
+                    sym,
+                    source,
+                    signal: extra.signal || null,
+                    proposal: extra.proposal || null,
+                });
             }
             const oldSym = DEFAULT_SYMBOLS[slotIdx];
             const meta = loadSlotMeta();
@@ -863,7 +949,7 @@
             const u = new URL(location.href);
             u.searchParams.delete('symbols');
             u.searchParams.set('focus', sym);
-            showToast(`↪ ${oldSym} → ${sym}（${source === 'proposal' ? '新建议' : '新信号'}）`, 'tip');
+            showToast(`↪ ${oldSym} → ${sym}（${source === 'proposal' ? '待审批' : '新信号'}）`, 'tip');
             location.href = u.toString();
             return true;
         }
@@ -871,38 +957,54 @@
         const _knownPendingIds = new Set();
         const _lastSignalAnnounce = {};
 
+        function focusApprovalCell(sym, proposal) {
+            if (window.AlphaWorkflow) {
+                AlphaWorkflow.setApprovalFocus(sym, proposal);
+            } else {
+                focusCell(sym);
+            }
+        }
+        window.focusApprovalCell = focusApprovalCell;
+
         function onNewProposalDetected(p) {
             const sym = String(p.symbol || '').toUpperCase();
             if (!sym) return;
-            const sideZh = p.side === 'SHORT' ? '空' : '多';
             if (!DEFAULT_SYMBOLS.includes(sym)) {
-                sessionStorage.setItem('multiPendingAlert', JSON.stringify({
-                    type: 'proposal', sym, side: p.side, ts: Date.now(),
-                }));
-                autoAssignSymbolToGrid(sym, 'proposal');
+                if (window.AlphaWorkflow) {
+                    AlphaWorkflow.handleProposal(p, { deferGrid: true });
+                }
+                autoAssignSymbolToGrid(sym, 'proposal', { proposal: p });
                 return;
             }
-            speak(`${sym} 新建议${sideZh}待审批`, true);
-            showToast(`📋 ${sym} 新建议待审批`, 'tip');
-            focusCell(sym);
+            if (window.AlphaWorkflow) {
+                AlphaWorkflow.handleProposal(p);
+            } else {
+                speak(`${sym} 新建议待审批`, true);
+                showToast(`📋 ${sym} 新建议待审批`, 'tip');
+                focusCell(sym);
+            }
         }
 
         function playPostReloadAlert() {
+            if (window.AlphaWorkflow) {
+                const stash = AlphaWorkflow.readStash();
+                if (stash?.sym && DEFAULT_SYMBOLS.includes(stash.sym)) {
+                    AlphaWorkflow.playAfterReload(stash.sym, {
+                        signal: stash.signal,
+                        proposal: stash.proposal,
+                    });
+                    setTimeout(() => focusApprovalCell(stash.sym, stash.proposal), 600);
+                    return;
+                }
+            }
             const raw = sessionStorage.getItem('multiPendingAlert');
             if (!raw) return;
             sessionStorage.removeItem('multiPendingAlert');
             try {
                 const a = JSON.parse(raw);
                 if (Date.now() - (a.ts || 0) > 120000) return;
-                if (a.type === 'proposal') {
-                    const sd = a.side === 'SHORT' ? '空' : '多';
-                    speak(`${a.sym} 新建议${sd}待审批`, true);
-                } else if (a.type === 'signal') {
-                    const sd = a.side === 'SHORT' ? '空' : '多';
-                    speak(`${a.sym} 超级${sd}`, true);
-                }
                 if (a.sym && DEFAULT_SYMBOLS.includes(a.sym)) {
-                    setTimeout(() => focusCell(a.sym), 300);
+                    setTimeout(() => focusApprovalCell(a.sym, null), 300);
                 }
             } catch (_) { /* ignore */ }
         }
@@ -1024,10 +1126,22 @@
             const phase = e.detail?.phase || 'pending';
             const sym = window.AlphaCell?.firstSymbolForPhase(phase);
             if (!sym) {
-                showToast(phase === 'pending' ? '暂无待审批标的' : '暂无等待回踩标的', 'tip');
+                showToast(phase === 'pending' ? '暂无待审批标的' : '暂无待执行标的', 'tip');
                 return;
             }
-            focusCell(sym);
+            const proposal = window.AlphaCell?.phaseForSymbol(sym)?.proposal;
+            focusApprovalCell(sym, phase === 'pending' ? proposal : null);
+        });
+
+        window.addEventListener('nautilus:focus-pending', (e) => {
+            const sym = String(e.detail?.symbol || '').toUpperCase();
+            if (!sym) return;
+            if (!DEFAULT_SYMBOLS.includes(sym)) {
+                showToast(`${sym} 不在当前四宫格，请从历史页审批或等待换格`, 'warn');
+                return;
+            }
+            const proposal = window.AlphaCell?.phaseForSymbol(sym)?.proposal;
+            focusApprovalCell(sym, proposal);
         });
 
         window.addEventListener('nautilus:focus-position', () => {
@@ -1151,6 +1265,7 @@
           </div>
           <a class="c-detail-link" href="/?symbol=${symbol}" title="单图详情">单图 ▸</a>
         </div>
+        <div class="alpha-approval-ribbon hidden" id="alpha-ribbon-${id}"></div>
         <div class="c-body">
           <div class="c-chart-wrap" id="wrap-${id}">
             <div class="c-loading" id="loading-${id}">⏳ 加载中…</div>
@@ -1456,8 +1571,7 @@
             refreshMarkers(sym);
             setSignalPill(sym, side);
             if (backend) {
-                speak(`${sym} 超级${side === 1 ? '多' : '空'}信号`, true);
-                showToast(`${mk.text} ${sym} 止损${stop.toFixed(2)}`, 'warn');
+                showToast(`${mk.text} ${sym}`, 'warn');
             }
         }
 
@@ -1474,10 +1588,10 @@
             if (announce) _lastSignalAnnounce[dedupeKey] = Date.now();
 
             if (autoShow && !DEFAULT_SYMBOLS.includes(sym)) {
-                sessionStorage.setItem('multiPendingAlert', JSON.stringify({
-                    type: 'signal', sym, side: touch.side, ts: Date.now(), touch_time: t,
-                }));
-                autoAssignSymbolToGrid(sym, 'signal');
+                if (window.AlphaWorkflow) {
+                    AlphaWorkflow.handleSignal(touch, { deferGrid: true });
+                }
+                autoAssignSymbolToGrid(sym, 'signal', { signal: touch });
                 return;
             }
             if (!state[sym]) return;
@@ -1487,10 +1601,14 @@
             addSignalMarker(sym, t, side, touch.m1_close, stop, { backend: false });
             updateAlphaPill(sym);
             if (announce) {
-                const sd = side === 1 ? '多' : '空';
-                speak(`${sym} 超级${sd}`, true);
-                showToast(`⚡ ${sym} 超级${sd} 止损${stop.toFixed(2)}`, 'warn');
-                focusCell(sym);
+                if (window.AlphaWorkflow) {
+                    AlphaWorkflow.handleSignal(touch);
+                } else {
+                    const sd = side === 1 ? '多' : '空';
+                    speak(`${sym} 超级${sd}`, true);
+                    showToast(`⚡ ${sym} 超级${sd} 止损${stop.toFixed(2)}`, 'warn');
+                    focusCell(sym);
+                }
             }
         }
 
@@ -2373,12 +2491,27 @@
 
                         if (!DEFAULT_SYMBOLS.includes(sym)) return;
                         if (ev.event === 'executed') {
+                            if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
                             speak(`${sym} 建议已执行`, true);
                             showToast(`✅ ${sym} 建议已执行`, 'tip');
                         } else if (ev.event === 'approved_live' || ev.event === 'approved_observe') {
-                            speak(`${sym} 已批准`, true);
-                            showToast(`✅ ${sym} 已批准`, 'tip');
+                            if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
+                            const live = ev.event === 'approved_live';
+                            speak(`${sym} 已批准${live ? '实盘' : '观察'}`, true);
+                            showToast(
+                                `✅ ${sym} 已批准 · Agent${live ? '执行' : '观察'}已开`,
+                                live ? 'warn' : 'tip',
+                            );
+                            const sel = document.getElementById(`auto-sel-${sym}`);
+                            if (sel) {
+                                const mode = live ? 'live' : 'observe';
+                                sel.value = mode;
+                                sel.style.borderColor = live ? '#ef5350' : '#f0b90b';
+                                sel.style.color = live ? '#ef5350' : '#f0b90b';
+                                if (state[sym]) state[sym].autoMode = mode;
+                            }
                         } else if (ev.event === 'rejected') {
+                            if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
                             showToast(`❌ ${sym} 建议已驳回`, 'tip');
                         }
                         return;
@@ -2684,7 +2817,10 @@
             DEFAULT_SYMBOLS.forEach(drawProposalTriggerLine);
             const focusSym = new URLSearchParams(location.search).get('focus')?.toUpperCase();
             if (focusSym && DEFAULT_SYMBOLS.includes(focusSym)) {
-                setTimeout(() => focusCell(focusSym), 400);
+                setTimeout(() => {
+                    const prop = window.AlphaCell?.phaseForSymbol(focusSym)?.proposal;
+                    focusApprovalCell(focusSym, prop);
+                }, 400);
             }
             // ── 四图各自独立：不再做时间轴联动（拖动一图不影响其余三图）──────────
             DEFAULT_SYMBOLS.forEach(sym => {

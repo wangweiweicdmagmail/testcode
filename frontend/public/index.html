@@ -5,6 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Trading Dashboard</title>
+  <link rel="stylesheet" href="/shared/approval-ui.css">
   <script
     src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <style>
@@ -1385,7 +1386,7 @@
           color:#d1d4dc;font-size:12px;padding:3px 10px;cursor:pointer;position:relative;">
           建议<span id="proposal-badge" style="
             display:none;margin-left:4px;background:#ef5350;color:#fff;
-            border-radius:8px;padding:0 5px;font-size:10px;">0</span><span id="proposal-badge-wait" title="当前标的已批准等待回踩" style="
+            border-radius:8px;padding:0 5px;font-size:10px;">0</span><span id="proposal-badge-wait" title="当前标的已批准待执行" style="
             display:none;margin-left:2px;background:#2962ff;color:#fff;
             border-radius:8px;padding:0 5px;font-size:10px;">0</span>
         </button>
@@ -1774,6 +1775,8 @@
   </div><!-- /main-area -->
   <div class="modal-backdrop" id="open-modal" style="display:none!important"></div>
 
+  <script src="/shared/alpha-copy.js"></script>
+  <script src="/shared/approval-modal.js"></script>
   <script>
     // ─── 配置：从 URL ?symbol=XXX 读取标的，默认 QQQ ────────────────────
     const urlParams = new URLSearchParams(window.location.search);
@@ -2854,8 +2857,9 @@
               showToast(`📋 ${SYMBOL} 已取消批准`, 'tip');
             } else if ((ev.event === 'approved_live' || ev.event === 'approved_observe') && ev.symbol === SYMBOL) {
               const live = ev.decision === 'approved_live';
-              speak(`${SYMBOL} 已批准${live ? '实盘' : '观察'}，等待回踩`, true);
-              showToast(`📋 ${SYMBOL} 已批准${live ? '实盘' : '观察'} · 等待回踩`, live ? 'warn' : 'tip');
+              speak(`${SYMBOL} 已批准${live ? '实盘' : '观察'}，Agent已开启`, true);
+              showToast(`📋 ${SYMBOL} 已批准${live ? '实盘' : '观察'} · 下一根 M1 可执行`, live ? 'warn' : 'tip');
+              syncAgentExecUi(live ? 'live' : 'observe');
             } else if (ev.event && ev.event !== 'executed' && ev.symbol) {
               const sym = ev.symbol;
               if (!SYMBOL || sym === SYMBOL) {
@@ -4224,6 +4228,11 @@
       autoSel.style.color = mode === 'off' ? '#787b86' : (AUTO_COLORS[mode] || '#d1d4dc');
       updateTradeButtonsState();
     }
+    function syncAgentExecUi(mode) {
+      if (!autoSel || !mode || mode === 'off') return;
+      autoSel.value = mode;
+      applyAutoStyle(mode);
+    }
     function blockIfAutoLive(actionLabel) {
       if (autoStrategyMode !== 'live' && openingBreakoutMode !== 'live') return false;
       const which = openingBreakoutMode === 'live' ? '开盘突破' : '自动策略';
@@ -4305,12 +4314,15 @@
     const approvedStripText = document.getElementById('approved-proposal-text');
     let approvedProposal = null;
     let proposalPriceLines = { trigger: null, stop: null, tp: null };
-    const SIGNAL_LABEL = {
-      pullback_vwap: '回踩VWAP',
-      pullback_supertrend: '回踩ST',
-      pullback_dema20: '回踩DEMA20',
-      pullback_dema: '回踩DEMA',
-    };
+    let pendingProposalById = {};
+
+    function signalLabel(p) {
+      return window.AlphaCopy?.signalLabel(p?.signal_type) || p?.signal_type || '—';
+    }
+
+    function phaseLabelFor(p) {
+      return window.AlphaCopy?.phaseLabel(p, p?.status) || '—';
+    }
 
     async function loadProposalBadge() {
       try {
@@ -4385,8 +4397,8 @@
       }
       const isLive = approvedProposal.decision === 'approved_live';
       const sideZh = approvedProposal.side === 'SHORT' ? '空' : '多';
-      const sig = SIGNAL_LABEL[approvedProposal.signal_type] || approvedProposal.signal_type;
-      const phase = approvedProposal.execution_phase === 'ready_to_execute' ? '待执行' : '等待回踩';
+      const sig = signalLabel(approvedProposal);
+      const phase = phaseLabelFor(approvedProposal);
       approvedStrip.classList.toggle('live', isLive);
       approvedStrip.style.display = 'flex';
       if (approvedStripText) {
@@ -4460,8 +4472,8 @@
       const isLive = p.decision === 'approved_live';
       const sideZh = p.side === 'SHORT' ? '空' : '多';
       const sideColor = p.side === 'SHORT' ? '#ef5350' : '#26a69a';
-      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
-      const phase = p.execution_phase === 'ready_to_execute' ? '待执行' : '等待回踩';
+      const sig = signalLabel(p);
+      const phase = phaseLabelFor(p);
       return `
         <div class="prop-card prop-card-approved" data-id="${p.proposal_id}" style="border-color:#2962ff55;">
           <div class="title" style="color:${isLive ? '#ef5350' : '#f0b90b'}">${isLive ? '实盘' : '观察'} · ${p.symbol} ${sideZh} · ${sig} · ${phase}</div>
@@ -4475,21 +4487,28 @@
     function proposalCardHtml(p) {
       const sideZh = p.side === 'SHORT' ? '空' : '多';
       const sideColor = p.side === 'SHORT' ? '#ef5350' : '#26a69a';
-      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
+      const sig = signalLabel(p);
       const rr = p.rr_half_est != null ? p.rr_half_est : '—';
+      const stSuper = window.AlphaCopy?.isStSuper(p);
       const cond = p.execution_mode === 'conditional_reclaim';
       const cur = p.symbol === SYMBOL ? ' prop-card-current' : '';
       const m5Tag = m5StLabel(p);
+      const showObserve = window.AlphaCopy ? window.AlphaCopy.showObserveApprove(p) : true;
+      const canApprove = engineOnline;
+      const hint = stSuper
+        ? `<div class="row" style="color:#ef9a9a;font-size:11px;">${window.AlphaCopy.postApproveHint(p)}</div>`
+        : (cond ? `<div class="row" style="color:#787b86;font-size:11px;">条件执行：批准≠立即下单，等 reclaim</div>` : '');
+      const ttl = window.AlphaCopy?.ttlText(p);
       return `
         <div class="prop-card${cur}" data-id="${p.proposal_id}">
           <div class="title" style="color:${sideColor}">${p.symbol} ${sideZh} · ${sig}${m5Tag ? ` <span style="font-size:11px;color:#787b86;font-weight:normal;">${m5Tag}</span>` : ''}</div>
-          ${cond ? `<div class="row" style="color:#787b86;font-size:11px;">条件执行：批准≠立即下单，等 reclaim</div>` : ''}
+          ${hint}
           <div class="thesis">${p.thesis || '—'}</div>
           <div class="row">触发 ${p.trigger_level} · 止损 ${p.stop_price} · 半仓止盈 ${p.tp_half_price ?? p.tp_price} · R:R½ ${rr}</div>
-          <div class="row">置信 ${p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—'}</div>
+          <div class="row">置信 ${p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—'}${ttl ? ` · ${ttl}` : ''}</div>
           <div class="prop-actions">
-            <button class="prop-live" data-id="${p.proposal_id}" data-decision="approved_live">批准实盘</button>
-            <button class="prop-observe" data-id="${p.proposal_id}" data-decision="approved_observe">批准观察</button>
+            <button class="prop-live" data-id="${p.proposal_id}" data-decision="approved_live"${canApprove ? '' : ' disabled title="引擎离线，无法批准"'}>批准实盘</button>
+            ${showObserve ? `<button class="prop-observe" data-id="${p.proposal_id}" data-decision="approved_observe">批准观察</button>` : ''}
             <button class="prop-reject" data-id="${p.proposal_id}" data-decision="rejected">驳回</button>
           </div>
         </div>`;
@@ -4538,6 +4557,8 @@
           parts.push(items.map(proposalCardHtml).join(''));
         }
         proposalListEl.innerHTML = parts.join('');
+        pendingProposalById = {};
+        items.forEach((p) => { pendingProposalById[p.proposal_id] = p; });
         proposalListEl.querySelectorAll('[data-decision]').forEach(btn => {
           btn.addEventListener('click', () => decideProposal(btn.dataset.id, btn.dataset.decision, btn));
         });
@@ -4568,11 +4589,7 @@
       }
     }
 
-    async function decideProposal(id, decision, btn) {
-      const condMsg = '批准后将等待回踩 reclaim，不会立即下单。';
-      if (decision === 'approved_live' && !confirm(`确认批准【实盘】？\n${condMsg}`)) return;
-      if (decision === 'approved_observe' && !confirm(`确认批准【观察】？\n${condMsg}\n\n观察模式：引擎只记录「应开仓」，不向 IBKR 发真实订单。`)) return;
-      if (decision === 'rejected' && !confirm('确认驳回该建议？\n驳回后将从待审批列表移除，可在审批页「已驳回」查看。')) return;
+    async function submitProposalDecision(id, decision, btn) {
       const card = btn && btn.closest('.prop-card');
       const allBtns = card ? card.querySelectorAll('button') : (btn ? [btn] : []);
       allBtns.forEach(b => { b.disabled = true; });
@@ -4589,9 +4606,11 @@
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '审批失败');
-        const label = decision === 'approved_live' ? '已批准实盘（等待回踩）' :
-                      decision === 'approved_observe' ? '已批准观察（等待回踩）' : '已驳回';
+        const label = decision === 'approved_live' ? '已批准实盘（Agent执行已开）' :
+                      decision === 'approved_observe' ? '已批准观察（Agent观察已开）' : '已驳回';
         showToast(`${data.proposal.symbol} ${label}`, decision === 'approved_live' ? 'warn' : 'tip');
+        if (decision === 'approved_live') syncAgentExecUi('live');
+        else if (decision === 'approved_observe') syncAgentExecUi('observe');
         speak(`${data.proposal.symbol} 建议${label}`, true);
         if (decision === 'rejected' && card) {
           card.style.opacity = '0.35';
@@ -4604,6 +4623,26 @@
         allBtns.forEach(b => { b.disabled = false; });
         showToast('❌ ' + e.message, 'warn');
       }
+    }
+
+    async function decideProposal(id, decision, btn) {
+      const p = pendingProposalById[id];
+      if (decision === 'approved_live') {
+        if (!engineOnline) {
+          showToast('引擎离线，无法批准', 'warn');
+          return;
+        }
+        window.ApprovalModal?.show({
+          proposal: p,
+          engineOk: engineOnline,
+          onConfirm: () => submitProposalDecision(id, decision, btn),
+        });
+        return;
+      }
+      const hint = window.AlphaCopy?.postApproveHint(p) || '批准后将等待回踩 reclaim，不会立即下单。';
+      if (decision === 'approved_observe' && !confirm(`确认批准【观察】？\n${hint}\n\n观察模式：引擎只记录「应开仓」，不向 IBKR 发真实订单。`)) return;
+      if (decision === 'rejected' && !confirm('确认驳回该建议？\n驳回后将从待审批列表移除，可在审批页「已驳回」查看。')) return;
+      await submitProposalDecision(id, decision, btn);
     }
 
     document.getElementById('btn-proposals').addEventListener('click', () => {
@@ -4822,6 +4861,7 @@
         }
       }
       if (accountInfo) accountInfo.engine_online = online;
+      if (proposalDrawer?.classList.contains('open')) loadProposalDrawer();
     }
 
     async function pollEngineStatus() {

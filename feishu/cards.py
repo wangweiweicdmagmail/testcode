@@ -73,8 +73,8 @@ def build_proposal_card(proposal: dict[str, Any]) -> dict[str, Any]:
 
 def decision_toast(decision: str, symbol: str = "") -> str:
     label = {
-        "approved_live": "已批准（等待回踩）",
-        "approved_observe": "已批准（等待回踩）",  # 旧卡片兼容
+        "approved_live": "已批准实盘（Agent执行已开启，下一根 M1）",
+        "approved_observe": "已批准观察（Agent观察已开启）",
         "rejected": "已驳回",
     }.get(decision, "已处理")
     sym = f" {symbol}" if symbol else ""

@@ -37,7 +37,7 @@
             <span class="sb-chip" id="sb-engine"><span class="dot"></span>引擎</span>
             <span class="sb-chip" id="sb-redis"><span class="dot"></span>Redis</span>
             <span class="sb-chip info clickable" id="sb-pending" title="点击定位待审批格子">待审批 <b id="sb-pending-n">—</b></span>
-            <span class="sb-chip info clickable" id="sb-wait" title="点击定位等待回踩格子">等待回踩 <b id="sb-wait-n">—</b></span>
+            <span class="sb-chip info clickable" id="sb-wait" title="点击定位待执行格子">待执行 <b id="sb-wait-n">—</b></span>
             <span class="sb-chip clickable" id="sb-pos" title="点击定位持仓格子">持仓 <b id="sb-pos-n">—</b></span>
             <span class="sb-chip" id="sb-pnl">日PnL <b id="sb-pnl-v">—</b></span>
             <span class="sb-chip" id="sb-risk">距熔断 <b id="sb-risk-v">—</b></span>
@@ -50,6 +50,7 @@
         </div>
         <div id="sb-engine-banner">⚠️ 引擎离线 — 图表仍可用 Redis 数据；下单/审批后执行需启动引擎</div>
         <div id="sb-fixedqty-banner">⚠️ 固定股数模式（AUTO_FIXED_QTY=<b id="sb-fq-n">?</b>）— 自动/提案下单已<b>跳过以损定量</b>，实盘前请将 AUTO_FIXED_QTY 设为 0</div>
+        <div id="sb-pending-queue" aria-label="待审批队列"></div>
       </div>`;
 
     const voiceBtn = document.getElementById('sb-voice-toggle');
@@ -61,8 +62,29 @@
       });
     }
 
-    document.getElementById('sb-pending')?.addEventListener('click', () => {
+    document.getElementById('sb-pending')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const q = document.getElementById('sb-pending-queue');
+      const list = lastSnapshot.pendingList || [];
+      const n = list.length;
+      if (n === 1) {
+        q?.classList.remove('open');
+        global.dispatchEvent(new CustomEvent('nautilus:focus-pending', {
+          detail: { symbol: String(list[0].symbol).toUpperCase(), proposal_id: list[0].proposal_id },
+        }));
+        return;
+      }
+      if (q && n > 1) {
+        q.classList.toggle('open');
+        if (q.classList.contains('open')) return;
+      }
       global.dispatchEvent(new CustomEvent('nautilus:focus-alpha', { detail: { phase: 'pending' } }));
+    });
+    document.addEventListener('click', () => {
+      document.getElementById('sb-pending-queue')?.classList.remove('open');
+    });
+    document.getElementById('sb-pending-queue')?.addEventListener('click', (e) => {
+      e.stopPropagation();
     });
     document.getElementById('sb-wait')?.addEventListener('click', () => {
       global.dispatchEvent(new CustomEvent('nautilus:focus-alpha', { detail: { phase: 'wait' } }));
@@ -168,6 +190,9 @@
     const wn = wait?.count ?? 0;
     lastSnapshot.pending = pn;
     lastSnapshot.wait = wn;
+    lastSnapshot.pendingList = pending?.proposals || [];
+
+    renderPendingQueue(lastSnapshot.pendingList);
 
     const pnEl = document.getElementById('sb-pending-n');
     const wnEl = document.getElementById('sb-wait-n');
@@ -264,6 +289,38 @@
   }
 
   function isVoiceEnabled() { return voiceEnabled; }
+
+  function renderPendingQueue(list) {
+    const el = document.getElementById('sb-pending-queue');
+    if (!el) return;
+    const items = list || [];
+    if (!items.length) {
+      el.innerHTML = '<div class="sb-queue-empty">暂无待审批</div>';
+      return;
+    }
+    const sorted = [...items].sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
+    const Copy = global.AlphaCopy;
+    el.innerHTML = `<div class="sb-queue-hdr">待审批 (${sorted.length})</div>`
+      + sorted.map((p) => {
+        const sym = String(p.symbol || '').toUpperCase();
+        const side = Copy ? Copy.sideZh(p.side) : (p.side === 'SHORT' ? '空' : '多');
+        const stop = p.stop_price != null ? Number(p.stop_price).toFixed(2) : '—';
+        const ttl = Copy ? Copy.ttlText(p) : '';
+        return `<div class="sb-queue-item" data-symbol="${sym}" data-id="${p.proposal_id || ''}">
+          <span class="q-sym">${sym}</span>${side} · 损 ${stop}
+          <div class="q-meta">${ttl || '点击定位到宫格'}</div>
+        </div>`;
+      }).join('');
+    el.querySelectorAll('.sb-queue-item').forEach((node) => {
+      node.addEventListener('click', () => {
+        const sym = node.dataset.symbol;
+        el.classList.remove('open');
+        global.dispatchEvent(new CustomEvent('nautilus:focus-pending', {
+          detail: { symbol: sym, proposal_id: node.dataset.id },
+        }));
+      });
+    });
+  }
 
   global.StatusBar = {
     mount, refresh, startPolling, isVoiceEnabled, getSnapshot: () => ({ ...lastSnapshot }),

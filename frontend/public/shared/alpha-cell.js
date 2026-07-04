@@ -2,13 +2,7 @@
  * 每格 Alpha 流水线 + 审批 — multi.html 四宫格用
  */
 (function (global) {
-  const SIGNAL_LABEL = {
-    pullback_vwap: 'VWAP',
-    pullback_supertrend: 'ST',
-    pullback_dema20: 'DEMA20',
-    pullback_dema: 'DEMA',
-    st_super: '超级',
-  };
+  const Copy = () => global.AlphaCopy;
 
   let cache = { pending: {}, wait: {}, ready: {}, bySymbol: {} };
 
@@ -49,41 +43,51 @@
   }
 
   function pillForSymbol(symbol) {
-    const { phase } = phaseForSymbol(symbol);
+    const { phase, proposal } = phaseForSymbol(symbol);
+    if (Copy() && proposal) {
+      if (phase === 'pending') return Copy().pillForPhase('pending');
+      if (phase === 'ready') return Copy().pillForPhase('ready');
+      if (phase === 'wait') {
+        return Copy().isStSuper(proposal)
+          ? Copy().pillForPhase('ready')
+          : Copy().pillForPhase('wait');
+      }
+    }
     if (phase === 'pending') return { cls: 'pill-pending', text: '待审批' };
-    if (phase === 'wait') return { cls: 'pill-wait', text: '等待回踩' };
     if (phase === 'ready') return { cls: 'pill-ready', text: '待执行' };
+    if (phase === 'wait') return { cls: 'pill-wait', text: '等待回踩' };
     return { cls: 'pill-none', text: '无信号' };
   }
 
-  function formatProposalDetail(proposal) {
-    if (!proposal) return '暂无活跃建议';
-    const sig = SIGNAL_LABEL[proposal.signal_type] || proposal.signal_type || '';
-    const side = proposal.side === 'SHORT' ? '空' : '多';
-    const trig = proposal.trigger_level != null ? Number(proposal.trigger_level).toFixed(2) : '—';
-    const entry = proposal.entry_price != null ? Number(proposal.entry_price).toFixed(2) : '—';
-    const stop = proposal.stop_price != null ? Number(proposal.stop_price).toFixed(2) : '—';
-    const rr = proposal.rr_half_est != null ? Number(proposal.rr_half_est).toFixed(1) : '—';
-    return `${side}·${sig} 触发${trig}\n入${entry} 损${stop} R:R½ ${rr}`;
-  }
-
   function renderSteps(symbol) {
-    const { phase } = phaseForSymbol(symbol);
-    const steps = [
-      { label: '①扫描' },
-      { label: '②审批' },
-      { label: '③回踩' },
-      { label: '④执行' },
-    ];
-    let activeIdx = phase === 'none' ? 0 : phase === 'pending' ? 1 : phase === 'wait' ? 2 : 3;
-    const doneUntil = phase === 'none' ? -1 : activeIdx - 1;
-
-    return steps.map((s, i) => {
+    const { phase, proposal } = phaseForSymbol(symbol);
+    const steps = Copy()
+      ? Copy().workflowSteps(proposal, phase)
+      : [
+        { label: '①信号', state: 'todo' },
+        { label: '②建议', state: 'todo' },
+        { label: '③审批', state: 'active' },
+        { label: '④执行', state: 'todo' },
+      ];
+    return steps.map((s) => {
       let cls = 'astep';
-      if (i <= doneUntil) cls += ' done';
-      if (i === activeIdx) cls += ' active';
+      if (s.state === 'done') cls += ' done';
+      if (s.state === 'active') {
+        cls += phase === 'pending' ? ' active-pending' : ' active';
+      }
       return `<span class="${cls}">${s.label}</span>`;
     }).join('');
+  }
+
+  function formatProposalDetail(proposal) {
+    if (Copy()) return Copy().formatProposalDetail(proposal);
+    if (!proposal) return '暂无活跃建议';
+    return `${proposal.symbol} ${proposal.side}`;
+  }
+
+  function engineOnline() {
+    const snap = global.StatusBar?.getSnapshot?.();
+    return snap?.engineOk !== false;
   }
 
   function renderPanel(symbol) {
@@ -99,17 +103,27 @@
       detailEl.textContent = formatProposalDetail(proposal);
     }
 
+    const canApprove = engineOnline();
+
     if (actionsEl) {
+      actionsEl.classList.remove('alpha-actions-highlight');
       if (phase === 'pending' && proposal) {
+        actionsEl.classList.add('alpha-actions-highlight');
+        const offlineHint = canApprove ? '' : ' title="引擎离线，暂不可批准"';
         actionsEl.innerHTML = `
-          <button class="c-btn-alpha approve" data-id="${proposal.proposal_id}" data-decision="approved_live">批准</button>
+          <button class="c-btn-alpha approve-live" data-id="${proposal.proposal_id}" data-decision="approved_live"${offlineHint}${canApprove ? '' : ' disabled'}>批准实盘</button>
           <button class="c-btn-alpha reject" data-id="${proposal.proposal_id}" data-decision="rejected">驳回</button>`;
         actionsEl.querySelectorAll('button').forEach((btn) => {
           btn.onclick = () => decide(btn.dataset.id, btn.dataset.decision, symbol, btn);
         });
-      } else if (phase === 'wait' && proposal) {
+        if (global.AlphaWorkflow) {
+          global.AlphaWorkflow.updateRibbon(symbol, proposal);
+        }
+      } else if (phase === 'wait' && proposal && Copy()?.showObserveApprove(proposal)) {
         actionsEl.innerHTML = `<button class="c-btn-alpha cancel" data-id="${proposal.proposal_id}">取消批准</button>`;
         actionsEl.querySelector('button').onclick = (e) => cancelApproved(proposal.proposal_id, symbol, e.target);
+      } else if (phase === 'ready' && proposal) {
+        actionsEl.innerHTML = `<span style="font-size:11px;color:#26a69a">${Copy()?.postApproveHint(proposal) || '待执行'}</span>`;
       } else {
         actionsEl.innerHTML = '';
       }
@@ -128,46 +142,80 @@
     (symbols || []).forEach((sym) => renderPanel(sym));
   }
 
+  function listPending() {
+    return Object.values(cache.pending);
+  }
+
   function firstSymbolForPhase(phase) {
     const map = phase === 'pending' ? cache.pending : phase === 'wait' ? cache.wait : cache.ready;
+    const list = Object.values(map);
+    if (list.length) {
+      list.sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
+      return list[0].symbol;
+    }
     const syms = global.__ALPHA_SYMBOL_LIST || Object.keys(map);
     return syms.find((s) => map[s]) || Object.keys(map)[0] || null;
   }
 
   async function decide(id, decision, symbol, btn) {
-    if (decision === 'approved_live' && !confirm(`确认【批准】${symbol} 建议？`)) return;
     if (decision === 'rejected' && !confirm(`确认【驳回】${symbol} 建议？`)) return;
-    if (btn) btn.disabled = true;
-    try {
-      const res = await (global.NautilusAuth
-        ? global.NautilusAuth.authFetch(`/api/proposals/${id}/decision`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ decision, approver: 'operator', comment: '' }),
-          })
-        : fetch(`/api/proposals/${id}/decision`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ decision, approver: 'operator', comment: '' }),
-          }));
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '审批失败');
-      if (global.refreshAlphaPanels) {
-        await global.refreshAlphaPanels();
-      } else {
-        await loadAll();
-        const syms = global.__ALPHA_SYMBOL_LIST || Object.keys(global.__ALPHA_SYMBOLS || {});
-        renderAll(syms);
-        if (global.StatusBar) await global.StatusBar.refresh();
+
+    const { proposal } = phaseForSymbol(symbol);
+    const run = async () => {
+      if (btn) btn.disabled = true;
+      try {
+        const res = await (global.NautilusAuth
+          ? global.NautilusAuth.authFetch(`/api/proposals/${id}/decision`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ decision, approver: 'operator', comment: '' }),
+            })
+          : fetch(`/api/proposals/${id}/decision`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ decision, approver: 'operator', comment: '' }),
+            }));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '审批失败');
+        if (global.refreshAlphaPanels) {
+          await global.refreshAlphaPanels();
+        } else {
+          await loadAll();
+          const syms = global.__ALPHA_SYMBOL_LIST || Object.keys(global.__ALPHA_SYMBOLS || {});
+          renderAll(syms);
+          if (global.StatusBar) await global.StatusBar.refresh();
+        }
+        if (global.onAlphaUpdated) global.onAlphaUpdated();
+        if (global.AlphaWorkflow) global.AlphaWorkflow.onApprovalResolved(symbol);
+        if (global.showToast) {
+          const exec = data.agent_exec;
+          let msg = `${symbol} ${decision === 'approved_live' ? '已批准实盘' : decision === 'approved_observe' ? '已批准观察' : '已驳回'}`;
+          if (exec?.mode === 'live') msg += ' · Agent执行已开';
+          else if (exec?.mode === 'observe') msg += ' · Agent观察已开';
+          global.showToast(msg);
+        }
+      } catch (e) {
+        if (global.showToast) global.showToast('❌ ' + e.message);
+        if (btn) btn.disabled = false;
       }
-      if (global.onAlphaUpdated) global.onAlphaUpdated();
-      if (global.showToast) {
-        global.showToast(`${symbol} ${decision === 'approved_live' ? '已批准' : '已驳回'}`);
+    };
+
+    if (decision === 'approved_live') {
+      if (!engineOnline()) {
+        if (global.showToast) global.showToast('❌ 引擎离线，无法批准', 'warn');
+        return;
       }
-    } catch (e) {
-      if (global.showToast) global.showToast('❌ ' + e.message);
-      if (btn) btn.disabled = false;
+      if (global.ApprovalModal && proposal) {
+        global.ApprovalModal.show({
+          proposal,
+          engineOk: true,
+          onConfirm: run,
+        });
+        return;
+      }
+      if (!confirm(`确认【批准实盘】${symbol}？`)) return;
     }
+    await run();
   }
 
   async function cancelApproved(id, symbol, btn) {
@@ -196,6 +244,7 @@
         if (global.StatusBar) await global.StatusBar.refresh();
       }
       if (global.onAlphaUpdated) global.onAlphaUpdated();
+      if (global.AlphaWorkflow) global.AlphaWorkflow.onApprovalResolved(symbol);
     } catch (e) {
       if (global.showToast) global.showToast('❌ ' + e.message);
       if (btn) btn.disabled = false;
@@ -204,7 +253,6 @@
 
   async function refresh(symbols, snapshot) {
     if (Array.isArray(snapshot?.pending) && Array.isArray(snapshot?.approved)) {
-      // 复用 StatusBar 快照，避免重复请求 approved
       ingestProposals(snapshot.pending, snapshot.wait, snapshot.approved);
     } else if (Array.isArray(snapshot?.pending) && Array.isArray(snapshot?.wait)) {
       const approved = await fetch('/api/proposals?status=approved&limit=200')
@@ -226,6 +274,7 @@
     phaseForSymbol,
     pillForSymbol,
     firstSymbolForPhase,
+    listPending,
     getCache: () => cache,
   };
 })(window);

@@ -1012,6 +1012,38 @@ app.get("/api/proposals/:id", async (req, res) => {
     }
 });
 
+/** 批准时联动 Agent执行，避免 approved_live 与 auto_strategy 双开关静默失败 */
+async function linkAgentExecutionOnApproval(symbol, decision) {
+    const sym = String(symbol || "").toUpperCase();
+    if (!sym || !decision.startsWith("approved")) {
+        return null;
+    }
+    const raw = await redis.get(`settings:${sym}`);
+    const settings = raw ? JSON.parse(raw) : {};
+    const prev = {
+        auto_strategy: !!settings.auto_strategy,
+        auto_observe: !!settings.auto_observe,
+    };
+    if (decision === "approved_live") {
+        settings.auto_strategy = true;
+        settings.auto_observe = false;
+    } else if (decision === "approved_observe") {
+        settings.auto_observe = true;
+        settings.auto_strategy = false;
+    } else {
+        return null;
+    }
+    settings.trail_mode = 0;
+    settings.opening_breakout_live = false;
+    settings.opening_breakout_observe = false;
+    await redis.set(`settings:${sym}`, JSON.stringify(settings));
+    const mode = decision === "approved_live" ? "live" : "observe";
+    const changed = prev.auto_strategy !== !!settings.auto_strategy
+        || prev.auto_observe !== !!settings.auto_observe;
+    console.log(`⚙️  批准联动 Agent执行 [${sym}] → ${mode}`, settings);
+    return { symbol: sym, mode, changed, settings, previous: prev };
+}
+
 async function applyProposalDecision(id, decision, approver = "operator", comment = "") {
     const valid = ["approved_live", "approved_observe", "rejected"];
     if (!valid.includes(decision)) {
@@ -1035,6 +1067,10 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
     }
     const now = Math.floor(Date.now() / 1000);
     const isApproved = decision.startsWith("approved");
+    let agentExec = null;
+    if (isApproved) {
+        agentExec = await linkAgentExecutionOnApproval(proposal.symbol, decision);
+    }
     const payload = {
         ...proposal,
         status: isApproved ? "approved" : "rejected",
@@ -1048,11 +1084,17 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
         payload.approved_at = now;
         if (payload.execution_mode === "st_super_immediate") {
             payload.execution_phase = "ready_to_execute";
-            payload.reclaim_note = "超级信号：审批通过，执行层下一根 M1 可下单";
+            payload.reclaim_note = "超级信号：审批通过，下一根 M1 可下单";
+            if (agentExec?.mode === "live") {
+                payload.reclaim_note += "（已自动开启 Agent执行）";
+            }
         } else if (payload.touch_reclaimed_at_submit) {
             payload.reclaim_note = "触线当根已收回，仍由执行层确认后下单";
         } else {
             payload.reclaim_note = payload.reclaim_label || "等待回踩 reclaim 完成后执行";
+        }
+        if (agentExec) {
+            payload.agent_exec = agentExec;
         }
     }
     const targetStatus = payload.status;
@@ -1076,6 +1118,7 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
         signal_type: payload.signal_type,
         decision,
         approver,
+        agent_exec: agentExec,
     }));
     await pipe.exec();
     console.log(`📋 建议审批 [${payload.symbol}] ${decision} id=${id} by ${approver}`);
@@ -1142,7 +1185,11 @@ app.post("/api/proposals/:id/decision", requireApiSecret, async (req, res) => {
     const { decision, approver = "operator", comment = "" } = req.body || {};
     try {
         const payload = await applyProposalDecision(id, decision, approver, comment);
-        res.json({ ok: true, proposal: payload });
+        res.json({
+            ok: true,
+            proposal: payload,
+            agent_exec: payload.agent_exec || null,
+        });
     } catch (e) {
         res.status(e.statusCode || 500).json({ error: e.message });
     }

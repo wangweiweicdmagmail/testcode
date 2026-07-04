@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Alpha 建议历史</title>
   <link rel="stylesheet" href="/shared/status-bar.css">
+  <link rel="stylesheet" href="/shared/approval-ui.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -107,7 +108,7 @@
     <div class="tabs">
       <button class="active" data-status="pending">待审批 <span class="badge" id="badge-pending">0</span></button>
       <button data-status="approved">已批准</button>
-      <button data-status="approved_wait">等待回踩</button>
+      <button data-status="approved_wait">待执行/回踩</button>
       <button data-status="rejected">已驳回</button>
       <button data-status="executed">已执行</button>
     </div>
@@ -120,6 +121,8 @@
   <div id="list"></div>
   <div id="toast"></div>
 
+  <script src="/shared/alpha-copy.js"></script>
+  <script src="/shared/approval-modal.js"></script>
   <script src="/shared/status-bar.js"></script>
   <script>
     StatusBar.mount('status-bar-root', 'proposals');
@@ -128,13 +131,15 @@
   <script>
     let currentStatus = 'pending';
     let ws;
+    let proposalById = {};
 
-    const SIGNAL_LABEL = {
-      pullback_vwap: '回踩 VWAP',
-      pullback_supertrend: '回踩 SuperTrend',
-      pullback_dema20: '回踩 DEMA20',
-      pullback_dema: '回踩 DEMA',  // 旧版兼容
-    };
+    function signalLabel(p) {
+      return window.AlphaCopy?.signalLabel(p.signal_type) || p.signal_type;
+    }
+
+    function phaseLabel(p, status) {
+      return window.AlphaCopy?.phaseLabel(p, status) || (p.status || status);
+    }
 
     function showToast(msg) {
       const el = document.createElement('div');
@@ -149,28 +154,6 @@
       return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
     }
 
-    function decisionLabel(d) {
-      const m = {
-        approved_live: '实盘',
-        approved_observe: '观察',
-        rejected: '已驳回',
-      };
-      return m[d] || d || '';
-    }
-
-    function phaseLabel(p, status) {
-      const phase = p.execution_phase;
-      const dec = decisionLabel(p.decision);
-      if (phase === 'approved_wait' || status === 'approved_wait') {
-        return dec ? `${dec} · 等待回踩` : '等待回踩完成';
-      }
-      if (phase === 'ready_to_execute') return dec ? `${dec} · 待执行` : '待执行';
-      if (phase === 'failed') return dec ? `${dec} · 回踩失败` : '回踩失败';
-      if (p.decision === 'rejected' || status === 'rejected') return '已驳回';
-      if (dec) return dec;
-      return p.status || status;
-    }
-
     function m5StLabel(p) {
       const d = p.m5_st_dir;
       if (d === 1) return 'M5 ST▲多';
@@ -181,7 +164,7 @@
     function cardHtml(p, status) {
       const sideCls = p.side === 'SHORT' ? 'side-short' : 'side-long';
       const sideZh = p.side === 'SHORT' ? '做空' : '做多';
-      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
+      const sig = signalLabel(p);
       const conf = p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—';
       const tag = phaseLabel(p, status);
       const tagCls = 'status-tag status-' + (
@@ -192,18 +175,24 @@
         (p.decision || p.status || status)
       );
       const rr = p.rr_half_est != null ? p.rr_half_est : '—';
+      const stSuper = window.AlphaCopy?.isStSuper(p);
       const cond = p.execution_mode === 'conditional_reclaim';
-      const condBanner = cond ? `
+      const condBanner = stSuper ? `
+        <div class="cond-banner" style="border-color:rgba(239,83,80,.35);color:#ef9a9a;">
+          <strong>超级信号</strong>：${window.AlphaCopy.postApproveHint(p)}
+        </div>` : (cond ? `
         <div class="cond-banner">
           <strong>条件执行</strong>：批准 ≠ 立即下单。${p.reclaim_label || '需 reclaim 后由引擎执行'}。
           半仓止盈 ${p.tp_half_price ?? p.tp_price ?? '—'}，剩余仓位 trailing 另策。
-        </div>` : '';
+        </div>` : '');
+      const ttl = window.AlphaCopy?.ttlText(p);
+      const canApprove = window.StatusBar?.getSnapshot?.()?.engineOk !== false;
 
       let actions = '';
       if (status === 'pending') {
         actions = `
           <div class="actions">
-            <button class="btn btn-approve" data-id="${p.proposal_id}" data-decision="approved_live">批准</button>
+            <button class="btn btn-live" data-id="${p.proposal_id}" data-decision="approved_live"${canApprove ? '' : ' disabled title="引擎离线，无法批准"'}>批准实盘</button>
             <button class="btn btn-reject" data-id="${p.proposal_id}" data-decision="rejected">驳回</button>
           </div>`;
       } else if (p.execution_phase === 'approved_wait' || p.execution_phase === 'ready_to_execute') {
@@ -241,6 +230,7 @@
             ID: ${p.proposal_id} · 触线 ${fmtTime(p.touch_time || p.bar_time)} · 创建 ${fmtTime(p.created_at)}
             ${p.expires_at ? ' · 过期 ' + fmtTime(p.expires_at) : ''}
             ${p.approver ? ' · 审批人 ' + p.approver : ''}
+            ${ttl ? ' · ' + ttl : ''}
             ${p.reclaim_note ? ' · ' + p.reclaim_note : ''}
             ${p.reclaim_fail_reason ? ' · 失败: ' + p.reclaim_fail_reason : ''}
             ${p.reclaim_close ? ' · reclaim 收盘 ' + p.reclaim_close : ''}
@@ -280,6 +270,8 @@
         return;
       }
       list.innerHTML = data.proposals.map(p => cardHtml(p, currentStatus === 'approved_wait' ? 'approved_wait' : currentStatus)).join('');
+      proposalById = {};
+      data.proposals.forEach((p) => { proposalById[p.proposal_id] = p; });
       list.querySelectorAll('[data-decision]').forEach(btn => {
         btn.addEventListener('click', () => decide(btn.dataset.id, btn.dataset.decision, btn));
       });
@@ -316,13 +308,7 @@
       }
     }
 
-    async function decide(id, decision, btn) {
-      // 仅两种处理：批准 / 驳回，各一次确认
-      if (decision === 'approved_live') {
-        if (!confirm('确认【批准】该建议？\n批准后进入等待回踩，reclaim 条件满足后引擎自动下单。')) return;
-      } else if (decision === 'rejected') {
-        if (!confirm('确认【驳回】该建议？')) return;
-      }
+    async function submitDecision(id, decision, btn) {
       btn.disabled = true;
       try {
         const res = await fetch(`/api/proposals/${id}/decision`, {
@@ -332,7 +318,7 @@
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '审批失败');
-        const label = decision === 'approved_live' ? '已批准（等待回踩）' : '已驳回';
+        const label = decision === 'approved_live' ? '已批准（Agent执行已开）' : '已驳回';
         showToast(`${data.proposal.symbol} ${label}`);
         await loadList();
         await loadBadge();
@@ -340,6 +326,23 @@
         showToast('❌ ' + e.message);
         btn.disabled = false;
       }
+    }
+
+    async function decide(id, decision, btn) {
+      if (decision === 'approved_live') {
+        const p = proposalById[id];
+        const engineOk = window.StatusBar?.getSnapshot?.()?.engineOk !== false;
+        window.ApprovalModal?.show({
+          proposal: p,
+          engineOk,
+          onConfirm: () => submitDecision(id, decision, btn),
+        });
+        return;
+      }
+      if (decision === 'rejected') {
+        if (!confirm('确认【驳回】该建议？')) return;
+      }
+      await submitDecision(id, decision, btn);
     }
 
     document.querySelectorAll('.tabs button').forEach(btn => {
