@@ -2,32 +2,32 @@ import time
 from nautilus_trader.core.message import Event
 from nautilus_trader.core.uuid import UUID4
 
+
 class BarCollectedEvent(Event):
     """
     当策略计算完指标后发布的事件，供 ExitManager 等模块监听并执行风险检查。
     """
     def __init__(self, symbol: str, bar_dict: dict):
-        # Cython Event 子类需手动初始化私有属性
-        # ts_event 必须先于 ts_init 赋值，确保 ts_init >= ts_event
         self._ts_event = time.time_ns()
-        self._ts_init  = time.time_ns()
+        self._ts_init = time.time_ns()
         self._id = UUID4()
-        
+
         self.symbol = symbol
         self.bar = bar_dict  # 包含 OHLC, ST_value, st_dir 等
+
 
 class STTrailSettingsEvent(Event):
     """
     ST跟踪止损开关变更事件，用于同步 UI 的开关状态到引擎内部策略中。
     """
     def __init__(self, symbol: str, active: bool):
-        # ts_event 先于 ts_init 赋值，确保 ts_init >= ts_event
         self._ts_event = time.time_ns()
-        self._ts_init  = time.time_ns()
+        self._ts_init = time.time_ns()
         self._id = UUID4()
-        
+
         self.symbol = symbol
         self.active = active
+
 
 class EMATrailSettingsEvent(Event):
     """
@@ -35,9 +35,9 @@ class EMATrailSettingsEvent(Event):
     """
     def __init__(self, symbol: str, active: bool):
         self._ts_event = time.time_ns()
-        self._ts_init  = time.time_ns()
+        self._ts_init = time.time_ns()
         self._id = UUID4()
-        
+
         self.symbol = symbol
         self.active = active
 
@@ -49,11 +49,23 @@ class BarCollectedM5Event(Event):
     """
     def __init__(self, symbol: str, bar_dict: dict):
         self._ts_event = time.time_ns()
-        self._ts_init  = time.time_ns()
+        self._ts_init = time.time_ns()
         self._id = UUID4()
 
         self.symbol = symbol
         self.bar = bar_dict  # 包含 M5 OHLC, st_value, st_dir, instrument_id 等
+
+
+class BarsHistoryFlushedEvent(Event):
+    """strategy 历史 K 线写入 Redis 后发布，供 SignalDetector 回放触线标记。"""
+    def __init__(self, symbol: str, session_date: str = ""):
+        self._ts_event = time.time_ns()
+        self._ts_init = time.time_ns()
+        self._id = UUID4()
+
+        self.symbol = symbol
+        self.session_date = session_date
+
 
 # 订单终态集合（不再活跃），全局共用，避免各模块重复定义
 TERMINAL_STATUS: frozenset[str] = frozenset({

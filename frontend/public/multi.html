@@ -4,7 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi Chart Dashboard</title>
+    <title>四宫格主控台</title>
+    <link rel="stylesheet" href="/shared/status-bar.css">
     <script
         src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -83,143 +84,263 @@
             flex-direction: column;
             overflow: hidden;
             position: relative;
+            transition: box-shadow .2s, outline-color .2s;
         }
 
-        /* ── 单元格头部（与 index.html #toolbar 对齐） ── */
-        .c-toolbar {
+        .cell.cell-alpha-pending {
+            outline: 2px solid rgba(239, 83, 80, .55);
+            outline-offset: -2px;
+            box-shadow: inset 0 0 0 1px rgba(239, 83, 80, .25);
+        }
+
+        .cell.cell-alpha-wait {
+            outline: 2px solid rgba(41, 98, 255, .55);
+            outline-offset: -2px;
+        }
+
+        .cell.cell-alpha-ready {
+            outline: 2px solid rgba(38, 166, 154, .45);
+            outline-offset: -2px;
+        }
+
+        .cell.cell-has-position {
+            box-shadow: inset 3px 0 0 #2196f3;
+        }
+
+        .cell.cell-flash {
+            animation: cell-flash .8s ease;
+        }
+
+        @keyframes cell-flash {
+            0%, 100% { filter: none; }
+            50% { filter: brightness(1.15); }
+        }
+
+        /* ── 单元格：左图 + 右侧三块 ── */
+        .c-header {
             display: flex;
             align-items: center;
-            padding: 4px 10px;
+            justify-content: space-between;
+            padding: 3px 8px;
             background: #1e222d;
             border-bottom: 1px solid #2a2e39;
             flex-shrink: 0;
-            min-height: 52px;
-            gap: 0;
+            min-height: 28px;
         }
 
-        /* 左列 */
-        .c-left {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            flex: 1;
-            min-width: 0;
-        }
-
-        .c-left-r1 {
+        .c-header-left {
             display: flex;
             align-items: center;
             gap: 8px;
+            min-width: 0;
         }
 
-        .c-left-r2 {
+        .c-header a.c-detail-link {
+            font-size: 10px;
+            color: #787b86;
+            text-decoration: none;
+            padding: 1px 6px;
+            border: 1px solid #2a2e39;
+            border-radius: 3px;
+        }
+
+        .c-header a.c-detail-link:hover { color: #2962ff; border-color: #2962ff; }
+
+        .alpha-pill {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+
+        .pill-pending { background: rgba(239,83,80,.2); color: #ef5350; }
+        .pill-wait { background: rgba(41,98,255,.2); color: #2962ff; }
+        .pill-ready { background: rgba(38,166,154,.2); color: #26a69a; }
+        .pill-none { background: #2a2e39; color: #787b86; }
+
+        .c-body {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .c-sidebar {
+            width: 190px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 6px 7px;
+            background: #1a1e2a;
+            border-left: 1px solid #2a2e39;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+
+        .c-panel {
+            background: #131722;
+            border: 1px solid #2a2e39;
+            border-radius: 4px;
+            padding: 6px 7px;
+        }
+
+        .c-panel-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: #787b86;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            margin-bottom: 5px;
+        }
+
+        .alpha-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .astep {
+            font-size: 11px;
+            color: #4b5563;
+            padding: 1px 0;
+        }
+
+        .astep.done { color: #787b86; }
+        .astep.active { color: #2962ff; font-weight: 700; }
+
+        .alpha-detail {
+            font-size: 11px;
+            color: #787b86;
+            margin-top: 4px;
+            line-height: 1.5;
+            word-break: break-word;
+            white-space: pre-line;
+        }
+
+        .alpha-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-top: 5px;
+        }
+
+        .c-btn-alpha {
+            border: none;
+            border-radius: 3px;
+            padding: 5px 0;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .c-btn-alpha.approve { background: #26a69a; color: #fff; }
+        .c-btn-alpha.reject { background: #2a2e39; color: #d1d4dc; border: 1px solid #434651; }
+        .c-btn-alpha.cancel { background: #434651; color: #d1d4dc; }
+
+        .pos-sidebar .ps-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 6px;
+            line-height: 1.55;
+        }
+
+        .pos-sidebar .ps-row label { color: #787b86; }
+        .pos-sidebar .ps-row span { font-weight: 600; text-align: right; }
+
+        .pos-empty { color: #4b5563; font-size: 11px; }
+
+        .sys-panel .sys-row {
+            line-height: 1.55;
+            color: #787b86;
+        }
+
+        .sys-panel .sys-row b { color: #d1d4dc; font-weight: 600; }
+
+        .c-actions-mini {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            margin-top: auto;
+            padding-top: 3px;
+        }
+
+        .c-actions-mini .c-btn {
+            width: 100%;
+            padding: 6px 0;
+        }
+
+        .c-actions-mini .c-toggle-wrap {
+            justify-content: center;
+            font-size: 11px;
+        }
+
+        .c-actions-mini select {
+            width: 100%;
+            font-size: 11px;
+            padding: 4px 6px;
+        }
+
+        /* ── 单元格头部（legacy toolbar 部分保留给 crosshair） ── */
+        .c-toolbar {
+            display: none;
+        }
+
+        .c-left-r2-inline {
             display: flex;
             align-items: center;
-            min-height: 16px;
+            min-height: 14px;
+            margin-left: 4px;
         }
 
+        /* ── 图表区 ── */
+        .c-chart-wrap {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        /* 隐藏旧右列 */
+        .c-right { display: none !important; }
+
         .c-symbol {
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 700;
             color: #fff;
         }
 
-        .c-price {
+        .c-symbol-sel {
             font-size: 14px;
-            font-weight: 600;
-        }
-
-        .c-change {
-            font-size: 11px;
-            padding: 1px 6px;
+            font-weight: 700;
+            color: #fff;
+            background: transparent;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            padding: 0 2px;
             border-radius: 3px;
         }
+        .c-symbol-sel:hover { background: #2a2e39; }
+        .c-symbol-sel option { background: #1e222d; color: #fff; font-weight: 600; }
 
-        /* 十字线 OHLC */
+        .c-price { font-size: 13px; font-weight: 600; }
+        .c-change { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
+
         .c-crosshair {
             display: none;
             align-items: center;
-            gap: 0;
-            font-size: 11px;
+            font-size: 9px;
             font-family: 'Roboto Mono', monospace, sans-serif;
         }
 
-        .c-ci-item {
-            display: flex;
-            align-items: center;
-            margin-right: 8px;
-        }
+        .c-ci-item { display: flex; align-items: center; margin-right: 6px; }
+        .c-ci-label { color: #787b86; margin-right: 2px; font-size: 9px; }
+        .c-ci-val { font-weight: 600; font-size: 9px; color: #d1d4dc; }
+        .c-ci-time { color: #4b5563; font-size: 9px; margin-right: 6px; }
 
-        .c-ci-label {
-            color: #787b86;
-            margin-right: 2px;
-            font-size: 10px;
-        }
+        .c-pos-panel { display: none !important; }
 
-        .c-ci-val {
-            font-weight: 600;
-            font-size: 11px;
-            color: #d1d4dc;
-        }
-
-        .c-ci-time {
-            color: #4b5563;
-            font-size: 10px;
-            margin-right: 10px;
-        }
-
-        /* 右列 */
-        .c-right {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 4px;
-        }
-
-        /* 仓位面板 */
-        .c-pos-panel {
-            display: none;
-            background: rgba(30, 34, 45, .6);
-            border: 1px solid #2a2e39;
-            border-radius: 4px;
-            padding: 3px 8px;
-            font-size: 11px;
-            line-height: 1.6;
-        }
-
-        .c-pos-row {
-            display: flex;
-            gap: 12px;
-        }
-
-        .c-pos-item label {
-            color: #787b86;
-            margin-right: 3px;
-        }
-
-        .c-pos-item span {
-            font-weight: 600;
-        }
-
-        /* 操作按钮区 */
-        .c-actions {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-        }
-
-        /* 标的切换下拉 */
-        .c-sym-sel {
-            background: #131722;
-            color: #d1d4dc;
-            border: 1px solid #2a2e39;
-            border-radius: 4px;
-            padding: 2px 6px;
-            font-size: 11px;
-            cursor: pointer;
-        }
-
-        /* ST 跟踪止盈 toggle */
         .c-toggle-wrap {
             display: flex;
             align-items: center;
@@ -231,81 +352,75 @@
         .c-toggle {
             position: relative;
             display: inline-block;
-            width: 30px;
-            height: 17px;
+            width: 26px;
+            height: 14px;
         }
 
-        .c-toggle input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
+        .c-toggle input { opacity: 0; width: 0; height: 0; }
 
         .c-slider {
             position: absolute;
             inset: 0;
             background: #2a2e39;
-            border-radius: 17px;
+            border-radius: 14px;
             cursor: pointer;
-            transition: background .2s;
         }
 
         .c-slider:before {
             content: '';
             position: absolute;
-            width: 11px;
-            height: 11px;
-            left: 3px;
-            top: 3px;
+            width: 10px;
+            height: 10px;
+            left: 2px;
+            top: 2px;
             background: #d1d4dc;
             border-radius: 50%;
             transition: transform .2s;
         }
 
-        .c-toggle input:checked+.c-slider {
-            background: #26a69a;
-        }
+        .c-toggle input:checked + .c-slider { background: #26a69a; }
+        .c-toggle input:checked + .c-slider:before { transform: translateX(12px); }
 
-        .c-toggle input:checked+.c-slider:before {
-            transform: translateX(13px);
-        }
-
-        /* 按钮 */
         .c-btn {
-            padding: 3px 10px;
+            padding: 6px 10px;
             border-radius: 4px;
             border: none;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
-            transition: opacity .15s;
         }
 
-        .c-btn:hover {
-            opacity: .82;
-        }
-
-        .c-btn-open {
-            background: #26a69a;
-            color: #fff;
-        }
-
-        .c-btn-close {
-            background: #ef5350;
-            color: #fff;
-        }
-
-        /* ── 图表区 ── */
-        .c-chart-wrap {
-            flex: 1;
-            position: relative;
-            overflow: hidden;
-        }
+        .c-btn-open { background: #26a69a; color: #fff; }
+        .c-btn-close { background: #ef5350; color: #fff; }
 
         .c-chart {
             width: 100%;
             height: 100%;
         }
+
+        #toast-container {
+            position: fixed;
+            top: 48px;
+            right: 12px;
+            z-index: 99999;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .toast-item {
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,.4);
+            max-width: 280px;
+        }
+
+        .toast-item.ok { border-color: rgba(38,166,154,.45); }
+        .toast-item.warn { border-color: rgba(239,83,80,.45); }
+        .toast-item.tip { border-color: rgba(41,98,255,.35); }
 
         /* 图例 */
         .c-legend {
@@ -329,6 +444,10 @@
             width: 8px;
             height: 2px;
             border-radius: 1px;
+        }
+        .c-legend-dot-thick {
+            width: 12px;
+            height: 5px;
         }
 
         /* 加载遮罩 */
@@ -601,41 +720,20 @@
     <!-- 开仓对话框遮罩层（点击关闭） -->
     <div class="order-panel-overlay" id="orderPanelOverlay"></div>
 
-    <!-- 顶部导航 -->
-    <div id="nav">
-        <h1>📈 Trading Dashboard</h1>
-        <div class="nav-links">
-            <a href="/">单图模式</a>
-            <a href="/multi.html" class="active">⊞ 四图总览</a>
-            <!-- 语音提醒开关 -->
-            <button id="voice-toggle" title="语音提醒" style="
-              background:none;border:1px solid #2a2e39;border-radius:4px;
-              color:#787b86;font-size:12px;padding:2px 8px;cursor:pointer;
-              transition:all .2s;">🔔 语音</button>
-        </div>
-    </div>
+    <div id="status-bar-root"></div>
+    <div id="toast-container"></div>
 
     <!-- 2×2 网格（由 JS 动态生成） -->
     <div id="grid"></div>
 
-
+    <script src="/shared/api-auth.js"></script>
+    <script src="/shared/status-bar.js"></script>
+    <script src="/shared/alpha-cell.js"></script>
     <script>
-        // ─── 语音提醒模块（全局共享）────────────────────────────────
-        let voiceEnabled = true;  // 默认开启，用户可手动关闭
-        const voiceBtn = document.getElementById('voice-toggle');
-        // 初始外观：默认 ON（绿色）
-        voiceBtn.textContent = '🔔 语音 ON';
-        voiceBtn.style.color = '#26a69a';
-        voiceBtn.style.borderColor = '#26a69a';
-        voiceBtn.addEventListener('click', () => {
-            voiceEnabled = !voiceEnabled;
-            voiceBtn.style.color = voiceEnabled ? '#26a69a' : '#787b86';
-            voiceBtn.style.borderColor = voiceEnabled ? '#26a69a' : '#2a2e39';
-            voiceBtn.textContent = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
-        });
+        // ─── 语音提醒（由 Status Bar 铃铛控制）────────────────────
         const _spokenCache = new Map();
         function speak(text, priority = false) {
-            if (!voiceEnabled) return;
+            if (window.StatusBar && !StatusBar.isVoiceEnabled()) return;
             const now = Date.now();
             if (!priority && _spokenCache.has(text) && now - _spokenCache.get(text) < 5000) return;
             _spokenCache.set(text, now);
@@ -645,66 +743,474 @@
             speechSynthesis.speak(u);
         }
 
-        // ── 默认四个标的 ──────────────────────────────────────────
-        const DEFAULT_SYMBOLS = ['QQQ', 'AAPL', 'NVDA', 'TSLA'];
+        // ── Toast ───────────────────────────────────────────────
+        function showToast(msg, type) {
+            const box = document.getElementById('toast-container');
+            if (!box) return;
+            const el = document.createElement('div');
+            el.className = 'toast-item' + (type ? ` ${type}` : '');
+            el.textContent = msg;
+            box.appendChild(el);
+            setTimeout(() => el.remove(), 4000);
+        }
+        window.showToast = showToast;
+
+        StatusBar.mount('status-bar-root', 'multi');
+
+        // ── 可选标的池（与后端 server.js ALL_SYMBOLS 一致）──────────────
+        const SYMBOL_UNIVERSE = ['NVDA', 'AAPL', 'GOOG', 'AVGO', 'SPY', 'TSLA', 'PLTR', 'AMZN', 'AMD', 'META', 'MSFT', 'QQQ', 'TSM', 'MU', 'NFLX'];
+        const FALLBACK_SYMBOLS = ['NVDA', 'TSLA', 'AAPL', 'QQQ'];
+        let ALPHA_SCAN_SYMBOLS = ['NVDA', 'TSLA', 'AAPL'];
+
+        fetch('/api/config/public').then(r => r.json()).then(cfg => {
+            if (cfg.alpha_symbols?.length) {
+                ALPHA_SCAN_SYMBOLS = cfg.alpha_symbols;
+                window.__ALPHA_SCAN_SYMBOLS = cfg.alpha_symbols;
+            }
+        }).catch(() => {});
+
+        function isAlphaScanSymbol(sym) {
+            return (window.__ALPHA_SCAN_SYMBOLS || ALPHA_SCAN_SYMBOLS).includes(sym);
+        }
+
+        // 选股优先级：URL ?symbols=A,B,C,D → localStorage → 默认
+        function resolveSymbols() {
+            const url = new URLSearchParams(location.search).get('symbols');
+            let list = url
+                ? url.split(',')
+                : JSON.parse(localStorage.getItem('multiSymbols') || 'null');
+            list = (list || FALLBACK_SYMBOLS)
+                .map(s => String(s).trim().toUpperCase())
+                .filter(s => SYMBOL_UNIVERSE.includes(s));
+            list = [...new Set(list)].slice(0, 4);
+            for (const d of [...FALLBACK_SYMBOLS, ...SYMBOL_UNIVERSE]) {
+                if (list.length >= 4) break;
+                if (!list.includes(d)) list.push(d);
+            }
+            return list;
+        }
+
+        // 换某个格子的股票：写入 localStorage 并重载
+        function loadSlotMeta() {
+            try { return JSON.parse(localStorage.getItem('multiSlotMeta') || '{}'); }
+            catch (_) { return {}; }
+        }
+        function saveSlotMeta(meta) {
+            localStorage.setItem('multiSlotMeta', JSON.stringify(meta));
+        }
+
+        /** 格子保护分：越高越不宜替换；Infinity = 不可替换 */
+        function getSlotProtectionScore(sym, slotIdx) {
+            if (!sym) return -1;
+            const pos = state[sym]?.position;
+            if (pos && Math.abs(pos.quantity || 0) > 0) return Infinity;
+
+            if (window.AlphaCell) {
+                const { phase } = AlphaCell.phaseForSymbol(sym);
+                if (phase === 'pending' || phase === 'wait' || phase === 'ready') return Infinity;
+            }
+            if (state[sym]?.autoMode === 'live') return Infinity;
+
+            const meta = loadSlotMeta();
+            const slot = meta[slotIdx];
+            const ageMin = slot?.shownAt ? (Date.now() - slot.shownAt) / 60000 : 999;
+
+            let score = 0;
+            if (state[sym]?.autoMode === 'observe') score += 800;
+            if (slot?.source === 'manual') score += Math.max(0, 450 - ageMin * 3);
+            else if (slot?.source === 'proposal') score += Math.max(0, 380 - ageMin * 4);
+            else if (slot?.source === 'signal') score += Math.max(0, 280 - ageMin * 5);
+            score -= Math.min(180, ageMin * 0.8);
+            return score;
+        }
+
+        function pickReplacementSlot(newSym) {
+            let bestIdx = -1;
+            let bestScore = Infinity;
+            for (let i = 0; i < DEFAULT_SYMBOLS.length; i++) {
+                const sym = DEFAULT_SYMBOLS[i];
+                if (sym === newSym) return i;
+                const score = getSlotProtectionScore(sym, i);
+                if (!Number.isFinite(score)) continue;
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestIdx = i;
+                }
+            }
+            return bestIdx;
+        }
+
+        function autoAssignSymbolToGrid(sym, source) {
+            sym = String(sym).toUpperCase();
+            if (!SYMBOL_UNIVERSE.includes(sym)) return false;
+            if (DEFAULT_SYMBOLS.includes(sym)) {
+                focusCell(sym);
+                return true;
+            }
+            const slotIdx = pickReplacementSlot(sym);
+            if (slotIdx < 0) {
+                speak(`${sym} 无法显示，四宫格已满`, true);
+                showToast(`⚠️ 四宫格保护中，无法显示 ${sym}`, 'warn');
+                return false;
+            }
+            const oldSym = DEFAULT_SYMBOLS[slotIdx];
+            const meta = loadSlotMeta();
+            meta[slotIdx] = { sym, shownAt: Date.now(), source, replaced: oldSym };
+            saveSlotMeta(meta);
+            const list = [...DEFAULT_SYMBOLS];
+            list[slotIdx] = sym;
+            localStorage.setItem('multiSymbols', JSON.stringify(list));
+            const u = new URL(location.href);
+            u.searchParams.delete('symbols');
+            u.searchParams.set('focus', sym);
+            showToast(`↪ ${oldSym} → ${sym}（${source === 'proposal' ? '新建议' : '新信号'}）`, 'tip');
+            location.href = u.toString();
+            return true;
+        }
+
+        const _knownPendingIds = new Set();
+        const _lastSignalAnnounce = {};
+
+        function onNewProposalDetected(p) {
+            const sym = String(p.symbol || '').toUpperCase();
+            if (!sym) return;
+            const sideZh = p.side === 'SHORT' ? '空' : '多';
+            if (!DEFAULT_SYMBOLS.includes(sym)) {
+                sessionStorage.setItem('multiPendingAlert', JSON.stringify({
+                    type: 'proposal', sym, side: p.side, ts: Date.now(),
+                }));
+                autoAssignSymbolToGrid(sym, 'proposal');
+                return;
+            }
+            speak(`${sym} 新建议${sideZh}待审批`, true);
+            showToast(`📋 ${sym} 新建议待审批`, 'tip');
+            focusCell(sym);
+        }
+
+        function playPostReloadAlert() {
+            const raw = sessionStorage.getItem('multiPendingAlert');
+            if (!raw) return;
+            sessionStorage.removeItem('multiPendingAlert');
+            try {
+                const a = JSON.parse(raw);
+                if (Date.now() - (a.ts || 0) > 120000) return;
+                if (a.type === 'proposal') {
+                    const sd = a.side === 'SHORT' ? '空' : '多';
+                    speak(`${a.sym} 新建议${sd}待审批`, true);
+                } else if (a.type === 'signal') {
+                    const sd = a.side === 'SHORT' ? '空' : '多';
+                    speak(`${a.sym} 超级${sd}`, true);
+                }
+                if (a.sym && DEFAULT_SYMBOLS.includes(a.sym)) {
+                    setTimeout(() => focusCell(a.sym), 300);
+                }
+            } catch (_) { /* ignore */ }
+        }
+
+        function initSlotMetaFromGrid() {
+            const meta = loadSlotMeta();
+            const now = Date.now();
+            DEFAULT_SYMBOLS.forEach((sym, idx) => {
+                if (!meta[idx] || meta[idx].sym !== sym) {
+                    meta[idx] = { sym, shownAt: now, source: meta[idx]?.source || 'manual' };
+                }
+            });
+            saveSlotMeta(meta);
+        }
+
+        function changeSlotSymbol(idx, newSym) {
+            newSym = String(newSym).toUpperCase();
+            const list = [...DEFAULT_SYMBOLS];
+            const dup = list.indexOf(newSym);
+            if (dup !== -1 && dup !== idx) list[dup] = list[idx];
+            list[idx] = newSym;
+            const meta = loadSlotMeta();
+            meta[idx] = { sym: newSym, shownAt: Date.now(), source: 'manual' };
+            saveSlotMeta(meta);
+            localStorage.setItem('multiSymbols', JSON.stringify(list));
+            const u = new URL(location.href);
+            u.searchParams.delete('symbols');
+            location.href = u.toString();
+        }
+
+        // ── 四个标的（可由用户选择）──────────────────────────────────
+        const DEFAULT_SYMBOLS = resolveSymbols();
+        window.__ALPHA_SYMBOLS = Object.fromEntries(DEFAULT_SYMBOLS.map(s => [s, true]));
+        window.__ALPHA_SYMBOL_LIST = DEFAULT_SYMBOLS;
         const state = {};
+
+        async function syncAlphaFromSnapshot(snapshot) {
+            if (window.AlphaCell) await AlphaCell.refresh(DEFAULT_SYMBOLS, snapshot);
+            syncPositionsFromSnapshot(snapshot);
+            (snapshot?.pending || []).forEach((p) => {
+                const pid = p.proposal_id;
+                if (!pid || _knownPendingIds.has(pid)) return;
+                _knownPendingIds.add(pid);
+                onNewProposalDetected(p);
+            });
+            DEFAULT_SYMBOLS.forEach((sym) => {
+                updateAlphaPill(sym);
+                drawProposalTriggerLine(sym);
+                updateSysPanel(sym);
+            });
+        }
+
+        function focusCell(sym) {
+            const cell = document.getElementById(`cell-${sym}`);
+            if (!cell) return;
+            cell.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            cell.classList.add('cell-flash');
+            setTimeout(() => cell.classList.remove('cell-flash'), 800);
+        }
+
+        function syncPositionsFromSnapshot(snapshot) {
+            const posMap = snapshot?.positionsBySymbol || {};
+            DEFAULT_SYMBOLS.forEach((sym) => applyPositionSync(sym, posMap[sym] || null));
+        }
+
+        function applyPositionSync(sym, incoming) {
+            const had = !!(state[sym]?.position && Math.abs(state[sym].position.quantity || 0) > 0);
+            const has = incoming && Math.abs(incoming.quantity || 0) > 0;
+            const cell = document.getElementById(`cell-${sym}`);
+            if (cell) cell.classList.toggle('cell-has-position', !!has);
+
+            if (!has) {
+                if (had) clearPositionUI(sym);
+                else refreshPosSidebar(sym, null);
+                return;
+            }
+
+            const merged = { ...incoming };
+            const live = state[sym]?.ctx?.latestClose;
+            const ep = merged.avg_px_open ?? merged.entry_price;
+            if (live && ep && merged.unrealized_pnl == null) {
+                merged.unrealized_pnl = (live - ep) * merged.quantity * (merged.side === 'SHORT' ? -1 : 1);
+            } else if (state[sym]?.position?.unrealized_pnl != null) {
+                merged.unrealized_pnl = state[sym].position.unrealized_pnl;
+            }
+            if (merged.stop_loss == null && state[sym]?.position?.stop_loss != null) {
+                merged.stop_loss = state[sym].position.stop_loss;
+            }
+
+            if (!had && state[sym]?.candleSeries) {
+                addPositionLines(sym, merged);
+            } else {
+                state[sym].position = merged;
+                refreshPosSidebar(sym, merged);
+                if (merged.stop_loss && state[sym]?.slPriceLine) {
+                    state[sym].slPriceLine.applyOptions({
+                        price: merged.stop_loss,
+                        title: `止损 ${merged.stop_loss}`,
+                    });
+                }
+            }
+        }
+
+        // StatusBar.refresh() 会在末尾触发轮询回调 syncAlphaFromSnapshot，
+        // 因此这里只需调用 refresh，避免重复渲染。
+        async function refreshAlphaPanels() {
+            await StatusBar.refresh();
+        }
+        window.refreshAlphaPanels = refreshAlphaPanels;
+
+        window.onAlphaUpdated = () => {
+            DEFAULT_SYMBOLS.forEach((sym) => {
+                updateAlphaPill(sym);
+                drawProposalTriggerLine(sym);
+            });
+        };
+
+        window.addEventListener('nautilus:focus-alpha', (e) => {
+            const phase = e.detail?.phase || 'pending';
+            const sym = window.AlphaCell?.firstSymbolForPhase(phase);
+            if (!sym) {
+                showToast(phase === 'pending' ? '暂无待审批标的' : '暂无等待回踩标的', 'tip');
+                return;
+            }
+            focusCell(sym);
+        });
+
+        window.addEventListener('nautilus:focus-position', () => {
+            const sym = DEFAULT_SYMBOLS.find((s) => {
+                const q = state[s]?.position?.quantity;
+                return q != null && Math.abs(q) > 0;
+            });
+            if (!sym) {
+                showToast('暂无持仓', 'tip');
+                return;
+            }
+            focusCell(sym);
+        });
+
+        function updateAlphaPill(symbol) {
+            const el = document.getElementById(`alpha-pill-${symbol}`);
+            if (!el) return;
+            // 有 Alpha 提案时优先显示审批状态（待审批/等待回踩/待执行）
+            if (window.AlphaCell) {
+                const { phase } = AlphaCell.phaseForSymbol(symbol);
+                if (phase !== 'none') {
+                    const p = AlphaCell.pillForSymbol(symbol);
+                    el.className = `alpha-pill ${p.cls}`;
+                    el.textContent = p.text;
+                    el.style.background = '';
+                    el.style.color = '';
+                    return;
+                }
+            }
+            // 无提案：显示最新超级信号方向
+            const side = state[symbol]?.superSide ?? 0;
+            el.className = 'alpha-pill';
+            if (side === 1) { el.style.background = '#0d3b2e'; el.style.color = ST_COLOR_BULL; el.textContent = '▲超级多'; }
+            else if (side === -1) { el.style.background = '#3b1d1d'; el.style.color = ST_COLOR_BEAR; el.textContent = '▼超级空'; }
+            else { el.style.background = ''; el.style.color = ''; el.textContent = '无超级信号'; }
+        }
+
+        function updateSysPanel(symbol) {
+            const el = document.getElementById(`sys-${symbol}`);
+            if (!el) return;
+            const s = state[symbol];
+            const stDir = s?.m5Frozen?.st_dir;
+            const stTxt = stDir === 1 ? '▲多' : (stDir === -1 ? '▼空' : '—');
+            const m1Dir = s?.m1Frozen?.st_dir;
+            const m1Txt = m1Dir === 1 ? '▲多' : (m1Dir === -1 ? '▼空' : '—');
+            const stCls = d => d === 1 ? 'up' : (d === -1 ? 'down' : '');
+            const hb = document.getElementById('sb-engine');
+            const snap = window.StatusBar?.getSnapshot?.();
+            const engineTxt = (snap?.engineOk ?? hb?.classList.contains('ok')) ? '在线' : '离线';
+            el.innerHTML = `
+              <div class="sys-row">ST 5m <b class="${stCls(stDir)}">${stTxt}</b></div>
+              <div class="sys-row">ST 1m <b class="${stCls(m1Dir)}">${m1Txt}</b></div>
+              <div class="sys-row">引擎 <b>${engineTxt}</b></div>`;
+        }
+
+        function refreshPosSidebar(symbol, position) {
+            const box = document.getElementById(`pos-sidebar-${symbol}`);
+            if (!box) return;
+            if (!position) {
+                box.innerHTML = '<div class="pos-empty">无持仓</div>';
+                return;
+            }
+            const entry = position.avg_px_open ?? position.entry_price;
+            const qty = position.quantity;
+            const side = position.side === 'SHORT' ? '空' : '多';
+            let pnl = position.unrealized_pnl ?? position.pnl;
+            const fmt = v => (typeof v === 'number' ? v.toFixed(2) : v);
+            const pnlCls = pnl >= 0 ? 'up' : 'down';
+            let pnlPct = null;
+            if (typeof pnl === 'number' && entry && qty) {
+                const cost = Math.abs(entry * qty);
+                if (cost > 0) pnlPct = (pnl / cost * 100);
+            }
+            box.innerHTML = `
+              <div class="ps-row"><label>方向</label><span>${side}</span></div>
+              <div class="ps-row"><label>数量</label><span>${qty ?? '—'}</span></div>
+              <div class="ps-row"><label>成本</label><span>${entry ? fmt(entry) : '—'}</span></div>
+              <div class="ps-row"><label>止损</label><span style="color:#ef5350">${position.stop_loss ?? '—'}</span></div>
+              <div class="ps-row"><label>盈亏</label><span class="${pnlCls}">${pnl != null ? (pnl >= 0 ? '+' : '') + fmt(pnl) : '—'}${pnlPct != null ? ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)` : ''}</span></div>`;
+        }
 
         // 全局拖动状态（同一时刻只有一个面板在拖动）
         let activeDrag = null;
 
-        // 全局订单标记刷新函数（setMarkers 需完整数组，必须升序）
+        // 全局标记刷新（订单标记 + 超级信号标记，setMarkers 需完整数组升序）
         function refreshMarkers(sym) {
             const s = state[sym];
-            s.candleSeries.setMarkers([...s.orderMarkers].sort((a, b) => a.time - b.time));
+            if (!s?.candleSeries) return;
+            const all = [...(s.orderMarkers || []), ...(s.signalMarkers || [])];
+            s.candleSeries.setMarkers(all.sort((a, b) => a.time - b.time));
         }
+
+        let chartsReady = false;
 
         // 四图时间轴联动防递归忽
         let isSyncing = false;
 
         // ── 生成单元格 HTML ─────────────────────────────────────
-        function createCell(symbol) {
+        function createCell(symbol, slotIdx) {
             const id = symbol;
             const cell = document.createElement('div');
             cell.className = 'cell';
             cell.id = `cell-${id}`;
             cell.innerHTML = `
-        <!-- 工具栏 -->
-        <div class="c-toolbar">
-          <!-- 左列 -->
-          <div class="c-left">
-            <div class="c-left-r1">
-              <span class="c-symbol">${symbol}</span>
-              <span class="c-price up" id="price-${id}">—</span>
-              <span class="c-change up-bg up" id="change-${id}">—</span>
+        <div class="c-header">
+          <div class="c-header-left">
+            <select class="c-symbol-sel" id="symsel-${id}" title="切换标的"
+              onchange="changeSlotSymbol(${slotIdx}, this.value)">
+              ${SYMBOL_UNIVERSE.map(u => `<option value="${u}"${u === symbol ? ' selected' : ''}>${u}</option>`).join('')}
+            </select>
+            <span class="c-price up" id="price-${id}">—</span>
+            <span class="c-change up-bg up" id="change-${id}">—</span>
+            <span class="alpha-pill pill-none" id="alpha-pill-${id}">无超级信号</span>
+            <div class="c-crosshair c-left-r2-inline" id="ci-${id}">
+              <span class="c-ci-time" id="ci-time-${id}"></span>
+              <span class="c-ci-item"><span class="c-ci-label">O</span><span class="c-ci-val" id="ci-o-${id}"></span></span>
+              <span class="c-ci-item"><span class="c-ci-label">H</span><span class="c-ci-val" style="color:#26a69a" id="ci-h-${id}"></span></span>
+              <span class="c-ci-item"><span class="c-ci-label">L</span><span class="c-ci-val" style="color:#ef5350" id="ci-l-${id}"></span></span>
+              <span class="c-ci-item"><span class="c-ci-label">C</span><span class="c-ci-val" id="ci-c-${id}"></span></span>
             </div>
-            <div class="c-left-r2">
-              <!-- 十字线 OHLC -->
-              <div class="c-crosshair" id="ci-${id}">
-                <span class="c-ci-time"  id="ci-time-${id}"></span>
-                <span class="c-ci-item"><span class="c-ci-label">O</span><span class="c-ci-val" id="ci-o-${id}"></span></span>
-                <span class="c-ci-item"><span class="c-ci-label">H</span><span class="c-ci-val" style="color:#26a69a" id="ci-h-${id}"></span></span>
-                <span class="c-ci-item"><span class="c-ci-label">L</span><span class="c-ci-val" style="color:#ef5350" id="ci-l-${id}"></span></span>
-                <span class="c-ci-item"><span class="c-ci-label">C</span><span class="c-ci-val" id="ci-c-${id}"></span></span>
+          </div>
+          <a class="c-detail-link" href="/?symbol=${symbol}" title="单图详情">单图 ▸</a>
+        </div>
+        <div class="c-body">
+          <div class="c-chart-wrap" id="wrap-${id}">
+            <div class="c-loading" id="loading-${id}">⏳ 加载中…</div>
+            <div class="c-chart" id="chart-${id}"></div>
+            <div class="c-legend">
+              <div class="c-legend-item"><div class="c-legend-dot c-legend-dot-thick" style="background:#26a69a"></div><span style="color:#787b86">ST 5m (3.5)</span></div>
+              <div class="c-legend-item"><div class="c-legend-dot" style="background:#26a69a;width:10px;opacity:.7"></div><span style="color:#787b86">ST 1m (3.0)</span></div>
+              <div class="c-legend-item"><span style="color:#787b86;font-size:10px">超级信号</span></div>
+            </div>
+            <div class="sl-handle" id="slh-${id}" title="上下拖动调整止损价">
+              <svg class="sl-icon" width="10" height="13" viewBox="0 0 10 13" fill="none">
+                <path d="M5 0L9 4H1L5 0Z" fill="white"/>
+                <path d="M5 13L1 9H9L5 13Z" fill="white"/>
+                <rect x="4" y="4" width="2" height="5" rx="1" fill="white" opacity=".5"/>
+              </svg>
+              <span class="sl-label">止损</span>
+              <span class="sl-price">—</span>
+            </div>
+            <div class="order-panel" id="op-${id}">
+              <div class="op-hdr">
+                <span class="op-hdr-title" id="opt-${id}">开仓</span>
+                <button class="op-x" id="opx-${id}">✕</button>
+              </div>
+              <div class="op-dir-badge buy" id="opd-${id}">▲ 做多</div>
+              <div class="op-field">
+                <span class="op-lbl">最大亏损</span>
+                <input type="number" id="opm-${id}" value="100" min="1" step="1">
+              </div>
+              <div class="op-field">
+                <span class="op-lbl">止损价</span>
+                <span class="op-calc op-sl-val" style="color:#ef5350">—</span>
+              </div>
+              <div class="op-divider"></div>
+              <div class="op-field"><span class="op-lbl">建议股数</span><span class="op-calc" id="opq-${id}">—</span></div>
+              <div class="op-field"><span class="op-lbl">每股风险</span><span class="op-calc" id="opr-${id}" style="color:#ef5350">—</span></div>
+              <div class="op-field"><span class="op-lbl">止损幅度</span><span class="op-calc" id="ops-${id}" style="color:#ef5350">—</span></div>
+              <div class="op-field"><span class="op-lbl">开仓金额</span><span class="op-calc" id="opc-${id}">—</span></div>
+              <div class="op-hint" id="oph-${id}"></div>
+              <div class="op-footer">
+                <button class="op-btn cancel" id="opcancel-${id}">取消</button>
+                <button class="op-btn confirm" id="opconfirm-${id}">确认做多</button>
               </div>
             </div>
           </div>
-          <!-- 右列 -->
-          <div class="c-right">
-            <!-- 仓位面板 -->
-            <div class="c-pos-panel" id="pos-panel-${id}">
-              <div class="c-pos-row">
-                <div class="c-pos-item"><label>开仓价</label><span id="p-entry-${id}">—</span></div>
-                <div class="c-pos-item"><label>止损</label><span id="p-sl-${id}" style="color:#ef5350">—</span></div>
-                <div class="c-pos-item"><label>数量</label><span id="p-qty-${id}">—</span></div>
-                <div class="c-pos-item">
-                  <label>盈亏</label>
-                  <span id="p-pnl-${id}">—</span>
-                  <span id="p-pnl-pct-${id}" style="font-size:10px;margin-left:3px">—</span>
-                </div>
-              </div>
+          <div class="c-sidebar">
+            <div class="c-panel">
+              <div class="c-panel-title">Alpha</div>
+              <div class="alpha-steps" id="alpha-steps-${id}"></div>
+              <div class="alpha-detail" id="alpha-detail-${id}">—</div>
+              <div class="alpha-actions" id="alpha-actions-${id}"></div>
             </div>
-            <!-- 操作按钮 -->
-            <div class="c-actions">
+            <div class="c-panel pos-sidebar">
+              <div class="c-panel-title">持仓</div>
+              <div id="pos-sidebar-${id}"><div class="pos-empty">无持仓</div></div>
+            </div>
+            <div class="c-panel sys-panel">
+              <div class="c-panel-title">系统</div>
+              <div id="sys-${id}">—</div>
+            </div>
+            <div class="c-actions-mini">
               <div class="c-toggle-wrap">
                 <label class="c-toggle">
                   <input type="checkbox" id="st-toggle-${id}">
@@ -712,58 +1218,20 @@
                 </label>
                 <span id="st-label-${id}">ST止盈</span>
               </div>
-              <div style="width:1px;height:18px;background:#2a2e39"></div>
-              <button class="c-btn c-btn-open"  id="btn-open-${id}">开仓</button>
+              <select id="auto-sel-${id}" title="Agent执行">
+                <option value="off">自动关</option>
+                <option value="observe">观察</option>
+                <option value="live">实盘</option>
+              </select>
+              <button class="c-btn c-btn-open" id="btn-open-${id}">开仓</button>
               <button class="c-btn c-btn-close" id="btn-close-${id}">平仓</button>
             </div>
           </div>
         </div>
-
-        <!-- 图表区 -->
-        <div class="c-chart-wrap" id="wrap-${id}">
-          <div class="c-loading" id="loading-${id}">⏳ 加载中…</div>
-          <div class="c-chart"  id="chart-${id}"></div>
-          <!-- 图例 -->
-          <div class="c-legend">
-            <div class="c-legend-item"><div class="c-legend-dot" style="background:#26a69a"></div><span style="color:#26a69a">ST↑</span></div>
-            <div class="c-legend-item"><div class="c-legend-dot" style="background:#ef5350"></div><span style="color:#ef5350">ST↓</span></div>
-          </div>
-          <!-- 止损药丸拖动控件 -->
-          <div class="sl-handle" id="slh-${id}" title="上下拖动调整止损价">
-            <svg class="sl-icon" width="10" height="13" viewBox="0 0 10 13" fill="none">
-              <path d="M5 0L9 4H1L5 0Z" fill="white"/>
-              <path d="M5 13L1 9H9L5 13Z" fill="white"/>
-              <rect x="4" y="4" width="2" height="5" rx="1" fill="white" opacity=".5"/>
-            </svg>
-            <span class="sl-label">止损</span>
-            <span class="sl-price">—</span>
-          </div>
-          <!-- 内嵌订单面板 -->
-          <div class="order-panel" id="op-${id}">
-            <div class="op-hdr">
-              <span class="op-hdr-title" id="opt-${id}">开仓</span>
-              <button class="op-x" id="opx-${id}">✕</button>
-            </div>
-            <div class="op-dir-badge buy" id="opd-${id}">▲ 做多</div>
-            <div class="op-field">
-              <span class="op-lbl">最大亏损</span>
-              <input type="number" id="opm-${id}" value="100" min="1" step="1">
-            </div>
-            <div class="op-field">
-              <span class="op-lbl">止损价</span>
-              <span class="op-calc op-sl-val" style="color:#ef5350">—</span>
-            </div>
-            <div class="op-divider"></div>
-            <div class="op-field"><span class="op-lbl">建议股数</span><span class="op-calc" id="opq-${id}">—</span></div>
-            <div class="op-field"><span class="op-lbl">每股风险</span><span class="op-calc" id="opr-${id}" style="color:#ef5350">—</span></div>
-            <div class="op-field"><span class="op-lbl">止损幅度</span><span class="op-calc" id="ops-${id}" style="color:#ef5350">—</span></div>
-            <div class="op-field"><span class="op-lbl">开仓金额</span><span class="op-calc" id="opc-${id}">—</span></div>
-            <div class="op-hint" id="oph-${id}"></div>
-            <div class="op-footer">
-              <button class="op-btn cancel" id="opcancel-${id}">取消</button>
-              <button class="op-btn confirm" id="opconfirm-${id}">确认做多</button>
-            </div>
-          </div>
+        <!-- legacy ids for refreshPositionPanel -->
+        <div class="c-pos-panel" id="pos-panel-${id}" style="display:none">
+          <span id="p-entry-${id}"></span><span id="p-sl-${id}"></span>
+          <span id="p-qty-${id}"></span><span id="p-pnl-${id}"></span><span id="p-pnl-pct-${id}"></span>
         </div>
       `;
             document.getElementById('grid').appendChild(cell);
@@ -778,6 +1246,9 @@
                 crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                 rightPriceScale: { borderColor: '#2a2e39' },
                 timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false, fixLeftEdge: false },  // 允许视图向右拖过第一根 K 线
+                // 拖动只平移、不缩放：关闭坐标轴按压拖动缩放；保留滚轮缩放
+                handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+                handleScale: { axisPressedMouseMove: false, mouseWheel: true, pinch: true },
             });
 
             const candleSeries = chart.addCandlestickSeries({
@@ -819,42 +1290,368 @@
             state[symbol] = {
                 symbol, chart, candleSeries,
                 stSeriesList: [], stLastDir: null, stLastSeries: null,
-                orderMarkers: [],  // 订单生命周期标记全量存储
+                stM5SeriesList: [], stM5LastDir: null, stM5LastSeries: null,
+                dema20M5Series: null, vwapM1Series: null, m5Frozen: null, m5Bars: [],
+                orderMarkers: [], signalMarkers: [],
+                st1: null, st5: null, st5Dir: 0, prev1mDir: null, m1Frozen: null, superSide: 0,
+                lastM1Time: 0,
+                autoMode: 'off',
             };
         }
 
-        // ── SuperTrend 分段绘制 ─────────────────────────────────
-        function createSegmentedST(symbol, bars) {
+        const ST_COLOR_BULL = '#26a69a';
+        const ST_COLOR_BEAR = '#ef5350';
+        const ST_LINE_M1 = 2;
+        const ST_LINE_M5 = 4;
+        const DEMA20_M5_COLOR = '#b388ff';
+        const VWAP_M1_COLOR = '#f59e0b';
+
+        const IND_LABELS = {
+            ST_M1: 'ST 1m',
+            ST_M5: 'ST 5m',
+            DEMA20_M5: 'DEMA20 M5',
+            VWAP_M1: 'VWAP M1',
+        };
+
+        // ══════════════════════════════════════════════════════════
+        //  MTF SuperTrend 信号（前端重算，参数：1m=(10,3.0) 5m=(10,3.5)）
+        //  与 strategy._STState 转向逻辑一致（Wilder ATR + 上一根 band 判断）
+        // ══════════════════════════════════════════════════════════
+        const ST_PERIOD = 10, ST_MULT_1M = 3.0, ST_MULT_5M = 3.5;
+        const SIG_ENTRY_START = 9 * 60 + 45;   // 09:45（与 RiskGate 一致）
+        const SIG_ENTRY_END = 16 * 60 - 30;    // 15:30
+
+        class WilderATR {
+            constructor(period) { this.period = period; this._trs = []; this.value = 0; this._prevClose = 0; this._has = false; }
+            update(h, lo, c) {
+                let tr;
+                if (!this._has) tr = h - lo;
+                else tr = Math.max(h - lo, Math.abs(h - this._prevClose), Math.abs(lo - this._prevClose));
+                this._has = true;
+                this._trs.push(tr);
+                this._prevClose = c;
+                if (this._trs.length < this.period) return null;
+                if (this._trs.length === this.period) this.value = this._trs.reduce((a, b) => a + b, 0) / this.period;
+                else this.value = (this.value * (this.period - 1) + tr) / this.period;
+                return this.value;
+            }
+        }
+
+        class JsST {
+            constructor(period, mult) {
+                this.period = period; this.mult = mult; this.atr = new WilderATR(period);
+                this._prevClose = 0; this._prevU = 0; this._prevL = 0; this._prevDir = -1; this._init = false;
+            }
+            get initialized() { return this._init; }
+            update(o, h, lo, c) {
+                const atr = this.atr.update(h, lo, c);
+                if (atr == null) { this._prevClose = c; return [0, 1]; }
+                const hl2 = (h + lo) / 2, bu = hl2 + this.mult * atr, bl = hl2 - this.mult * atr;
+                const fU = this._prevU, fL = this._prevL;
+                let U, L;
+                if (!this._init) { U = bu; L = bl; this._init = true; }
+                else {
+                    U = (bu < this._prevU || this._prevClose > this._prevU) ? bu : this._prevU;
+                    L = (bl > this._prevL || this._prevClose < this._prevL) ? bl : this._prevL;
+                }
+                let dir;
+                if (this._prevDir === -1 && c > fU) dir = 1;
+                else if (this._prevDir === 1 && c < fL) dir = -1;
+                else dir = this._prevDir;
+                const val = dir === 1 ? L : U;
+                this._prevClose = c; this._prevU = U; this._prevL = L; this._prevDir = dir;
+                return [Math.round(val * 10000) / 10000, dir];
+            }
+        }
+
+        // 用指定参数把 OHLC 序列重算成 [{time, close, st_value, st_dir}]，返回 {out, st}
+        function computeSTSeries(bars, period, mult) {
+            const st = new JsST(period, mult);
+            const out = [];
+            for (const b of bars) {
+                const [val, dir] = st.update(b.open, b.high, b.low, b.close);
+                const ok = st.initialized && val > 0;
+                out.push({ time: b.time, close: b.close, st_value: ok ? val : null, st_dir: ok ? dir : null });
+            }
+            return { out, st };
+        }
+
+        // 把 1m ST 采样到 5m 时间点（每桶取最后一根），避免 1m 线插入 5m 图产生空档
+        function resample1mSTto5m(m1ST) {
+            const byB = new Map();
+            for (const p of m1ST) {
+                if (p.st_value != null) byB.set(bucket5m(p.time), { st_value: p.st_value, st_dir: p.st_dir });
+            }
+            return [...byB.entries()].sort((a, b) => a[0] - b[0])
+                .map(([time, v]) => ({ time, st_value: v.st_value, st_dir: v.st_dir }));
+        }
+
+        // 最近一根已收盘 5m bar 的方向（无前视：桶 time+300 须 <= 当前 1m 时间）
+        function dir5AtCompleted(m5ST, t) {
+            let d = 0;
+            for (const b of m5ST) {
+                if (b.time + 300 <= t) { if (b.st_dir != null) d = b.st_dir; }
+                else break;
+            }
+            return d;
+        }
+
+        // 信号检测：1m ST 翻转且翻转后与 5m ST 同向 → 超级信号入场
+        function detectSignals(m1ST, m5ST) {
+            const sigs = []; let prev = null;
+            for (const p of m1ST) {
+                if (p.st_dir == null || p.st_value == null || p.st_value === 0) continue;
+                const em = (p.time % 86400) / 60;
+                if (prev != null && p.st_dir !== prev) {
+                    const d5 = dir5AtCompleted(m5ST, p.time);
+                    if (d5 !== 0 && d5 === p.st_dir && em >= SIG_ENTRY_START && em < SIG_ENTRY_END) {
+                        sigs.push({ time: bucket5m(p.time), side: p.st_dir, entry: p.close, stop: p.st_value });
+                    }
+                }
+                prev = p.st_dir;
+            }
+            return sigs;
+        }
+
+        function signalMarker(side) {
+            const isLong = side === 1;
+            return {
+                position: isLong ? 'belowBar' : 'aboveBar',
+                color: isLong ? ST_COLOR_BULL : ST_COLOR_BEAR,
+                shape: isLong ? 'arrowUp' : 'arrowDown',
+                text: isLong ? '▲超级' : '▼超级',
+                size: 1.4,
+            };
+        }
+
+        function setSignalPill(sym, side) {
+            if (state[sym]) state[sym].superSide = side;
+            updateAlphaPill(sym);
+        }
+
+        // 1m ST 线实时续接（按方向分段，细线）
+        function updateM1STForSymbol(sym, t, val, dir) {
+            const s = state[sym];
+            if (val == null || val === 0 || dir == null) return;
+            if (dir !== s.stLastDir || !s.stLastSeries) {
+                const color = dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
+                s.stLastSeries = s.chart.addLineSeries({
+                    color, lineWidth: ST_LINE_M1,
+                    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                });
+                s.stSeriesList.push(s.stLastSeries);
+                s.stLastDir = dir;
+                refreshSegmentLabels(s.stSeriesList, IND_LABELS.ST_M1);
+            }
+            s.stLastSeries.update({ time: t, value: val });
+        }
+
+        // 新增一个超级信号标记（实时）
+        function addSignalMarker(sym, t, side, entry, stop, { backend = false } = {}) {
+            const s = state[sym];
+            if (!s.signalMarkers) s.signalMarkers = [];
+            const mk = signalMarker(side);
+            if (s.signalMarkers.some(m => m.time === t && m.text === mk.text)) return;
+            s.signalMarkers.push({ time: t, ...mk });
+            refreshMarkers(sym);
+            setSignalPill(sym, side);
+            if (backend) {
+                speak(`${sym} 超级${side === 1 ? '多' : '空'}信号`, true);
+                showToast(`${mk.text} ${sym} 止损${stop.toFixed(2)}`, 'warn');
+            }
+        }
+
+        function applyBackendTouch(touch, { announce = false, autoShow = false } = {}) {
+            if (!touch || touch.signal_type !== 'st_super') return;
+            const sym = String(touch.symbol || '').toUpperCase();
+            const side = touch.side === 'SHORT' ? -1 : 1;
+            const t = touch.touch_time || touch.m1_bar_time;
+            const stop = Number(touch.trigger_level || touch.stop_price || 0);
+            if (!t) return;
+
+            const dedupeKey = `${sym}:${t}`;
+            if (announce && _lastSignalAnnounce[dedupeKey]) return;
+            if (announce) _lastSignalAnnounce[dedupeKey] = Date.now();
+
+            if (autoShow && !DEFAULT_SYMBOLS.includes(sym)) {
+                sessionStorage.setItem('multiPendingAlert', JSON.stringify({
+                    type: 'signal', sym, side: touch.side, ts: Date.now(), touch_time: t,
+                }));
+                autoAssignSymbolToGrid(sym, 'signal');
+                return;
+            }
+            if (!state[sym]) return;
+
+            state[sym].lastSignalAt = Date.now();
+            state[sym].superSide = side;
+            addSignalMarker(sym, t, side, touch.m1_close, stop, { backend: false });
+            updateAlphaPill(sym);
+            if (announce) {
+                const sd = side === 1 ? '多' : '空';
+                speak(`${sym} 超级${sd}`, true);
+                showToast(`⚡ ${sym} 超级${sd} 止损${stop.toFixed(2)}`, 'warn');
+                focusCell(sym);
+            }
+        }
+
+        function refreshSegmentLabels(seriesList, label) {
+            seriesList.forEach((s, i) => {
+                const active = i === seriesList.length - 1;
+                s.applyOptions({
+                    title: active ? label : '',
+                    lastValueVisible: active,
+                });
+            });
+        }
+
+        /** M5 指标铺到 M1：桶收盘（下一档 M1 开始）后才切换，避免 ST 转向提前 5 分钟 */
+        function expandM5OntoM1(m1Bars, m5Bars) {
+            if (!m1Bars?.length || !m5Bars?.length) return [];
+            const BUCKET_SEC = 300;
+            const out = [];
+            let j = 0;
+            for (const m1 of m1Bars) {
+                while (j + 1 < m5Bars.length && m5Bars[j + 1].time + BUCKET_SEC <= m1.time) j++;
+                const m5 = m5Bars[j];
+                if (!m5) continue;
+                const src = (m1.time < m5.time + BUCKET_SEC && j > 0) ? m5Bars[j - 1] : m5;
+                if (m1.time < src.time + BUCKET_SEC && j === 0) continue;
+                out.push({
+                    time: m1.time,
+                    st_value: src.st_value,
+                    st_dir: src.st_dir,
+                    dema20: src.dema20,
+                });
+            }
+            return out;
+        }
+
+        function updateM5IndicatorsForSymbol(sym, m1Time) {
+            const s = state[sym];
+            if (!s?.m5Frozen) return;
+            const { st_value, st_dir, dema20 } = s.m5Frozen;
+            if (st_value != null && st_value !== 0 && st_dir != null) {
+                if (st_dir !== s.stM5LastDir || !s.stM5LastSeries) {
+                    const color = st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
+                    s.stM5LastSeries = s.chart.addLineSeries({
+                        color, lineWidth: ST_LINE_M5,
+                        crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                    });
+                    s.stM5SeriesList.push(s.stM5LastSeries);
+                    s.stM5LastDir = st_dir;
+                    refreshSegmentLabels(s.stM5SeriesList, IND_LABELS.ST_M5);
+                }
+                s.stM5LastSeries.update({ time: m1Time, value: st_value });
+            }
+            if (dema20 != null && s.dema20M5Series) {
+                s.dema20M5Series.update({ time: m1Time, value: dema20 });
+            }
+        }
+
+        // ── SuperTrend 分段绘制（M1 细 / M5 粗）────────────────
+        function createSegmentedST(symbol, bars, {
+            lineWidth = ST_LINE_M1,
+            listKey = 'st',
+            labelTitle = null,
+        } = {}) {
+            const title = labelTitle ?? (listKey === 'm5' ? IND_LABELS.ST_M5 : IND_LABELS.ST_M1);
             const s = state[symbol];
-            s.stSeriesList.forEach(ser => s.chart.removeSeries(ser));
-            s.stSeriesList = []; s.stLastDir = null; s.stLastSeries = null;
+            const listName = listKey === 'm5' ? 'stM5SeriesList' : 'stSeriesList';
+            const dirName = listKey === 'm5' ? 'stM5LastDir' : 'stLastDir';
+            const seriesName = listKey === 'm5' ? 'stM5LastSeries' : 'stLastSeries';
+            s[listName].forEach(ser => s.chart.removeSeries(ser));
+            s[listName] = [];
+            s[dirName] = null;
+            s[seriesName] = null;
             let currentDir = null, segData = [];
 
             function flush() {
                 if (!segData.length) return;
-                const color = currentDir === 1 ? '#26a69a' : '#ef5350';
+                const color = currentDir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
                 const ser = s.chart.addLineSeries({
-                    color, lineWidth: 2,
+                    color, lineWidth,
                     crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
                 });
                 ser.setData(segData);
-                s.stSeriesList.push(ser);
-                s.stLastSeries = ser;
-                s.stLastDir = currentDir;
+                s[listName].push(ser);
+                s[seriesName] = ser;
+                s[dirName] = currentDir;
             }
 
             for (const bar of bars) {
-                if (bar.st_value == null || bar.st_dir == null) continue;
+                if (bar.st_value == null || bar.st_value === 0 || bar.st_dir == null) continue;
                 if (bar.st_dir !== currentDir) { flush(); currentDir = bar.st_dir; segData = []; }
                 segData.push({ time: bar.time, value: bar.st_value });
             }
             flush();
+            refreshSegmentLabels(s[listName], title);
+        }
+
+        function mountM5Dema(symbol, points) {
+            const s = state[symbol];
+            if (s.dema20M5Series) {
+                s.chart.removeSeries(s.dema20M5Series);
+                s.dema20M5Series = null;
+            }
+            const data = points
+                .filter(p => p.dema20 != null && !Number.isNaN(p.dema20))
+                .map(p => ({ time: p.time, value: p.dema20 }));
+            if (!data.length) return;
+            s.dema20M5Series = s.chart.addLineSeries({
+                color: DEMA20_M5_COLOR, lineWidth: 2,
+                title: IND_LABELS.DEMA20_M5,
+                crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false,
+            });
+            s.dema20M5Series.setData(data);
+        }
+
+        // 5 分钟桶起始时间戳（对齐 300 秒）
+        function bucket5m(t) { return t - (t % 300); }
+
+        // 将实时 1m / tick 聚合进「正在形成的 5m K 线」并刷新蜡烛
+        function feedForming5m(s, o, h, l, c, t) {
+            if (!s?.candleSeries) return;
+            const bt = bucket5m(t);
+            let cur = s.curM5;
+            if (!cur || cur.time !== bt) {
+                cur = { time: bt, open: o, high: h, low: l, close: c };
+                s.curM5 = cur;
+            } else {
+                cur.high = Math.max(cur.high, h);
+                cur.low = Math.min(cur.low, l);
+                cur.close = c;
+            }
+            s.candleSeries.update({ time: cur.time, open: cur.open, high: cur.high, low: cur.low, close: cur.close });
+        }
+
+        // VWAP 由 M1 重采样到 5m 时间点（避免 1m 线与 5m 蜡烛混用同一时间轴导致蜡烛稀疏）
+        function mountVwap5m(symbol, m5Bars, m1Bars) {
+            const s = state[symbol];
+            if (s.vwapM1Series) {
+                s.chart.removeSeries(s.vwapM1Series);
+                s.vwapM1Series = null;
+            }
+            const byBucket = new Map();
+            (m1Bars || []).forEach(b => {
+                if (b.vwap != null && !Number.isNaN(b.vwap)) byBucket.set(bucket5m(b.time), b.vwap);
+            });
+            const data = (m5Bars || [])
+                .map(b => ({ time: b.time, value: byBucket.get(b.time) }))
+                .filter(p => p.value != null && !Number.isNaN(p.value));
+            if (!data.length) return;
+            s.vwapM1Series = s.chart.addLineSeries({
+                color: VWAP_M1_COLOR, lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                title: IND_LABELS.VWAP_M1,
+                crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false,
+            });
+            s.vwapM1Series.setData(data);
         }
 
         // ── 开盘区间 OR High/Low ────────────────────────────────
         function addOpeningRange(symbol, bars) {
             const { candleSeries } = state[symbol];
-            const or = bars.slice(0, 15);
+            const or = bars.slice(0, 3);   // 开盘前 3 根 M5 = 前 15 分钟
             if (!or.length) return;
             const orH = Math.max(...or.map(b => b.high));
             const orL = Math.min(...or.map(b => b.low));
@@ -918,7 +1715,9 @@
             }
 
             refreshPositionPanel(symbol, position);
-            document.getElementById(`pos-panel-${symbol}`).style.display = 'block';
+            refreshPosSidebar(symbol, position);
+            const cell = document.getElementById(`cell-${symbol}`);
+            if (cell) cell.classList.add('cell-has-position');
         }
 
         function refreshPositionPanel(symbol, position) {
@@ -953,6 +1752,7 @@
                 pnlPctEl.textContent = `(${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct)}%)`;
                 pnlPctEl.className = pnlPct >= 0 ? 'up' : 'down';
             } else { pnlPctEl.textContent = ''; }
+            refreshPosSidebar(symbol, position);
         }
 
         // 清除图表价格线（开仓线 + 止损线）
@@ -973,13 +1773,15 @@
 
         function clearPositionUI(symbol) {
             state[symbol].position = null;
-            clearChartLines(symbol);  // 同时清除图表价格线
-            document.getElementById(`pos-panel-${symbol}`).style.display = 'none';
+            clearChartLines(symbol);
             document.getElementById(`p-entry-${symbol}`).textContent = '—';
             document.getElementById(`p-sl-${symbol}`).textContent = '—';
             document.getElementById(`p-qty-${symbol}`).textContent = '—';
             document.getElementById(`p-pnl-${symbol}`).textContent = '—';
             document.getElementById(`p-pnl-pct-${symbol}`).textContent = '';
+            refreshPosSidebar(symbol, null);
+            const cell = document.getElementById(`cell-${symbol}`);
+            if (cell) cell.classList.remove('cell-has-position');
         }
 
 
@@ -1003,17 +1805,75 @@
             try {
                 const res = await fetch(`/api/data/${symbol}`);
                 if (!res.ok) throw new Error((await res.json()).error);
-                const { m1_bars, position } = await res.json();
+                const { m1_bars, m5_bars, position } = await res.json();
 
                 document.getElementById(`loading-${symbol}`).style.display = 'none';
 
-                // K 线
-                state[symbol].candleSeries.setData(m1_bars.map(b => ({
+                // ── K 线：五分钟（主图改为 M5 蜡烛）──
+                const m5 = m5_bars || [];
+                state[symbol].m5Bars = m5;
+                state[symbol].candleSeries.setData(m5.map(b => ({
                     time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
                 })));
 
-                createSegmentedST(symbol, m1_bars);
-                addOpeningRange(symbol, m1_bars);
+                // ── 用指定参数重算 ST：5m=(10,3.5)、1m=(10,3.0)，不使用后端存值 ──
+                const c5 = computeSTSeries(m5, ST_PERIOD, ST_MULT_5M);
+                const m5ST = c5.out;   // [{time, close, st_value, st_dir}]
+                state[symbol].st5 = c5.st;   // 保留 warmed 状态，供实时续接
+                // 合并重算 ST 到 m5（保留原始 OHLC/dema20/vwap 字段）
+                const m5WithST = m5.map((b, i) => ({ ...b, st_value: m5ST[i].st_value, st_dir: m5ST[i].st_dir }));
+
+                const m1 = m1_bars || [];
+                const c1 = computeSTSeries(m1, ST_PERIOD, ST_MULT_1M);
+                const m1ST = c1.out;
+                state[symbol].st1 = c1.st;
+
+                // ST 5m 粗线 + ST 1m 细线（超级信号仅依赖这两条线）
+                createSegmentedST(symbol, m5WithST, { lineWidth: ST_LINE_M5, listKey: 'm5' });
+                createSegmentedST(symbol, resample1mSTto5m(m1ST), { lineWidth: ST_LINE_M1, listKey: 'st', labelTitle: IND_LABELS.ST_M1 });
+
+                // ── 超级信号标记：以后端 signals:touch 为准 ──
+                try {
+                    const touchRes = await fetch(`/api/signals/touches/${symbol}`).then(r => r.json());
+                    const ss = (touchRes.touches || []).filter(t => t.signal_type === 'st_super');
+                    state[symbol].signalMarkers = ss.map(t => ({
+                        time: t.touch_time,
+                        ...signalMarker(t.side === 'SHORT' ? -1 : 1),
+                    }));
+                    refreshMarkers(symbol);
+                    const lastT = ss[ss.length - 1];
+                    const lastSide = lastT ? (lastT.side === 'SHORT' ? -1 : 1) : 0;
+                    state[symbol].superSide = lastSide;
+                    setSignalPill(symbol, lastSide);
+                } catch (_) {
+                    state[symbol].signalMarkers = [];
+                    setSignalPill(symbol, 0);
+                }
+
+                const lastM5 = m5[m5.length - 1];
+                const lastM5ST = m5ST[m5ST.length - 1];
+                const lastM1ST = [...m1ST].reverse().find(p => p.st_value != null);
+                // 初始化正在形成的 5m 桶，供实时 tick/1m 续接聚合
+                state[symbol].curM5 = lastM5
+                    ? { time: lastM5.time, open: lastM5.open, high: lastM5.high, low: lastM5.low, close: lastM5.close }
+                    : null;
+                if (lastM5) {
+                    state[symbol].m5Frozen = {
+                        st_value: lastM5ST ? lastM5ST.st_value : null,
+                        st_dir: lastM5ST ? lastM5ST.st_dir : null,
+                        dema20: lastM5.dema20,
+                    };
+                    state[symbol].stM5LastDir = lastM5ST ? lastM5ST.st_dir : null;
+                    state[symbol].st5Dir = lastM5ST ? (lastM5ST.st_dir ?? 0) : 0;
+                }
+                if (lastM1ST) {
+                    state[symbol].m1Frozen = { st_value: lastM1ST.st_value, st_dir: lastM1ST.st_dir };
+                    state[symbol].prev1mDir = lastM1ST.st_dir ?? null;
+                }
+                if (m1.length) state[symbol].lastM1Time = m1[m1.length - 1].time;
+                updateSysPanel(symbol);
+                drawProposalTriggerLine(symbol);
+                addOpeningRange(symbol, m5);
                 addPositionLines(symbol, position);
                 updateHeader(symbol, m1_bars);
 
@@ -1027,10 +1887,10 @@
                     });
                 }
 
-                // ── 构建止损拖动 ctx ──
+                // ── 构建止损拖动 ctx ──（以 M5 为准）
                 const s = state[symbol];
-                const lastBar = m1_bars[m1_bars.length - 1];
-                const lastST = [...m1_bars].reverse().find(b => b.st_value != null && b.st_value !== 0);
+                const lastBar = m5[m5.length - 1] || m1_bars[m1_bars.length - 1];
+                const lastST = [...m5WithST].reverse().find(b => b.st_value != null && b.st_value !== 0);
                 const id = symbol;
                 const ctx = {
                     sym: symbol, cs: s.candleSeries, chart: s.chart,
@@ -1093,13 +1953,23 @@
                     speak(`${symbol} 订单已下发，${ctx.orderDir === 'BUY' ? '做多' : '做空'} ${qty}股，止损 ${sl.toFixed(2)}`);
 
                     try {
-                        const resp = await fetch(`/api/order/${symbol}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ side: ctx.orderDir, qty, stop_loss: sl, order_type: 'BRACKET' }),
-                        });
+                        const orderBody = { side: ctx.orderDir, qty, stop_loss: sl, order_type: 'BRACKET' };
+                        const resp = await (window.NautilusAuth
+                            ? window.NautilusAuth.authFetch(`/api/order/${symbol}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(orderBody),
+                              })
+                            : fetch(`/api/order/${symbol}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(orderBody),
+                              }));
                         const result = await resp.json();
-                        if (result.engine_offline || result.error) {
+                        if (result.error && resp.status === 403) {
+                            speak(`${symbol} 禁止手动开仓，请先处理 Alpha 建议`, true);
+                            showToast(`⚠️ ${result.error}`, 'warn');
+                        } else if (result.engine_offline || result.error) {
                             speak(`订单失败，${result.error || '引擎未连接'}`, true);
                             showToast(`⚠️ 引擎未连接或出错: ${result.error || '请启动引擎'}`, 'warn');
                         } else {
@@ -1148,6 +2018,11 @@
 
             // 开仓按钮 → 进入止损拖动模式
             document.getElementById(`btn-open-${symbol}`).addEventListener('click', () => {
+                if (s.autoMode === 'live') {
+                    speak(`${symbol} 自动策略实盘中，禁止手动开仓`, true);
+                    showToast(`⚠️ ${symbol} 自动策略实盘中`, 'warn');
+                    return;
+                }
                 if (!s.ctx) return;
                 enterOrderMode(s.ctx);
             });
@@ -1191,6 +2066,47 @@
                 const lbl = document.getElementById(`st-label-${symbol}`);
                 lbl.style.color = on ? '#26a69a' : '#787b86';
             });
+
+            // 自动策略（关 / 观察 / 实盘）
+            const autoSel = document.getElementById(`auto-sel-${symbol}`);
+            const AUTO_COLORS = { off: '#2a2e39', observe: '#f0b90b', live: '#ef5350' };
+            function applyAutoStyle(mode) {
+                s.autoMode = mode;
+                autoSel.style.borderColor = AUTO_COLORS[mode] || '#2a2e39';
+                autoSel.style.color = mode === 'off' ? '#787b86' : (AUTO_COLORS[mode] || '#d1d4dc');
+            }
+            autoSel.addEventListener('change', async () => {
+                let mode = autoSel.value;
+                if (mode === 'live' &&
+                    !confirm(`确认让 ${symbol} 进入【实盘自动策略】？`)) {
+                    mode = 'observe';
+                    autoSel.value = 'observe';
+                }
+                const body = {
+                    auto_strategy: mode === 'live',
+                    auto_observe:  mode === 'observe',
+                };
+                if (mode !== 'off') body.trail_mode = 0;
+                applyAutoStyle(mode);
+                await fetch(`/api/settings/${symbol}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const label = mode === 'live' ? '实盘' : (mode === 'observe' ? '观察' : '关闭');
+                showToast(`${symbol} 自动策略：${label}`, mode === 'live' ? 'warn' : 'tip');
+            });
+            (async () => {
+                try {
+                    const res = await fetch(`/api/settings/${symbol}`);
+                    if (res.ok) {
+                        const st = await res.json();
+                        const m = st.auto_strategy ? 'live' : (st.auto_observe ? 'observe' : 'off');
+                        autoSel.value = m;
+                        applyAutoStyle(m);
+                    }
+                } catch (_) { /* 引擎离线 */ }
+            })();
         }
 
         // ── 全局拖动事件（绑在 document 层）──────────────────────
@@ -1399,7 +2315,8 @@
 
         // ── WebSocket 实时更新 ──────────────────────────────────
         function connectWS() {
-            const ws = new WebSocket('ws://localhost:3000');
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            const ws = new WebSocket(`${proto}://${location.host}`);
             ws.onmessage = ({ data }) => {
                 try {
                     const { channel, data: payload } = JSON.parse(data);
@@ -1433,6 +2350,74 @@
                                 // 注意：不自动 enterModifyMode，等用户点击止损线
                                 if (isNew) speak(`${posSym} ${payload.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
                             }
+                        }
+                        return;
+                    }
+
+                    // ── Alpha 建议审批 ─────────────────────────────────────
+                    if (channel === 'proposal:update') {
+                        refreshAlphaPanels();
+                        const ev = payload;
+                        const sym = ev.symbol ? String(ev.symbol).toUpperCase() : '';
+                        if (!sym) return;
+
+                        const isNewPending = (
+                            ev.event === 'created'
+                            || (!ev.event && ev.status === 'pending' && ev.proposal_id)
+                        );
+                        if (isNewPending && ev.proposal_id && !_knownPendingIds.has(ev.proposal_id)) {
+                            _knownPendingIds.add(ev.proposal_id);
+                            onNewProposalDetected(ev);
+                            return;
+                        }
+
+                        if (!DEFAULT_SYMBOLS.includes(sym)) return;
+                        if (ev.event === 'executed') {
+                            speak(`${sym} 建议已执行`, true);
+                            showToast(`✅ ${sym} 建议已执行`, 'tip');
+                        } else if (ev.event === 'approved_live' || ev.event === 'approved_observe') {
+                            speak(`${sym} 已批准`, true);
+                            showToast(`✅ ${sym} 已批准`, 'tip');
+                        } else if (ev.event === 'rejected') {
+                            showToast(`❌ ${sym} 建议已驳回`, 'tip');
+                        }
+                        return;
+                    }
+
+                    if (channel === 'signal:touch') {
+                        applyBackendTouch(payload, { announce: true, autoShow: true });
+                        return;
+                    }
+                    if (channel === 'signal:touch:backfill') {
+                        applyBackendTouch(payload, { announce: false, autoShow: false });
+                        return;
+                    }
+
+                    // ── 全自动策略信号 ─────────────────────────────────────
+                    if (channel === 'auto:signal') {
+                        const sig = payload;
+                        const sym = sig.symbol;
+                        if (!sym || !state[sym]) return;
+                        const sideZh = sig.side === 'SELL' ? '空' : '多';
+                        switch (sig.action) {
+                            case 'would_open':
+                                speak(`${sym} 观察：应开${sideZh}`, true);
+                                showToast(`👁 ${sym} 观察信号 应开${sideZh}`, 'tip');
+                                break;
+                            case 'open':
+                                speak(`${sym} 自动开仓 ${sideZh}`, true);
+                                showToast(`🤖 ${sym} 自动开仓 ${sideZh}`, 'warn');
+                                break;
+                            case 'reversal':
+                                speak(`${sym} 自动反转平仓`, true);
+                                showToast(`🔄 ${sym} 反转全平`, 'warn');
+                                break;
+                            case 'eod':
+                                speak(`${sym} 尾盘自动平仓`, true);
+                                break;
+                            case 'unit_stop':
+                                speak(`${sym} 自动止损成交`, true);
+                                break;
                         }
                         return;
                     }
@@ -1578,24 +2563,23 @@
 
 
                     const s = state[sym];
+                    if (!chartsReady) return;
 
-                    // tick 实时推送：记录最新 tick 时间
+                    // tick 实时推送：聚合进正在形成的 5m 蜡烛
                     if (channel.startsWith('bars:1m:tick:')) {
-                        s.lastTickTime = payload.time;
-                        s.candleSeries.update({
-                            time: payload.time, open: payload.open,
-                            high: payload.high, low: payload.low, close: payload.close,
-                        });
+                        s.lastTickTime = bucket5m(payload.time);
+                        feedForming5m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
+                        if (s.ctx) s.ctx.latestClose = payload.close;
+                        const priceEl = document.getElementById(`price-${sym}`);
+                        if (priceEl) priceEl.textContent = payload.close.toFixed(2);
                         return;
                     }
-                    // kline:1m: 收盘——竞态防护：tick 已推进下一分钟则跳过 candleSeries.update
+                    // kline:1m 收盘：聚合进 5m 蜡烛（M5 权威 bar 到达前的实时形态）
                     if (channel.startsWith('kline:1m:')) {
-                        if (payload.time >= (s.lastTickTime || 0)) {
-                            s.candleSeries.update({
-                                time: payload.time, open: payload.open,
-                                high: payload.high, low: payload.low, close: payload.close,
-                            });
-                        }
+                        if (payload.time < s.lastM1Time) return;
+                        s.lastM1Time = payload.time;
+                        s.lastTickTime = bucket5m(payload.time);
+                        feedForming5m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
                         // 行情变动：更新 latestClose，刷新仓位浮盈面板
                         if (s.ctx) s.ctx.latestClose = payload.close;
                         const priceEl = document.getElementById(`price-${sym}`);
@@ -1610,22 +2594,43 @@
                                 refreshPositionPanel(sym, pos);
                             }
                         }
-                        if (payload.st_value != null && payload.st_value !== 0) {
-                            // ST 转向语音提醒
-                            if (s.stLastDir !== null && payload.st_dir !== s.stLastDir) {
-                                speak(`${sym} 超级趋势转${payload.st_dir === 1 ? '向上' : '向下'}，注意转向`, true);
+                        // ── 超级信号：重算 1m ST(10,3.0) + 翻转对齐检测 ──
+                        if (s.st1 && payload.open != null) {
+                            const [val, dir] = s.st1.update(payload.open, payload.high, payload.low, payload.close);
+                            if (s.st1.initialized && val > 0) {
+                                s.m1Frozen = { st_value: val, st_dir: dir };
+                                updateM1STForSymbol(sym, bucket5m(payload.time), val, dir);
+                                if (s.prev1mDir != null && dir !== s.prev1mDir) {
+                                    // 标记由后端 signal:touch 推送，此处仅更新 ST 线
+                                }
+                                s.prev1mDir = dir;
                             }
-                            if (payload.st_dir !== s.stLastDir || !s.stLastSeries) {
-                                const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
-                                s.stLastSeries = s.chart.addLineSeries({
-                                    color, lineWidth: 2,
-                                    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
-                                });
-                                s.stSeriesList.push(s.stLastSeries);
-                                s.stLastDir = payload.st_dir;
-                            }
-                            s.stLastSeries.update({ time: payload.time, value: payload.st_value });
                         }
+                        updateSysPanel(sym);
+                        return;
+                    }
+                    if (channel.startsWith('kline:5m:')) {
+                        // 权威 5m 蜡烛收盘定型（覆盖实时聚合的形态），并重置正在形成的桶
+                        if (payload.open != null) {
+                            s.candleSeries.update({
+                                time: payload.time, open: payload.open,
+                                high: payload.high, low: payload.low, close: payload.close,
+                            });
+                        }
+                        s.curM5 = null;
+                        // ── 超级信号：用 (10,3.5) 重算 5m ST，定方向 ──
+                        if (s.st5 && payload.open != null) {
+                            const [val, dir] = s.st5.update(payload.open, payload.high, payload.low, payload.close);
+                            if (s.st5.initialized && val > 0) {
+                                if (s.stM5LastDir != null && dir !== s.stM5LastDir) {
+                                    speak(`${sym} 五分钟超级趋势转${dir === 1 ? '向上' : '向下'}，注意转向`, true);
+                                }
+                                s.st5Dir = dir;
+                                s.m5Frozen = { st_value: val, st_dir: dir, dema20: payload.dema20 ?? s.m5Frozen?.dema20 };
+                                updateM5IndicatorsForSymbol(sym, payload.time);
+                            }
+                        }
+                        updateSysPanel(sym);
                         return;
                     }
 
@@ -1639,26 +2644,50 @@
             ws.onclose = () => setTimeout(connectWS, 3000);
         }
 
+        function drawProposalTriggerLine(symbol) {
+            const s = state[symbol];
+            if (!s?.candleSeries) return;
+            if (s.triggerPriceLine) {
+                try { s.candleSeries.removePriceLine(s.triggerPriceLine); } catch (_) {}
+                s.triggerPriceLine = null;
+            }
+            const prop = window.AlphaCell?.phaseForSymbol(symbol)?.proposal;
+            if (!prop?.trigger_level) return;
+            s.triggerPriceLine = s.candleSeries.createPriceLine({
+                price: Number(prop.trigger_level),
+                color: '#2962ff',
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dotted,
+                axisLabelVisible: true,
+                title: `触发 ${prop.trigger_level}`,
+            });
+        }
+
         // ── 启动 ────────────────────────────────────────────────
-        DEFAULT_SYMBOLS.forEach(sym => {
-            createCell(sym);
+        initSlotMetaFromGrid();
+        // 图表：超级信号（ST 5m/1m）；审批：Alpha 提案流水线（扫描→审批→回踩→执行）不可跳过
+        DEFAULT_SYMBOLS.forEach((sym, idx) => {
+            createCell(sym, idx);
             initChart(sym);
             bindEvents(sym);
+            updateSysPanel(sym);
         });
+        // 初始化已知 pending，避免首次轮询误报
+        fetch('/api/proposals?status=pending&limit=200')
+            .then(r => r.json())
+            .then(d => (d.proposals || []).forEach(p => _knownPendingIds.add(p.proposal_id)))
+            .catch(() => {})
+            .finally(() => StatusBar.startPolling(15000, syncAlphaFromSnapshot));
         Promise.all(DEFAULT_SYMBOLS.map(sym => loadSymbol(sym))).then(() => {
-            // ── 四图时间轴联动（拖动/缩放任一图，其余三图同步）──────────
+            chartsReady = true;
+            playPostReloadAlert();
+            DEFAULT_SYMBOLS.forEach(drawProposalTriggerLine);
+            const focusSym = new URLSearchParams(location.search).get('focus')?.toUpperCase();
+            if (focusSym && DEFAULT_SYMBOLS.includes(focusSym)) {
+                setTimeout(() => focusCell(focusSym), 400);
+            }
+            // ── 四图各自独立：不再做时间轴联动（拖动一图不影响其余三图）──────────
             DEFAULT_SYMBOLS.forEach(sym => {
-                state[sym].chart.timeScale().subscribeVisibleTimeRangeChange(range => {
-                    if (isSyncing || !range) return;
-                    isSyncing = true;
-                    DEFAULT_SYMBOLS.forEach(other => {
-                        if (other !== sym) {
-                            try { state[other].chart.timeScale().setVisibleRange(range); } catch (_) { }
-                        }
-                    });
-                    isSyncing = false;
-                });
-
                 // ── 十字线联动（悬停任一图，其余三图同步显示十字线）──────
                 state[sym].chart.subscribeCrosshairMove(param => {
                     if (!param || !param.time) return;

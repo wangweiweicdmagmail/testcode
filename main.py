@@ -36,6 +36,36 @@ def _cleanup_pid():
     except Exception:
         pass
 
+
+def _kill_old_engine(old_pid: int) -> None:
+    """终止旧引擎进程（先 SIGTERM，必要时 SIGKILL）。"""
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    import time
+    for _ in range(20):
+        try:
+            os.kill(old_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.25)
+    try:
+        os.kill(old_pid, signal.SIGKILL)
+        time.sleep(0.2)
+    except ProcessLookupError:
+        pass
+
+
+def _print_success_banner(message: str) -> None:
+    """终端 SUCCESS 横幅（****** 框线）。"""
+    inner = f" {message} "
+    border = "*" * (len(inner) + 2)
+    print(f"\n{border}")
+    print(f"*{inner}*")
+    print(f"{border}\n", flush=True)
+
+
 def _check_singleton():
     """检查是否已有引擎实例在运行"""
     if os.path.exists(PID_FILE):
@@ -43,10 +73,13 @@ def _check_singleton():
             with open(PID_FILE) as f:
                 old_pid = int(f.read().strip())
             os.kill(old_pid, 0)
-            print(f"\n❌ 引擎已在运行中 (PID={old_pid})")
-            print(f"   如需重启，请先执行: kill {old_pid}")
-            print(f"   如需强制启动，请删除: {PID_FILE}\n")
-            sys.exit(1)
+            print(f"\n⚠️  引擎已在运行中 (PID={old_pid})，自动终止旧进程并重启...")
+            _kill_old_engine(old_pid)
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
+            print(f"   已终止 PID={old_pid}，正在启动新引擎...\n")
         except ProcessLookupError:
             pass
         except ValueError:
@@ -84,6 +117,13 @@ from nautilus_trader.model.identifiers import InstrumentId
 from order_actor import OrderGatewayActor, OrderGatewayConfig
 from strategy import BarLoggerStrategy, BarLoggerStrategyConfig
 from exit_manager import ExitManager, ExitManagerConfig
+from auto_runner import AutoRunner, AutoRunnerConfig
+from signal_detector import SignalDetector, SignalDetectorConfig
+from reclaim_watcher import ReclaimWatcher, ReclaimWatcherConfig
+
+# 向后兼容别名
+AutoStrategy = AutoRunner
+AutoStrategyConfig = AutoRunnerConfig
 
 # ============================================================
 # ⚠️  FA 支持增强（monkey-patch）
@@ -257,9 +297,9 @@ bar_strategy = BarLoggerStrategy(
         instrument_id=InstrumentId.from_str(BAR_INSTRUMENT_ID),
         instrument_ids=tuple(GATEWAY_INSTRUMENTS),  # P6: 多标的
         bar_step=1,
-        st_period=10,
-        st_mult=3.5,        # M1 ST 乘数
-        st_mult_m5=3.0,     # M5 ST 乘数（与 TradingView 默认一致）
+        st_period=int(os.environ.get("ST_SUPER_PERIOD", "10")),
+        st_mult=float(os.environ.get("ST_SUPER_MULT_1M", "3.0")),
+        st_mult_m5=float(os.environ.get("ST_SUPER_MULT_5M", "3.5")),
         ema_period=21,
         history_days=2,      # 加载今日+昨日，使 prev_day 围栏数据可用
         backtest_mode=IS_BACKTEST,
@@ -286,12 +326,33 @@ gateway_actor = OrderGatewayActor(
 exit_manager = ExitManager(config=ExitManagerConfig())
 
 # ============================================================
+# 策略 4：全自动量化策略 Actor（SuperTrend + DEMA，M5）
+# 人在某标的上启动开关（settings:{sym}.auto_strategy）后自动开仓/止损/止盈/加仓
+# ============================================================
+auto_strategy = AutoRunner(
+    config=AutoRunnerConfig(
+        instrument_ids=tuple(GATEWAY_INSTRUMENTS),
+        fa_group=FA_GROUP,
+        fa_method=FA_METHOD,
+        fixed_qty=max(0, int(os.environ.get("AUTO_FIXED_QTY", "0"))),
+    )
+)
+
+signal_detector = SignalDetector(
+    config=SignalDetectorConfig(instrument_ids=tuple(GATEWAY_INSTRUMENTS)),
+)
+reclaim_watcher = ReclaimWatcher(config=ReclaimWatcherConfig())
+
+# ============================================================
 # 启动交易节点
 # ============================================================
 node = TradingNode(config=config_node)
 node.trader.add_strategy(bar_strategy)
 node.trader.add_strategy(gateway_actor)   # Actor 以 Strategy 形式注册
 node.trader.add_strategy(exit_manager)    # 注册独立止盈模块
+node.trader.add_strategy(signal_detector) # M1 触线检测
+node.trader.add_strategy(reclaim_watcher) # 条件执行 reclaim 监视
+node.trader.add_strategy(auto_strategy)   # 注册全自动量化策略
 node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)
 node.add_exec_client_factory(IB, InteractiveBrokersLiveExecClientFactory)
 node.build()
@@ -308,6 +369,9 @@ if __name__ == "__main__":
             print(f"  下单网关: http://localhost:8888/order")
         print("  按 Ctrl+C 停止...")
         print("=" * 60)
+        _print_success_banner(
+            f"SUCCESS: 鹦鹉螺引擎已启动 | 模式: {mode_label} | PID={os.getpid()}"
+        )
         node.run()
     finally:
         node.dispose()

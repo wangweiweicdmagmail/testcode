@@ -1,0 +1,13 @@
+---
+description: 用户说 alpha、扫信号、跑一轮 时自动执行 alpha skill + MCP alpha 扫描，无需输入 MCP 全名
+alwaysApply: true
+---
+
+# Alpha 快捷触发
+
+当用户消息为以下之一（或仅含这些词）时，**直接**加载 skill `alpha`，调用 MCP **`alpha`**（不是 nautilus-alpha）：
+
+- `alpha` / `/alpha`
+- `扫信号` / `跑一轮` / `扫一眼`
+
+执行 MCP **`alpha`** 的 `run_alpha_scan`（incremental=true）；无新信号回复 `NO_OP`。不要反问「要用哪个 MCP」。

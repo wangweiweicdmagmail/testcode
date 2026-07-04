@@ -24,18 +24,17 @@
       overflow: hidden;
     }
 
-    /* ── 顶部工具栏：左右两列，右侧分两行 ── */
+    /* ── 顶部工具栏：三列网格，账户面板居中不遮挡两侧 ── */
     #toolbar {
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
-      justify-content: space-between;
+      gap: 10px;
       padding: 6px 16px;
       background: #1e222d;
       border-bottom: 1px solid #2a2e39;
       flex-shrink: 0;
       min-height: 58px;
-      position: relative;
-      /* account-panel 绝对居中的基准 */
     }
 
     /* 左列：symbol + price + OHLC 悬浮 */
@@ -43,6 +42,8 @@
       display: flex;
       flex-direction: column;
       gap: 3px;
+      justify-self: start;
+      min-width: 0;
     }
 
     #tb-left-row1 {
@@ -90,6 +91,38 @@
       background: rgba(239, 83, 80, .15);
     }
 
+    /* Alpha 建议审批抽屉 */
+    #proposal-drawer {
+      position: fixed; top: 0; right: -420px; width: 400px; height: 100vh;
+      background: #1e222d; border-left: 1px solid #2a2e39; z-index: 10000;
+      transition: right .25s ease; display: flex; flex-direction: column;
+      box-shadow: -8px 0 24px rgba(0,0,0,.35);
+    }
+    #proposal-drawer.open { right: 0; }
+    #proposal-drawer header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 14px; border-bottom: 1px solid #2a2e39; font-weight: 600;
+    }
+    #proposal-list {
+      flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .prop-card {
+      background: #131722; border: 1px solid #2a2e39; border-radius: 6px; padding: 10px;
+      font-size: 12px;
+    }
+    .prop-card-current { border-color: #2962ff; box-shadow: inset 0 0 0 1px rgba(41,98,255,0.25); }
+    .prop-card .title { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+    .prop-card .thesis { color: #d1d4dc; margin-bottom: 8px; line-height: 1.4; }
+    .prop-card .row { color: #787b86; margin-bottom: 4px; }
+    .prop-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .prop-actions button {
+      border: none; border-radius: 4px; padding: 5px 10px; font-size: 11px;
+      cursor: pointer; font-weight: 600;
+    }
+    .prop-live { background: #ef5350; color: #fff; }
+    .prop-observe { background: #f0b90b; color: #131722; }
+    .prop-reject { background: #2a2e39; color: #d1d4dc; border: 1px solid #434651; }
+
     /* 十字线 OHLC（TradingView 风格）放 left-row2 */
     #crosshair-info {
       display: none;
@@ -125,11 +158,14 @@
 
     /* 右列：两行 */
     #tb-right {
-      margin-left: auto;
+      justify-self: end;
+      align-self: center;
       display: flex;
       flex-direction: column;
       align-items: flex-end;
       gap: 5px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     /* 右列第一行：仓位信息 */
@@ -161,7 +197,9 @@
     #trade-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     /* 主区域：左K线 + 右指标 */
@@ -177,6 +215,40 @@
       position: relative;
       min-width: 0;
     }
+
+    #approved-proposal-strip {
+      display: none;
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      right: 8px;
+      z-index: 5;
+      background: rgba(41, 98, 255, 0.15);
+      border: 1px solid rgba(41, 98, 255, 0.45);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #d1d4dc;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    #approved-proposal-strip.live {
+      border-color: rgba(239, 83, 80, 0.55);
+      background: rgba(239, 83, 80, 0.12);
+    }
+    #approved-proposal-strip button {
+      background: #2a2e39;
+      border: 1px solid #434651;
+      color: #d1d4dc;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    #approved-proposal-strip button:hover { border-color: #787b86; }
 
     #chart {
       width: 100%;
@@ -197,6 +269,13 @@
     .ind-card {
       border-bottom: 1px solid #2a2e39;
       flex-shrink: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease;
+      max-height: 1000px;
+    }
+
+    .ind-card.collapsed {
+      max-height: 60px;
     }
 
     .ind-card-head {
@@ -211,6 +290,8 @@
       cursor: pointer;
       /* 可点击折叠 */
       user-select: none;
+      z-index: 1;
+      position: relative;
     }
 
     .ind-card-head:hover {
@@ -368,6 +449,10 @@
       width: 10px;
       height: 3px;
       border-radius: 2px;
+    }
+    .legend-dot-thick {
+      width: 14px;
+      height: 6px;
     }
 
     /* 加载提示 */
@@ -856,32 +941,98 @@
       color: #d1d4dc;
     }
 
-    /* ─── 账户资金面板 ──────────────────────────────────────── */
-    #account-panel {
-      position: absolute;
-      /* 脱离文档流，不占 flex 宽度，不遮挡两侧按钮 */
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
+    /* ─── 中间列：账户 + 止盈跟踪 + Agent执行（同一行对齐）── */
+    #tb-center {
+      justify-self: center;
       display: flex;
-      align-items: center;
-      gap: 18px;
-      padding: 4px 16px;
+      align-items: flex-end;
+      gap: 16px;
+      padding: 5px 14px;
       background: rgba(19, 23, 34, .5);
       border: 1px solid #2a2e39;
       border-radius: 6px;
+      white-space: nowrap;
+    }
+
+    #tb-center .tb-vdivider {
+      width: 1px;
+      height: 28px;
+      background: #2a2e39;
+      flex-shrink: 0;
+      align-self: center;
+    }
+
+    .tb-ctrl-group {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .tb-ctrl-label {
+      font-size: 9px;
+      color: #4b5563;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+
+    .tb-ctrl-select {
+      background: #131722;
+      color: #d1d4dc;
+      border: 1px solid #2a2e39;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+      line-height: 18px;
+      cursor: pointer;
+      min-width: 92px;
+      height: 22px;
+    }
+
+    .ob-dir-row {
+      display: flex;
+      gap: 6px;
+      font-size: 11px;
+      color: #787b86;
+      line-height: 1;
+    }
+
+    .ob-dir-row label {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .ob-dir-row input { accent-color: #60a5fa; }
+
+    #ob-status-chip {
+      font-size: 10px;
+      color: #787b86;
+      max-width: 140px;
+      text-align: right;
+      line-height: 1.2;
+      white-space: normal;
+    }
+
+    /* ─── 账户资金面板 ──────────────────────────────────────── */
+    #account-panel {
+      display: flex;
+      align-items: flex-end;
+      gap: 18px;
       font-size: 12px;
       font-family: 'Roboto Mono', monospace, sans-serif;
       white-space: nowrap;
       pointer-events: none;
-      /* 账户面板只读，禁止拦截鼠标事件 */
     }
 
     #account-panel .acct-group {
       display: flex;
       flex-direction: column;
       align-items: flex-end;
-      gap: 1px;
+      gap: 2px;
     }
 
     #account-panel .acct-label {
@@ -896,6 +1047,7 @@
       font-weight: 700;
       color: #d1d4dc;
       transition: color .3s;
+      line-height: 22px;
     }
 
     #account-panel .acct-val.acct-free {
@@ -1136,16 +1288,51 @@
       </div>
     </div>
 
-    <!-- 中间：账户资金面板 -->
-    <div id="account-panel" title="账户净资产 / 可用资金">
-      <div class="acct-group">
-        <span class="acct-label">Net Liq</span>
-        <span class="acct-val" id="acct-total">—</span>
+    <!-- 中间：账户资金 + 止盈跟踪 + Agent执行 -->
+    <div id="tb-center">
+      <div id="account-panel" title="账户净资产 / 可用资金">
+        <div class="acct-group">
+          <span class="acct-label">Net Liq</span>
+          <span class="acct-val" id="acct-total">—</span>
+        </div>
+        <div class="acct-divider"></div>
+        <div class="acct-group">
+          <span class="acct-label">Available</span>
+          <span class="acct-val acct-free" id="acct-free">—</span>
+        </div>
       </div>
-      <div class="acct-divider"></div>
-      <div class="acct-group">
-        <span class="acct-label">Available</span>
-        <span class="acct-val acct-free" id="acct-free">—</span>
+      <div class="tb-vdivider"></div>
+      <div class="tb-ctrl-group">
+        <span class="tb-ctrl-label">止盈跟踪</span>
+        <select id="trail-mode-select" class="tb-ctrl-select">
+          <option value="0">关闭</option>
+          <option value="1">M1 ST跟踪</option>
+          <option value="2">M5 ST跟踪</option>
+          <option value="3">EMA跟踪</option>
+        </select>
+      </div>
+      <div class="tb-vdivider"></div>
+      <div class="tb-ctrl-group">
+        <span class="tb-ctrl-label">Agent执行</span>
+        <select id="auto-strategy-select" class="tb-ctrl-select" title="人工审批后的建议由引擎执行（观察=只记录 / 实盘=真实下单）">
+          <option value="off">关闭</option>
+          <option value="observe">观察(不下单)</option>
+          <option value="live">实盘下单</option>
+        </select>
+      </div>
+      <div class="tb-vdivider"></div>
+      <div class="tb-ctrl-group" title="盘前锚定 + 09:30-09:35 触线突破（与 Agent 互斥）">
+        <span class="tb-ctrl-label">开盘突破</span>
+        <select id="ob-mode-select" class="tb-ctrl-select">
+          <option value="off">关闭</option>
+          <option value="observe">观察</option>
+          <option value="live">实盘</option>
+        </select>
+        <div class="ob-dir-row">
+          <label><input type="checkbox" id="ob-long-cb" checked>多</label>
+          <label><input type="checkbox" id="ob-short-cb" checked>空</label>
+        </div>
+        <div id="ob-status-chip">—</div>
       </div>
     </div>
 
@@ -1193,16 +1380,15 @@
           </optgroup>
         </select>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
-        <span style="font-size:11px;color:#787b86;white-space:nowrap;">止盈跟踪</span>
-        <select id="trail-mode-select" style="
-          background:#131722;color:#d1d4dc;
-          border:1px solid #2a2e39;border-radius:4px;
-          padding:3px 6px;font-size:12px;cursor:pointer;">
-          <option value="0">关闭</option>
-          <option value="1">M1 ST跟踪</option>
-          <option value="2">M5 ST跟踪</option>
-          <option value="3">EMA跟踪</option>
-        </select>
+        <button id="btn-proposals" title="Alpha 交易建议审批" style="
+          background:#131722;border:1px solid #2a2e39;border-radius:4px;
+          color:#d1d4dc;font-size:12px;padding:3px 10px;cursor:pointer;position:relative;">
+          建议<span id="proposal-badge" style="
+            display:none;margin-left:4px;background:#ef5350;color:#fff;
+            border-radius:8px;padding:0 5px;font-size:10px;">0</span><span id="proposal-badge-wait" title="当前标的已批准等待回踩" style="
+            display:none;margin-left:2px;background:#2962ff;color:#fff;
+            border-radius:8px;padding:0 5px;font-size:10px;">0</span>
+        </button>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <button class="btn btn-open" id="btn-open">开仓</button>
         <button class="btn btn-limit-open" id="btn-limit-open">限价单⬇</button>
@@ -1218,6 +1404,8 @@
             transition:background .5s;"></span>
           <span id="hb-text" style="min-width:4.5em;display:inline-block;">引擎 —</span>
         </div>
+        <span id="risk-badge" title="今日盈亏 / 熔断状态" style="
+          font-size:11px;color:#787b86;white-space:nowrap;min-width:5em;">日盈亏 —</span>
         <div style="width:1px;height:22px;background:#2a2e39"></div>
         <!-- 语音提醒开关 -->
         <button id="voice-toggle" title="语音提醒" style="
@@ -1228,12 +1416,34 @@
     </div>
   </div>
 
+  <!-- Alpha 建议审批抽屉 -->
+  <div id="proposal-drawer">
+    <header>
+      <span>待审批建议 <span id="proposal-drawer-sub" style="color:#787b86;font-size:11px;font-weight:normal;"></span></span>
+      <div>
+        <a href="/proposals.html" style="color:#787b86;font-size:12px;margin-right:10px;text-decoration:none;">完整页</a>
+        <button id="proposal-drawer-close" style="background:none;border:none;color:#787b86;cursor:pointer;font-size:16px;">✕</button>
+      </div>
+    </header>
+    <div id="proposal-list"></div>
+    <div style="padding:8px 12px 12px;font-size:11px;color:#787b86;line-height:1.5;border-top:1px solid #2a2e39;">
+      <strong style="color:#d1d4dc;">顺势</strong>：仅看 M5 ST(10,3.0)，与图上 M1 ST 无关<br>
+      <strong style="color:#d1d4dc;">实盘</strong>：reclaim 后向 IBKR 真实下单（需 Agent 执行为「实盘」）<br>
+      <strong style="color:#d1d4dc;">观察</strong>：reclaim 后仅记录「应开仓」，不下单（需 Agent 为「观察」）<br>
+      <strong style="color:#d1d4dc;">驳回</strong>：移入「已驳回」，不再执行
+    </div>
+  </div>
+
   <!-- 主区域：左K线 + 右指标 -->
   <div id="main-area">
     <!-- 开仓对话框背景遮罩 -->
     <div id="order-backdrop"></div>
 
     <div id="chart-container">
+      <div id="approved-proposal-strip">
+        <div id="approved-proposal-text"></div>
+        <button type="button" id="approved-proposal-cancel">取消批准</button>
+      </div>
       <div id="loading">⏳ 加载数据中…</div>
       <div id="chart"></div>
       <!-- Toast 语音提醒非弹语（右上角） -->
@@ -1243,15 +1453,19 @@
       <div id="legend">
         <div class="legend-item">
           <div class="legend-dot" style="background:#26a69a"></div>
-          <span style="color:#26a69a">SuperTrend↑</span>
+          <span style="color:#787b86">ST M1</span>
         </div>
         <div class="legend-item">
-          <div class="legend-dot" style="background:#ef5350"></div>
-          <span style="color:#ef5350">SuperTrend↓</span>
+          <div class="legend-dot legend-dot-thick" style="background:#26a69a"></div>
+          <span style="color:#787b86">ST M5</span>
         </div>
         <div class="legend-item">
-          <div class="legend-dot" style="background:#ffffff"></div>
-          <span style="color:#ffffff">EMA21(M5)</span>
+          <div class="legend-dot" style="background:#b388ff;width:14px;"></div>
+          <span style="color:#b388ff">DEMA20 M5</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#f59e0b;width:14px;"></div>
+          <span style="color:#f59e0b">VWAP M1</span>
         </div>
       </div>
 
@@ -1566,7 +1780,7 @@
     let SYMBOL = (urlParams.get('symbol') || 'QQQ').toUpperCase();
 
     // ─── 全局状态：缓存数据和开仓模式 ──────────────────────────────────
-    let currentBars = [];   // 最近加载的 M1 RTH bars（用于图表）
+    let currentBars = [];   // 最近加载的 M1 图表 bars（盘前30分 + RTH）
     let atrBars = [];        // M1 bars 含盘前预热数据（用于 ATR14 计算）
     let latestST = null; // 最新 ST 值
     let latestSTDir = null; // 1=多头 -1=空头
@@ -1598,9 +1812,10 @@
 
 
     // ─── 引擎心跳状态 ──────────────────────────────────────────
-    let lastHbTime = 0;       // 上次收到 engine:heartbeat 的时间戳（ms）
-    // sessionStorage 跨标的切换（页面刷新）保持在线状态，避免重复播报"引擎已上线"
-    let engineOnline = sessionStorage.getItem('engineOnline') === '1';
+    const ENGINE_HEARTBEAT_MAX_AGE_S = 30;
+    let lastEngineHbTs = 0;   // 引擎心跳 payload.ts（unix 秒）
+    let riskHalted = false;     // 日亏损熔断
+    let engineOnline = false;
 
     function setEntryLine(price, side, qty) {
       // 先清旧线
@@ -1817,9 +2032,24 @@
     });
 
     // SuperTrend 按方向段创建独立 LineSeries
-    let stSeriesList = [];
+    const ST_COLOR_BULL = '#26a69a';
+    const ST_COLOR_BEAR = '#ef5350';
+    const ST_LINE_M1 = 2;
+    const ST_LINE_M5 = 4;       // 比 M1 粗两个等级（策略用 M5 ST）
+    const DEMA20_M5_COLOR = '#b388ff';
+    const VWAP_M1_COLOR = '#f59e0b';
+
+    let stSeriesList = [];       // M1 ST
     let stLastDir = null;
-    let stLastSeries = null;  // 当前活跃 segment 的 series 引用
+    let stLastSeries = null;
+
+    let stM5SeriesList = [];     // M5 ST（粗线，与 Alpha 顺势一致）
+    let stM5LastDir = null;
+    let stM5LastSeries = null;
+    let dema20M5Series = null;
+    let vwapM1Series = null;
+    let m5Frozen = null;         // 当前冻结的 M5 水平线
+    let currentM5Bars = [];
 
     // 自适应图表大小
     new ResizeObserver(() => {
@@ -1891,14 +2121,176 @@
       });
     }
 
+    // ─── 盘前锚定线（开盘突破 PM High / PM Low）────────────────────
+    let premarketRefLines = { high: null, low: null };
+    let premarketRefData = null;
+    let obMarkers = [];
+    let sessionMarkers = []; // 09:30 开盘等会话标记
+
+    function markRthOpenIfNeeded(bars) {
+      sessionMarkers = [];
+      const RTH_START = 9 * 3600 + 30 * 60;
+      const PM_START = 9 * 3600;
+      const hasPm = bars.some(b => {
+        const s = b.time % 86400;
+        return s >= PM_START && s < RTH_START;
+      });
+      if (!hasPm) return;
+      const openBar = bars.find(b => (b.time % 86400) >= RTH_START);
+      if (!openBar) return;
+      sessionMarkers.push({
+        time: openBar.time,
+        position: 'aboveBar',
+        color: '#f59e0b',
+        shape: 'circle',
+        text: '开盘',
+        size: 1.2,
+      });
+    }
+
+    function clearPremarketRefLines() {
+      for (const k of ['high', 'low']) {
+        if (premarketRefLines[k]) {
+          try { candleSeries.removePriceLine(premarketRefLines[k]); } catch (_) {}
+          premarketRefLines[k] = null;
+        }
+      }
+    }
+
+    function addPremarketRefLines(ref) {
+      if (!ref?.m1_anchor || !candleSeries) return;
+      clearPremarketRefLines();
+      premarketRefData = ref;
+      const hi = parseFloat(ref.m1_anchor.high);
+      const lo = parseFloat(ref.m1_anchor.low);
+      if (!(hi > 0) || !(lo > 0)) return;
+      const armTxt = [
+        ref.armed_long ? '多✓' : '多×',
+        ref.armed_short ? '空✓' : '空×',
+      ].join(' ');
+      premarketRefLines.high = candleSeries.createPriceLine({
+        price: hi,
+        color: '#a78bfa',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `PM High ${hi.toFixed(2)} ${armTxt}`,
+      });
+      premarketRefLines.low = candleSeries.createPriceLine({
+        price: lo,
+        color: '#818cf8',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `PM Low ${lo.toFixed(2)}`,
+      });
+    }
+
+    function obSignalToMarker(sig) {
+      const isLong = String(sig.side || '').toUpperCase() === 'LONG';
+      return {
+        time: sig.bar_time || Math.floor(Date.now() / 1000),
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#26a69a' : '#ef5350',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: 'OB',
+        size: 2.4,
+      };
+    }
+
+    function addObMarker(sig) {
+      const m = obSignalToMarker(sig);
+      const k = `${m.time}:OB:${m.shape}`;
+      if (obMarkers.some(x => `${x.time}:OB:${x.shape}` === k)) return;
+      obMarkers.push(m);
+      refreshMarkers();
+    }
+
+    function refreshObStatusChip(ref, fired) {
+      const el = document.getElementById('ob-status-chip');
+      if (!el) return;
+      if (!ref?.m1_anchor) {
+        el.textContent = '无盘前锚定';
+        el.style.color = '#787b86';
+        return;
+      }
+      const hi = ref.m1_anchor.high?.toFixed?.(2) ?? ref.m1_anchor.high;
+      const lo = ref.m1_anchor.low?.toFixed?.(2) ?? ref.m1_anchor.low;
+      if (fired) {
+        el.textContent = `已触发 ${fired.side} @${Number(fired.entry).toFixed(2)}`;
+        el.style.color = '#f59e0b';
+        return;
+      }
+      const arms = [];
+      if (ref.armed_long) arms.push('多');
+      if (ref.armed_short) arms.push('空');
+      el.textContent = arms.length
+        ? `待命 ${arms.join('/')} H${hi} L${lo}`
+        : `未共振 H${hi} L${lo}`;
+      el.style.color = arms.length ? '#60a5fa' : '#787b86';
+    }
+
+    async function loadPremarketRef() {
+      try {
+        const res = await fetch(`/api/opening-breakout/status/${SYMBOL}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.ref) addPremarketRefLines(data.ref);
+        refreshObStatusChip(data.ref, data.fired);
+      } catch (_) { /* 引擎离线 */ }
+    }
+
     // ─── 仓位展示（兼容真实 IBKR 数据格式和旧 Redis 格式）──────────────
     // 真实 IBKR 字段：avg_px_open / unrealized_pnl / side / quantity / last_price / stop_loss
     // 旧 Redis 字段： entry_price / pnl / pnl_pct / quantity / entry_time / stop_loss
     let currentPosition = null;   // 缓存当前仓位，供行情更新时刷新浮盈
     let orderMarkers = [];  // 订单生命周期标记全量存储（setMarkers 需完整数组，不支持增量追加）
+    let signalMarkers = []; // 回踩触线标记（VWAP / M5 ST / DEMA20）
+    const TOUCH_MARKER_LABEL = {
+      pullback_vwap: 'VWAP',
+      pullback_supertrend: 'ST',
+      pullback_dema20: 'D20',
+    };
+
+    function touchToMarker(t) {
+      const isLong = String(t.side || '').toUpperCase() === 'LONG';
+      const tkey = t.touch_time || t.m1_bar_time;
+      return {
+        time: tkey,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#26a69a' : '#ef5350',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: TOUCH_MARKER_LABEL[t.signal_type] || (t.signal_type || '').slice(0, 3),
+        size: 2.4,
+      };
+    }
+
+    function markerKey(m) {
+      return `${m.time}:${m.text}:${m.shape}`;
+    }
+
+    function addSignalMarker(t) {
+      const m = touchToMarker(t);
+      const k = markerKey(m);
+      if (signalMarkers.some(x => markerKey(x) === k)) return;
+      signalMarkers.push(m);
+      refreshMarkers();
+    }
+
+    async function loadSignalMarkers() {
+      try {
+        const res = await fetch(`/api/signals/touches/${SYMBOL}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        signalMarkers = (data.touches || []).map(touchToMarker);
+        refreshMarkers();
+      } catch (_) { /* 引擎未 flush 时忽略 */ }
+    }
+
     function refreshMarkers() {
       // 按时间升序排序后刷新（LWC 要求 markers 必须升序）
-      candleSeries.setMarkers([...orderMarkers].sort((a, b) => a.time - b.time));
+      const merged = [...signalMarkers, ...obMarkers, ...sessionMarkers, ...orderMarkers].sort((a, b) => a.time - b.time);
+      candleSeries.setMarkers(merged);
     }
 
     function addPositionLines(position) {
@@ -2005,32 +2397,81 @@
       changeEl.className = `${cls} ${clsBg}`;
     }
 
-    // SuperTrend 按方向段创建独立 LineSeries，切换点自然断开
-    function createSegmentedST(bars) {
-      // 清除旧 series
-      stSeriesList.forEach(s => chart.removeSeries(s));
-      stSeriesList = [];
-      stLastDir = null;
+    /** 将 M5 指标铺到 M1 时间轴：仅在该 M5 桶收盘后才切换 ST/DEMA（与 M5 收盘冻结一致） */
+    function expandM5OntoM1(m1Bars, m5Bars) {
+      if (!m1Bars?.length || !m5Bars?.length) return [];
+      const BUCKET_SEC = 300;
+      const out = [];
+      let j = 0;
+      for (const m1 of m1Bars) {
+        while (j + 1 < m5Bars.length && m5Bars[j + 1].time + BUCKET_SEC <= m1.time) j++;
+        const m5 = m5Bars[j];
+        if (!m5) continue;
+        const src = (m1.time < m5.time + BUCKET_SEC && j > 0) ? m5Bars[j - 1] : m5;
+        if (m1.time < src.time + BUCKET_SEC && j === 0) continue;
+        out.push({
+          time: m1.time,
+          st_value: src.st_value,
+          st_dir: src.st_dir,
+          dema20: src.dema20,
+        });
+      }
+      return out;
+    }
 
+    function clearStSeriesList(list) {
+      list.forEach(s => chart.removeSeries(s));
+      list.length = 0;
+    }
+
+    const IND_LABELS = {
+      ST_M1: 'ST M1',
+      ST_M5: 'ST M5',
+      DEMA20_M5: 'DEMA20 M5',
+      VWAP_M1: 'VWAP M1',
+    };
+
+    function refreshSegmentLabels(seriesList, label) {
+      seriesList.forEach((s, i) => {
+        const active = i === seriesList.length - 1;
+        s.applyOptions({
+          title: active ? label : '',
+          lastValueVisible: active,
+        });
+      });
+    }
+
+    // SuperTrend 分段线（M1 细 / M5 粗，颜色随方向）
+    function createSegmentedST(bars, {
+      lineWidth = ST_LINE_M1,
+      seriesList = stSeriesList,
+      state = null,
+      labelTitle = '',
+    } = {}) {
+      clearStSeriesList(seriesList);
       let currentDir = null;
       let segData = [];
+      let lastSeries = null;
+      let lastDir = null;
 
       function flushSegment() {
         if (segData.length === 0) return;
-        const color = currentDir === 1 ? '#26a69a' : '#ef5350';
+        const color = currentDir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
         const s = chart.addLineSeries({
           color,
-          lineWidth: 2,
+          lineWidth,
           crosshairMarkerVisible: false,
           lastValueVisible: false,
           priceLineVisible: false,
         });
         s.setData(segData);
-        stSeriesList.push(s);
+        seriesList.push(s);
+        lastSeries = s;
+        lastDir = currentDir;
       }
 
       for (const bar of bars) {
-        if (bar.st_value === null || bar.st_dir === null) continue;
+        if (bar.st_value == null || bar.st_value === 0 || bar.st_dir == null) continue;
         if (bar.st_dir !== currentDir) {
           flushSegment();
           currentDir = bar.st_dir;
@@ -2038,12 +2479,90 @@
         }
         segData.push({ time: bar.time, value: bar.st_value });
       }
-      flushSegment();  // 最后一段
-      stLastDir = currentDir;
+      flushSegment();
+
+      if (labelTitle) refreshSegmentLabels(seriesList, labelTitle);
+
+      if (seriesList === stSeriesList) {
+        stLastDir = lastDir;
+        stLastSeries = lastSeries;
+      } else if (seriesList === stM5SeriesList) {
+        stM5LastDir = lastDir;
+        stM5LastSeries = lastSeries;
+      }
+      if (state) {
+        state.lastDir = lastDir;
+        state.lastSeries = lastSeries;
+      }
+    }
+
+    function mountM5Dema(points) {
+      if (dema20M5Series) {
+        chart.removeSeries(dema20M5Series);
+        dema20M5Series = null;
+      }
+      const data = points
+        .filter(p => p.dema20 != null && !Number.isNaN(p.dema20))
+        .map(p => ({ time: p.time, value: p.dema20 }));
+      if (!data.length) return;
+      dema20M5Series = chart.addLineSeries({
+        color: DEMA20_M5_COLOR,
+        lineWidth: 2,
+        title: IND_LABELS.DEMA20_M5,
+        crosshairMarkerVisible: false,
+        lastValueVisible: true,
+        priceLineVisible: false,
+      });
+      dema20M5Series.setData(data);
+    }
+
+    function mountVwapM1(m1Bars) {
+      if (vwapM1Series) {
+        chart.removeSeries(vwapM1Series);
+        vwapM1Series = null;
+      }
+      const data = (m1Bars || [])
+        .filter(b => b.vwap != null && !Number.isNaN(b.vwap))
+        .map(b => ({ time: b.time, value: b.vwap }));
+      if (!data.length) return;
+      vwapM1Series = chart.addLineSeries({
+        color: VWAP_M1_COLOR,
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        title: IND_LABELS.VWAP_M1,
+        crosshairMarkerVisible: false,
+        lastValueVisible: true,
+        priceLineVisible: false,
+      });
+      vwapM1Series.setData(data);
+    }
+
+    function updateM5IndicatorsAt(m1Time) {
+      if (!m5Frozen) return;
+      const { st_value, st_dir, dema20 } = m5Frozen;
+      if (st_value != null && st_value !== 0 && st_dir != null) {
+        if (st_dir !== stM5LastDir || stM5LastSeries === null) {
+          const color = st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
+          stM5LastSeries = chart.addLineSeries({
+            color,
+            lineWidth: ST_LINE_M5,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+          });
+          stM5SeriesList.push(stM5LastSeries);
+          stM5LastDir = st_dir;
+          refreshSegmentLabels(stM5SeriesList, IND_LABELS.ST_M5);
+        }
+        stM5LastSeries.update({ time: m1Time, value: st_value });
+      }
+      if (dema20 != null && dema20M5Series) {
+        dema20M5Series.update({ time: m1Time, value: dema20 });
+      }
     }
 
     // ─── 加载数据 ────────────────────────────────────────────
-    let ema21M5Series = null;  // M5 EMA21 折线 series（全局保持引用）
+    let ema21M5Series = null;  // 保留占位（未使用）
     async function loadData() {
       try {
         const res = await fetch(`/api/data/${SYMBOL}`);
@@ -2062,15 +2581,32 @@
         }));
         candleSeries.setData(ohlcData);
 
-        // SuperTrend 按段断开
-        createSegmentedST(m1_bars);
+        // M1 ST（细线）
+        createSegmentedST(m1_bars, {
+          lineWidth: ST_LINE_M1,
+          seriesList: stSeriesList,
+          labelTitle: IND_LABELS.ST_M1,
+        });
 
-        // M5 EMA21 折线 — 暂时隐藏
-        if (ema21M5Series) {
-          chart.removeSeries(ema21M5Series);
-          ema21M5Series = null;
+        // M5 ST + DEMA20（粗 ST / 紫色 DEMA，铺到 M1 时间轴）
+        currentM5Bars = m5_bars || [];
+        const m5OnM1 = expandM5OntoM1(m1_bars, currentM5Bars);
+        createSegmentedST(
+          m5OnM1.map(p => ({ time: p.time, st_value: p.st_value, st_dir: p.st_dir })),
+          { lineWidth: ST_LINE_M5, seriesList: stM5SeriesList, labelTitle: IND_LABELS.ST_M5 },
+        );
+        mountM5Dema(m5OnM1);
+        mountVwapM1(m1_bars);
+        markRthOpenIfNeeded(m1_bars);
+        refreshMarkers();
+        const lastM5Bar = currentM5Bars[currentM5Bars.length - 1];
+        if (lastM5Bar) {
+          m5Frozen = {
+            st_value: lastM5Bar.st_value,
+            st_dir: lastM5Bar.st_dir,
+            dema20: lastM5Bar.dema20,
+          };
         }
-        // if (m5_bars && m5_bars.length) { ... }
 
         // 开盘区间（前15分钟 OR High / OR Low）— 暂时隐藏
         // addOpeningRange(m1_bars);
@@ -2108,6 +2644,9 @@
             to: visRange.to,
           });
         }
+
+        await loadSignalMarkers();
+        await loadPremarketRef();
 
       } catch (e) {
         document.getElementById("loading").textContent = `❌ ${e.message}`;
@@ -2186,10 +2725,10 @@
       accountInfo.total_equity   = usd.total;
       accountInfo.available_cash = usd.free;
 
-      // 自动计算最大亏损 = 净值 × 0.2%，四舍五入到100美元倍数
+      // 自动计算最大亏损 = 净值 × 0.4%，四舍五入到100美元倍数
       const equity = usd.total;
       if (equity > 0) {
-        const rawLoss = equity * 0.002;                   // 0.2%
+        const rawLoss = equity * 0.004;                   // 0.4%
         const roundedLoss = Math.round(rawLoss / 100) * 100; // 四舍五入到100倍数
         const maxLossVal = Math.max(roundedLoss, 100);    // 最小100美元
         const lopEl = document.getElementById('lop-max-loss');
@@ -2240,26 +2779,20 @@
     // ─── WebSocket 实时更新 ──────────────────────────────────
     let lastTickTime = 0;  // 记录最近一次 tick 的时间戳，防止 kline:1m: 时间回退
     function connectWS() {
-      const ws = new WebSocket(`ws://localhost:3000`);
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}`);
       ws.onmessage = ({ data }) => {
         try {
           const { channel, data: payload } = JSON.parse(data);
 
           // ── 引擎心跳（engine:heartbeat）──────────────────────────────
           if (channel === 'engine:heartbeat') {
-            const now = Date.now();
-            const wasOnline = engineOnline;
-            lastHbTime = now;
-            engineOnline = true;
-            sessionStorage.setItem('engineOnline', '1');
-            const dot = document.getElementById('hb-dot');
-            const txt = document.getElementById('hb-text');
-            if (dot) dot.style.background = '#26a69a';
-            if (txt) txt.textContent = '引擎 在线';
-            if (!wasOnline) {
-              speak('引擎已上线', true);
-              showToast('✅ 引擎已上线', 'ok');
+            if (payload && payload.ts) {
+              lastEngineHbTs = Number(payload.ts);
+            } else {
+              lastEngineHbTs = Math.floor(Date.now() / 1000);
             }
+            refreshEngineOnlineUI(true);
             return;
           }
 
@@ -2294,6 +2827,133 @@
               const isNew = !currentPosition;
               addPositionLines(pos);
               if (isNew) speak(`${SYMBOL} ${pos.side === 'SHORT' ? '做空' : '做多'}开仓成功`, true);
+            }
+            return;
+          }
+
+          // ── 日亏损熔断（risk:update）────────────────────────────────
+          if (channel === 'risk:update') {
+            updateRiskBadge(payload);
+            if (payload.halted) {
+              speak('日亏损超限，已熔断禁止开仓', true);
+              showToast(`⛔ ${payload.reason || '日亏损熔断，已全平并禁止开仓'}`, 'warn');
+            }
+            return;
+          }
+
+          // ── Alpha 建议（proposal:update）────────────────────────────
+          if (channel === 'proposal:update') {
+            const ev = payload;
+            loadProposalBadge();
+            loadApprovedProposal();
+            if (document.getElementById('proposal-drawer').classList.contains('open')) {
+              loadProposalDrawer();
+            }
+            if (ev.event === 'cancelled' && ev.symbol === SYMBOL) {
+              speak(`${SYMBOL} Alpha建议已取消批准`, true);
+              showToast(`📋 ${SYMBOL} 已取消批准`, 'tip');
+            } else if ((ev.event === 'approved_live' || ev.event === 'approved_observe') && ev.symbol === SYMBOL) {
+              const live = ev.decision === 'approved_live';
+              speak(`${SYMBOL} 已批准${live ? '实盘' : '观察'}，等待回踩`, true);
+              showToast(`📋 ${SYMBOL} 已批准${live ? '实盘' : '观察'} · 等待回踩`, live ? 'warn' : 'tip');
+            } else if (ev.event && ev.event !== 'executed' && ev.symbol) {
+              const sym = ev.symbol;
+              if (!SYMBOL || sym === SYMBOL) {
+                if (ev.event === 'pending' || ev.event === 'scan') {
+                  speak(`${sym} 新Alpha建议待审批`, true);
+                  showToast(`📋 ${sym} Alpha建议 ${ev.event}`, 'tip');
+                }
+              }
+            }
+            return;
+          }
+
+          // ── 回踩触线标记（signal:touch）────────────────────────────
+          if (channel === 'signal:touch') {
+            if (payload.symbol && payload.symbol !== SYMBOL) return;
+            addSignalMarker(payload);
+            return;
+          }
+          if (channel === 'signal:touch:backfill') {
+            if (payload.symbol && payload.symbol !== SYMBOL) return;
+            loadSignalMarkers();
+            return;
+          }
+
+          // ── 盘前锚定 / 开盘突破触发 ───────────────────────────────
+          if (channel && channel.startsWith('premarket:ref:')) {
+            if (payload.symbol && payload.symbol !== SYMBOL) return;
+            addPremarketRefLines(payload);
+            fetch(`/api/opening-breakout/status/${SYMBOL}`)
+              .then(r => r.ok ? r.json() : null)
+              .then(d => d && refreshObStatusChip(d.ref, d.fired))
+              .catch(() => {});
+            return;
+          }
+          if (channel === 'opening_breakout:signal') {
+            if (payload.symbol && payload.symbol !== SYMBOL) return;
+            addObMarker(payload);
+            const sideZh = payload.side === 'SHORT' ? '空' : '多';
+            const observe = payload.mode === 'observe';
+            speak(`${SYMBOL} 开盘突破${observe ? '观察' : ''} ${sideZh}`, true);
+            showToast(
+              `${observe ? '👁' : '⚡'} ${SYMBOL} 开盘突破${observe ? '(观察)' : ''} ${sideZh} ` +
+              `入@${Number(payload.entry).toFixed(2)} 止@${Number(payload.stop).toFixed(2)}`,
+              observe ? 'tip' : 'warn'
+            );
+            fetch(`/api/opening-breakout/status/${SYMBOL}`)
+              .then(r => r.ok ? r.json() : null)
+              .then(d => d && refreshObStatusChip(d.ref, d.fired))
+              .catch(() => {});
+            return;
+          }
+
+          // ── 全自动策略信号（auto:signal）────────────────────────────
+          if (channel === 'auto:signal') {
+            const s = payload;
+            if (s.symbol && s.symbol !== SYMBOL) return;
+            const sym = s.symbol || SYMBOL;
+            const sideZh = s.side === 'SELL' ? '空' : '多';
+            switch (s.action) {
+              case 'would_open': {
+                const isOb = s.profile === 'opening_breakout';
+                const label = isOb ? '开盘突破观察' : '自动策略观察';
+                speak(`${sym} ${label}：应开${sideZh} ${s.qty || ''}股`, true);
+                showToast(
+                  `👁 ${sym} ${label}：应开${sideZh} qty=${s.qty} 止损@${s.stop}`,
+                  'tip'
+                );
+                break;
+              }
+              case 'open':
+                speak(`${sym} 自动策略开仓 ${sideZh} ${s.qty || ''}股`, true);
+                showToast(`🤖 ${sym} 自动开仓 ${sideZh} qty=${s.qty}`, 'warn');
+                break;
+              case 'reversal':
+                speak(`${sym} 自动策略反转平仓`, true);
+                showToast(`🔄 ${sym} 反转带内 → 自动全平`, 'warn');
+                break;
+              case 'eod':
+                speak(`${sym} 自动策略尾盘平仓`, true);
+                showToast(`🕒 ${sym} 15:45 尾盘自动平仓`, 'info');
+                break;
+              case 'unit_stop':
+                speak(`${sym} 自动策略止损成交`, true);
+                showToast(`⛔ ${sym} 单元止损成交 seq=${s.seq ?? ''}`, 'warn');
+                break;
+              case 'halted':
+                speak(`${sym} 熔断，禁止自动开仓`, true);
+                showToast(`⛔ ${sym} 日亏损熔断，禁止开仓`, 'warn');
+                break;
+              case 'ob_rejected':
+                if (s.reason === 'not_armed') {
+                  showToast(`${sym} 开盘突破：盘前未共振，今日不触发`, 'info');
+                } else if (s.reason === 'premarket_ref_missing') {
+                  showToast(`${sym} 开盘突破：缺少盘前锚定数据`, 'warn');
+                } else if (s.reason && s.reason !== 'no_breakout') {
+                  showToast(`开盘突破: ${s.reason}`, 'info');
+                }
+                break;
             }
             return;
           }
@@ -2354,6 +3014,7 @@
                   const filledQty = parseFloat(o.filled_qty || o.last_qty || o.quantity || 0);
                   setEntryLine(entryP, o.side, filledQty);
                   if (!currentPosition) {
+                    // 首次开仓：初始化持仓对象
                     currentPosition = {
                       symbol: sym, side: o.side === 'BUY' ? 'LONG' : 'SHORT',
                       avg_px_open: entryP, quantity: filledQty,
@@ -2362,8 +3023,9 @@
                     document.getElementById('position-panel').style.display = 'block';
                     refreshPositionPanel(currentPosition);
                   } else {
-                    currentPosition.quantity = filledQty;
-                    currentPosition.avg_px_open = entryP;
+                    // 加仓：累加股数（均价和总数由后续 POSITION_CHANGED 事件修正）
+                    currentPosition.quantity = (currentPosition.quantity || 0) + filledQty;
+                    currentPosition.avg_px_open = entryP;  // 暂用本次成交价，POSITION_CHANGED 会修正
                     refreshPositionPanel(currentPosition);
                   }
                   speak(`${sym} ${sideLabel}订单成交，成交价 ${o.last_px}`, true);
@@ -2548,6 +3210,9 @@
             latestClose = payload.close;
             const priceEl = document.getElementById("price-label");
             if (priceEl) priceEl.textContent = payload.close.toFixed(2);
+            if (payload.vwap != null && vwapM1Series) {
+              vwapM1Series.update({ time: payload.time, value: payload.vwap });
+            }
             if (payload.st_value != null && payload.st_value !== 0) {
               const prevSTDir = latestSTDir;
               latestST = payload.st_value;
@@ -2557,16 +3222,18 @@
                 speak(`${SYMBOL} 超级趋势转${payload.st_dir === 1 ? '向上' : '向下'}，注意转向`, true);
               }
               if (payload.st_dir !== stLastDir || stLastSeries === null) {
-                const color = payload.st_dir === 1 ? '#26a69a' : '#ef5350';
+                const color = payload.st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
                 stLastSeries = chart.addLineSeries({
-                  color, lineWidth: 2,
+                  color, lineWidth: ST_LINE_M1,
                   crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
                 });
                 stSeriesList.push(stLastSeries);
                 stLastDir = payload.st_dir;
+                refreshSegmentLabels(stSeriesList, IND_LABELS.ST_M1);
               }
               stLastSeries.update({ time: payload.time, value: payload.st_value });
             }
+            updateM5IndicatorsAt(payload.time);
             // 行情变动时同步刷新仓位浮盈
             if (currentPosition && payload.symbol === SYMBOL) {
               currentPosition.unrealized_pnl =
@@ -2579,10 +3246,15 @@
             loadIndicators();
           }
 
-          // ── M5 K 线收盘（kline:5m:）—— 实时更新 EMA21 M5 折线 ──
+          // ── M5 K 线收盘 — 更新冻结 ST / DEMA20（策略水平线）──
           if (channel.startsWith("kline:5m:")) {
-            if (payload.ema21 != null && ema21M5Series) {
-              ema21M5Series.update({ time: payload.time, value: payload.ema21 });
+            if (payload.st_value != null || payload.dema20 != null) {
+              m5Frozen = {
+                st_value: payload.st_value ?? m5Frozen?.st_value,
+                st_dir: payload.st_dir ?? m5Frozen?.st_dir,
+                dema20: payload.dema20 ?? m5Frozen?.dema20,
+              };
+              updateM5IndicatorsAt(payload.time);
             }
             return;
           }
@@ -2879,6 +3551,27 @@
           modifyTempLine = null;
         }
         const newPrice = slPrice;
+        const oldPrice = activeOrderLines.slData?.price;
+
+        // ── 方向校验：只允许止损"更紧"（更近当前价格）──
+        // 多仓：新价必须 > 旧价（止损线上移）
+        // 空仓：新价必须 < 旧价（止损线下移）
+        if (oldPrice != null && currentPosition) {
+          const isLong = currentPosition.side !== 'SHORT';
+          const isTighter = isLong ? newPrice > oldPrice : newPrice < oldPrice;
+          if (!isTighter) {
+            const direction = isLong ? '上移（不低于当前止损价）' : '下移（不高于当前止损价）';
+            showToast(
+              `⚠️ 止损只能 ${direction}，禁止放宽止损，已撤销本次修改`,
+              'warn'
+            );
+            speak(`止损只能收紧，禁止放宽`, true);
+            exitModifyMode();
+            // 把药丸和临时线都已清除，无需再回拨止损线（原线未动）
+            return;
+          }
+        }
+
         exitModifyMode();  // 拖动结束，药丸立即消失
         fetch(`/api/modify-stop/${SYMBOL}`, {
           method: 'POST',
@@ -3203,7 +3896,20 @@
 
     // ─── 「限价单」按钮 ─────────────────────────────────────────────────
     document.getElementById('btn-limit-open').addEventListener('click', () => {
+        if (blockIfHalted('限价开仓')) return;
+        if (blockIfAutoLive('限价开仓')) return;
         if (limitMode) { exitLimitMode(); return; }
+        // 已有持仓时禁止加仓
+        if (currentPosition) {
+            const side = currentPosition.side === 'SHORT' ? '空' : '多';
+            const qty  = currentPosition.quantity ?? '—';
+            showToast(
+              `⚠️ 当前已有 ${SYMBOL} ${side}仓 ${qty} 股，不允许加仓，请先平仓后再开仓`,
+              'warn'
+            );
+            speak(`当前已有持仓，不允许加仓`, true);
+            return;
+        }
         enterLimitMode();
     });
 
@@ -3361,6 +4067,19 @@
     // ─── 开仓按钮 → 进入止损拖动开仓模式 ─────────────────────────────────
     // 开仓按钮 → 进入止损拖动开仓模式
     document.getElementById('btn-open').addEventListener('click', () => {
+      if (blockIfHalted('开仓')) return;
+      if (blockIfAutoLive('开仓')) return;
+      // 已有持仓时禁止加仓，弹窗提示
+      if (currentPosition) {
+        const side = currentPosition.side === 'SHORT' ? '空' : '多';
+        const qty  = currentPosition.quantity ?? '—';
+        showToast(
+          `⚠️ 当前已有 ${SYMBOL} ${side}仓 ${qty} 股，不允许加仓，请先平仓后再开仓`,
+          'warn'
+        );
+        speak(`当前已有持仓，不允许加仓`, true);
+        return;
+      }
       enterOrderMode();
     });
 
@@ -3447,6 +4166,457 @@
       await setTrailMode(mode);
     });
 
+    // ─── 自动策略模式（off / observe 只记录 / live 真实下单）────────
+    // observe/live 时强制 trail_mode=0，避免 ExitManager 跟踪止盈与 AutoStrategy 互相改单
+    const autoSel = document.getElementById('auto-strategy-select');
+    let autoStrategyMode = 'off';
+    const obSel = document.getElementById('ob-mode-select');
+    const obLongCb = document.getElementById('ob-long-cb');
+    const obShortCb = document.getElementById('ob-short-cb');
+    let openingBreakoutMode = 'off';
+    const AUTO_COLORS = { off: '#2a2e39', observe: '#f0b90b', live: '#ef5350' };
+    const OB_COLORS = { off: '#2a2e39', observe: '#a78bfa', live: '#ef5350' };
+
+    function applyObStyle(mode) {
+      openingBreakoutMode = mode;
+      obSel.style.borderColor = OB_COLORS[mode] || '#2a2e39';
+      obSel.style.color = mode === 'off' ? '#787b86' : (OB_COLORS[mode] || '#d1d4dc');
+      updateTradeButtonsState();
+    }
+
+    async function saveObDirs() {
+      await fetch(`/api/settings/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opening_breakout_long: obLongCb.checked,
+          opening_breakout_short: obShortCb.checked,
+        }),
+      });
+    }
+
+    async function saveObSettings(mode) {
+      const body = {
+        opening_breakout_live: mode === 'live',
+        opening_breakout_observe: mode === 'observe',
+        opening_breakout_long: obLongCb.checked,
+        opening_breakout_short: obShortCb.checked,
+      };
+      if (mode !== 'off') {
+        body.trail_mode = 0;
+        body.auto_strategy = false;
+        body.auto_observe = false;
+        trailSelect.value = '0';
+        applyTrailSelectStyle(0);
+        autoSel.value = 'off';
+        applyAutoStyle('off');
+      }
+      await fetch(`/api/settings/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function applyAutoStyle(mode) {
+      autoStrategyMode = mode;
+      autoSel.style.borderColor = AUTO_COLORS[mode] || '#2a2e39';
+      autoSel.style.color = mode === 'off' ? '#787b86' : (AUTO_COLORS[mode] || '#d1d4dc');
+      updateTradeButtonsState();
+    }
+    function blockIfAutoLive(actionLabel) {
+      if (autoStrategyMode !== 'live' && openingBreakoutMode !== 'live') return false;
+      const which = openingBreakoutMode === 'live' ? '开盘突破' : '自动策略';
+      showToast(`⚠️ ${SYMBOL} ${which}实盘中，请先关闭后再${actionLabel}`, 'warn');
+      speak(`${which}实盘中，禁止手动操作`, true);
+      return true;
+    }
+    function blockIfHalted(actionLabel) {
+      if (!riskHalted) return false;
+      showToast(`⛔ 日亏损已熔断，禁止${actionLabel}`, 'warn');
+      speak('已熔断，禁止开仓', true);
+      return true;
+    }
+    function updateTradeButtonsState() {
+      const blocked = riskHalted || autoStrategyMode === 'live' || openingBreakoutMode === 'live';
+      for (const id of ['btn-open', 'btn-limit-open']) {
+        const btn = document.getElementById(id);
+        if (!btn) continue;
+        btn.disabled = blocked;
+        btn.style.opacity = blocked ? '0.45' : '';
+        btn.style.cursor = blocked ? 'not-allowed' : '';
+      }
+    }
+    autoSel.addEventListener('change', async () => {
+      let mode = autoSel.value;
+      // 切实盘下单前二次确认（真金白银）
+      if (mode === 'live' &&
+          !confirm(`确认让 ${SYMBOL} 进入【实盘下单】？\n策略将在真实账户自动开仓 / 止损 / 止盈 / 加仓！`)) {
+        mode = 'observe';
+        autoSel.value = 'observe';
+      }
+      const body = {
+        auto_strategy: mode === 'live',
+        auto_observe:  mode === 'observe',
+      };
+      if (mode !== 'off') {
+        body.trail_mode = 0;
+        body.opening_breakout_live = false;
+        body.opening_breakout_observe = false;
+        trailSelect.value = '0';
+        applyTrailSelectStyle(0);
+        obSel.value = 'off';
+        applyObStyle('off');
+      }
+      applyAutoStyle(mode);
+      await fetch(`/api/settings/${SYMBOL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const label = mode === 'live' ? '实盘下单' : (mode === 'observe' ? '观察(不下单)' : '已关闭');
+      showToast(`${SYMBOL} Agent执行：${label}`,
+                mode === 'live' ? 'warn' : (mode === 'observe' ? 'tip' : 'info'));
+    });
+
+    obLongCb.addEventListener('change', saveObDirs);
+    obShortCb.addEventListener('change', saveObDirs);
+
+    obSel.addEventListener('change', async () => {
+      let mode = obSel.value;
+      if (mode === 'live' &&
+          !confirm(`确认让 ${SYMBOL} 开盘突破进入【实盘】？\n09:30-09:35 触线将自动下单（测试固定股数）！`)) {
+        mode = 'observe';
+        obSel.value = 'observe';
+      }
+      applyObStyle(mode);
+      await saveObSettings(mode);
+      const label = mode === 'live' ? '实盘' : (mode === 'observe' ? '观察' : '已关闭');
+      showToast(`${SYMBOL} 开盘突破：${label}`, mode === 'live' ? 'warn' : 'tip');
+      await loadPremarketRef();
+    });
+
+    // ─── Alpha 建议审批抽屉 ─────────────────────────────────────────
+    const proposalDrawer = document.getElementById('proposal-drawer');
+    const proposalListEl = document.getElementById('proposal-list');
+    const proposalBadge = document.getElementById('proposal-badge');
+    const proposalBadgeWait = document.getElementById('proposal-badge-wait');
+    const approvedStrip = document.getElementById('approved-proposal-strip');
+    const approvedStripText = document.getElementById('approved-proposal-text');
+    let approvedProposal = null;
+    let proposalPriceLines = { trigger: null, stop: null, tp: null };
+    const SIGNAL_LABEL = {
+      pullback_vwap: '回踩VWAP',
+      pullback_supertrend: '回踩ST',
+      pullback_dema20: '回踩DEMA20',
+      pullback_dema: '回踩DEMA',
+    };
+
+    async function loadProposalBadge() {
+      try {
+        const [pendingRes, waitRes] = await Promise.all([
+          fetch('/api/proposals?status=pending&limit=200'),
+          fetch(`/api/proposals?status=approved&execution_phase=approved_wait&symbol=${SYMBOL}&limit=20`),
+        ]);
+        const pending = await pendingRes.json();
+        const wait = await waitRes.json();
+        const n = pending.count || 0;
+        proposalBadge.textContent = n;
+        proposalBadge.style.display = n > 0 ? 'inline' : 'none';
+        const wn = (wait.proposals || []).length;
+        proposalBadgeWait.textContent = wn;
+        proposalBadgeWait.style.display = wn > 0 ? 'inline' : 'none';
+      } catch (_) {}
+    }
+
+    function clearProposalPriceLines() {
+      for (const key of ['trigger', 'stop', 'tp']) {
+        if (proposalPriceLines[key]) {
+          try { candleSeries.removePriceLine(proposalPriceLines[key]); } catch (_) {}
+          proposalPriceLines[key] = null;
+        }
+      }
+    }
+
+    function drawProposalPriceLines(p) {
+      clearProposalPriceLines();
+      if (!p || !candleSeries) return;
+      const trigger = Number(p.trigger_level);
+      const stop = Number(p.stop_price);
+      const tp = Number(p.tp_half_price ?? p.tp_price);
+      if (trigger && !Number.isNaN(trigger)) {
+        proposalPriceLines.trigger = candleSeries.createPriceLine({
+          price: trigger,
+          color: '#2962ff',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'Alpha 触发',
+        });
+      }
+      if (stop && !Number.isNaN(stop)) {
+        proposalPriceLines.stop = candleSeries.createPriceLine({
+          price: stop,
+          color: '#ef5350',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'Alpha 止损',
+        });
+      }
+      if (tp && !Number.isNaN(tp)) {
+        proposalPriceLines.tp = candleSeries.createPriceLine({
+          price: tp,
+          color: '#26a69a',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'Alpha 半仓止盈',
+        });
+      }
+    }
+
+    function updateApprovedStrip() {
+      if (!approvedStrip) return;
+      if (!approvedProposal) {
+        approvedStrip.style.display = 'none';
+        approvedStrip.classList.remove('live');
+        return;
+      }
+      const isLive = approvedProposal.decision === 'approved_live';
+      const sideZh = approvedProposal.side === 'SHORT' ? '空' : '多';
+      const sig = SIGNAL_LABEL[approvedProposal.signal_type] || approvedProposal.signal_type;
+      const phase = approvedProposal.execution_phase === 'ready_to_execute' ? '待执行' : '等待回踩';
+      approvedStrip.classList.toggle('live', isLive);
+      approvedStrip.style.display = 'flex';
+      if (approvedStripText) {
+        approvedStripText.innerHTML = `
+          <strong style="color:${isLive ? '#ef5350' : '#f0b90b'}">${isLive ? '实盘' : '观察'}</strong>
+          · ${SYMBOL} ${sideZh} · ${sig} · ${phase}
+          · 触发 <span style="color:#2962ff">${approvedProposal.trigger_level ?? '—'}</span>
+          · 止损 ${approvedProposal.stop_price ?? '—'}
+          · 半仓止盈 ${approvedProposal.tp_half_price ?? approvedProposal.tp_price ?? '—'}`;
+      }
+    }
+
+    async function loadApprovedProposal() {
+      try {
+        const [waitRes, readyRes] = await Promise.all([
+          fetch(`/api/proposals?status=approved&execution_phase=approved_wait&symbol=${SYMBOL}&limit=10`),
+          fetch(`/api/proposals?status=approved&execution_phase=ready_to_execute&symbol=${SYMBOL}&limit=10`),
+        ]);
+        const waitData = await waitRes.json();
+        const readyData = await readyRes.json();
+        const items = [...(waitData.proposals || []), ...(readyData.proposals || [])]
+          .filter(p => p.symbol === SYMBOL)
+          .sort((a, b) => (b.decided_at || 0) - (a.decided_at || 0));
+        approvedProposal = items[0] || null;
+        updateApprovedStrip();
+        drawProposalPriceLines(approvedProposal);
+      } catch (_) {
+        approvedProposal = null;
+        updateApprovedStrip();
+        clearProposalPriceLines();
+      }
+    }
+
+    async function cancelApprovedProposal() {
+      if (!approvedProposal) return;
+      if (!confirm('确认取消批准？引擎将停止跟踪该建议的回踩条件。')) return;
+      const btn = document.getElementById('approved-proposal-cancel');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch(`/api/proposals/${approvedProposal.proposal_id}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approver: 'operator' }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '取消失败');
+        showToast(`${SYMBOL} 已取消批准`, 'tip');
+        speak(`${SYMBOL} 已取消批准`, true);
+        approvedProposal = null;
+        updateApprovedStrip();
+        clearProposalPriceLines();
+        loadProposalBadge();
+        if (proposalDrawer.classList.contains('open')) loadProposalDrawer();
+      } catch (e) {
+        showToast('❌ ' + e.message, 'warn');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    document.getElementById('approved-proposal-cancel')?.addEventListener('click', cancelApprovedProposal);
+
+    function m5StLabel(p) {
+      const d = p.m5_st_dir;
+      if (d === 1) return 'M5 ST▲多';
+      if (d === -1) return 'M5 ST▼空';
+      return '';
+    }
+
+    function approvedProposalCardHtml(p) {
+      const isLive = p.decision === 'approved_live';
+      const sideZh = p.side === 'SHORT' ? '空' : '多';
+      const sideColor = p.side === 'SHORT' ? '#ef5350' : '#26a69a';
+      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
+      const phase = p.execution_phase === 'ready_to_execute' ? '待执行' : '等待回踩';
+      return `
+        <div class="prop-card prop-card-approved" data-id="${p.proposal_id}" style="border-color:#2962ff55;">
+          <div class="title" style="color:${isLive ? '#ef5350' : '#f0b90b'}">${isLive ? '实盘' : '观察'} · ${p.symbol} ${sideZh} · ${sig} · ${phase}</div>
+          <div class="row">触发 ${p.trigger_level} · 止损 ${p.stop_price} · 半仓止盈 ${p.tp_half_price ?? p.tp_price}</div>
+          <div class="prop-actions">
+            <button class="prop-reject" data-cancel-id="${p.proposal_id}">取消批准</button>
+          </div>
+        </div>`;
+    }
+
+    function proposalCardHtml(p) {
+      const sideZh = p.side === 'SHORT' ? '空' : '多';
+      const sideColor = p.side === 'SHORT' ? '#ef5350' : '#26a69a';
+      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
+      const rr = p.rr_half_est != null ? p.rr_half_est : '—';
+      const cond = p.execution_mode === 'conditional_reclaim';
+      const cur = p.symbol === SYMBOL ? ' prop-card-current' : '';
+      const m5Tag = m5StLabel(p);
+      return `
+        <div class="prop-card${cur}" data-id="${p.proposal_id}">
+          <div class="title" style="color:${sideColor}">${p.symbol} ${sideZh} · ${sig}${m5Tag ? ` <span style="font-size:11px;color:#787b86;font-weight:normal;">${m5Tag}</span>` : ''}</div>
+          ${cond ? `<div class="row" style="color:#787b86;font-size:11px;">条件执行：批准≠立即下单，等 reclaim</div>` : ''}
+          <div class="thesis">${p.thesis || '—'}</div>
+          <div class="row">触发 ${p.trigger_level} · 止损 ${p.stop_price} · 半仓止盈 ${p.tp_half_price ?? p.tp_price} · R:R½ ${rr}</div>
+          <div class="row">置信 ${p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—'}</div>
+          <div class="prop-actions">
+            <button class="prop-live" data-id="${p.proposal_id}" data-decision="approved_live">批准实盘</button>
+            <button class="prop-observe" data-id="${p.proposal_id}" data-decision="approved_observe">批准观察</button>
+            <button class="prop-reject" data-id="${p.proposal_id}" data-decision="rejected">驳回</button>
+          </div>
+        </div>`;
+    }
+
+    async function loadProposalDrawer() {
+      const subEl = document.getElementById('proposal-drawer-sub');
+      try {
+        const [pendingRes, approvedRes] = await Promise.all([
+          fetch('/api/proposals?status=pending&limit=200'),
+          fetch(`/api/proposals?status=approved&symbol=${SYMBOL}&limit=50`),
+        ]);
+        const pendingData = await pendingRes.json();
+        const approvedData = await approvedRes.json();
+        const items = (pendingData.proposals || []).slice().sort((a, b) => {
+          const aCur = a.symbol === SYMBOL ? 0 : 1;
+          const bCur = b.symbol === SYMBOL ? 0 : 1;
+          if (aCur !== bCur) return aCur - bCur;
+          return (b.created_at || 0) - (a.created_at || 0);
+        });
+        const approvedItems = (approvedData.proposals || [])
+          .filter(p => p.execution_phase === 'approved_wait' || p.execution_phase === 'ready_to_execute')
+          .filter(p => p.symbol === SYMBOL)
+          .sort((a, b) => (b.decided_at || 0) - (a.decided_at || 0));
+        const parts = [];
+        if (approvedItems.length) {
+          parts.push('<div style="font-size:11px;color:#2962ff;padding:8px 12px 4px;font-weight:600;">已批准 · 当前标的</div>');
+          parts.push(approvedItems.map(approvedProposalCardHtml).join(''));
+        }
+        if (!items.length && !approvedItems.length) {
+          if (subEl) subEl.textContent = '';
+          proposalListEl.innerHTML = '<div style="color:#787b86;text-align:center;padding:30px 10px;">暂无待审批建议</div>';
+          return;
+        }
+        const curN = items.filter(p => p.symbol === SYMBOL).length;
+        if (subEl) {
+          const bits = [];
+          if (items.length) bits.push(`待审 ${items.length}`);
+          if (approvedItems.length) bits.push(`已批 ${approvedItems.length}`);
+          subEl.textContent = bits.length ? `(${bits.join(' · ')})` : '';
+        }
+        if (items.length) {
+          if (approvedItems.length) {
+            parts.push('<div style="font-size:11px;color:#787b86;padding:12px 12px 4px;font-weight:600;">待审批</div>');
+          }
+          parts.push(items.map(proposalCardHtml).join(''));
+        }
+        proposalListEl.innerHTML = parts.join('');
+        proposalListEl.querySelectorAll('[data-decision]').forEach(btn => {
+          btn.addEventListener('click', () => decideProposal(btn.dataset.id, btn.dataset.decision, btn));
+        });
+        proposalListEl.querySelectorAll('[data-cancel-id]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            if (!confirm('确认取消批准？')) return;
+            btn.disabled = true;
+            try {
+              const res = await fetch(`/api/proposals/${btn.dataset.cancelId}/cancel`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approver: 'operator' }),
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || '取消失败');
+              showToast(`${data.proposal.symbol} 已取消批准`, 'tip');
+              loadProposalBadge();
+              loadApprovedProposal();
+              loadProposalDrawer();
+            } catch (e) {
+              showToast('❌ ' + e.message, 'warn');
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (e) {
+        proposalListEl.innerHTML = `<div style="color:#ef5350;padding:20px;">加载失败: ${e.message}</div>`;
+      }
+    }
+
+    async function decideProposal(id, decision, btn) {
+      const condMsg = '批准后将等待回踩 reclaim，不会立即下单。';
+      if (decision === 'approved_live' && !confirm(`确认批准【实盘】？\n${condMsg}`)) return;
+      if (decision === 'approved_observe' && !confirm(`确认批准【观察】？\n${condMsg}\n\n观察模式：引擎只记录「应开仓」，不向 IBKR 发真实订单。`)) return;
+      if (decision === 'rejected' && !confirm('确认驳回该建议？\n驳回后将从待审批列表移除，可在审批页「已驳回」查看。')) return;
+      const card = btn && btn.closest('.prop-card');
+      const allBtns = card ? card.querySelectorAll('button') : (btn ? [btn] : []);
+      allBtns.forEach(b => { b.disabled = true; });
+      try {
+        const body = { decision, approver: 'operator' };
+        if (decision === 'rejected') {
+          const comment = prompt('驳回原因（可选，直接确定跳过）');
+          if (comment) body.comment = comment;
+        }
+        const res = await fetch(`/api/proposals/${id}/decision`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '审批失败');
+        const label = decision === 'approved_live' ? '已批准实盘（等待回踩）' :
+                      decision === 'approved_observe' ? '已批准观察（等待回踩）' : '已驳回';
+        showToast(`${data.proposal.symbol} ${label}`, decision === 'approved_live' ? 'warn' : 'tip');
+        speak(`${data.proposal.symbol} 建议${label}`, true);
+        if (decision === 'rejected' && card) {
+          card.style.opacity = '0.35';
+          card.style.pointerEvents = 'none';
+        }
+        loadProposalBadge();
+        loadApprovedProposal();
+        loadProposalDrawer();
+      } catch (e) {
+        allBtns.forEach(b => { b.disabled = false; });
+        showToast('❌ ' + e.message, 'warn');
+      }
+    }
+
+    document.getElementById('btn-proposals').addEventListener('click', () => {
+      proposalDrawer.classList.add('open');
+      loadProposalDrawer();
+    });
+    document.getElementById('proposal-drawer-close').addEventListener('click', () => {
+      proposalDrawer.classList.remove('open');
+    });
+    loadProposalBadge();
+    loadApprovedProposal();
+    setInterval(loadProposalBadge, 30000);
+
     // 页面加载时读取当前设置，还原 select 状态
     (async () => {
       try {
@@ -3456,6 +4626,15 @@
           const m = s.trail_mode ?? 0;
           trailSelect.value = String(m);
           applyTrailSelectStyle(m);
+          const autoMode = s.auto_strategy ? 'live' : (s.auto_observe ? 'observe' : 'off');
+          autoSel.value = autoMode;
+          applyAutoStyle(autoMode);
+          const obMode = s.opening_breakout_live ? 'live'
+            : (s.opening_breakout_observe ? 'observe' : 'off');
+          obSel.value = obMode;
+          applyObStyle(obMode);
+          if (s.opening_breakout_long === false) obLongCb.checked = false;
+          if (s.opening_breakout_short === false) obShortCb.checked = false;
         }
       } catch (e) { /* 引擎离线时忽略 */ }
     })();
@@ -3520,22 +4699,23 @@
         <td><span style="color:${color};font-size:13px;font-weight:600">${label}</span></td>
       </tr>`;
     }
-    function indMomRow(sym, mom) {
+    function indMomRow(sym, mom, maxAbs) {
       const val = mom != null ? mom : null;
       const isBull = (val ?? 0) >= 0;
       const color = val == null ? '#4b5563'
         : Math.abs(val) < 0.3 ? '#787b86'
           : isBull ? '#f43f5e' : '#60a5fa';
+      const pct = Math.min(100, maxAbs > 0 ? (Math.abs(val ?? 0) / maxAbs) * 100 : 0).toFixed(1);
       const display = val != null ? (val > 0 ? '+' : '') + val.toFixed(3) : '—';
       const strength = val == null ? '<span style="color:#4b5563">—</span>'
         : Math.abs(val) < 0.3 ? '<span style="color:#787b86">⚪ 排队</span>'
           : Math.abs(val) < 0.8 ? (isBull ? '<span class="ind-badge badge-bull">⬆ 硬拉</span>' : '<span class="ind-badge badge-bear">⬇ 下涌</span>')
-            : (isBull ? '<span class="ind-badge badge-bull">🚀 强势</span>' : '<span class="ind-badge badge-bear">🔴 崩涧</span>');
+            : (isBull ? '<span class="ind-badge badge-bull">🚀 强势</span>' : '<span class="ind-badge badge-bear">🔴 崩渊</span>');
       const cls = val != null && val >= 0.3 ? 'bull' : val != null && val <= -0.3 ? 'bear' : '';
       return `<tr class="${cls}">
         <td><a href="/?symbol=${sym}" class="ind-sym">${sym}</a></td>
         <td class="r"><span class="ind-score" style="color:${color}">${display}</span>
-          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:0%;background:${color}"></div></div></td>
+          <div class="ind-bar-bg"><div class="ind-bar-fill" style="width:${pct}%;background:${color}"></div></div></td>
         <td>${strength}</td>
       </tr>`;
     }
@@ -3552,9 +4732,10 @@
         const maxM1 = Math.max(1, ...byM1.map(r => Math.abs(r.st_score_m1 ?? 0)));
         const maxM5 = Math.max(1, ...byM5.map(r => Math.abs(r.st_score_m5 ?? 0)));
         const maxEma = Math.max(.01, ...byEma.map(r => Math.abs(r.ema_score ?? 0)));
+        const maxMom = Math.max(0.01, ...byMom.map(r => Math.abs(r.mom_atr ?? 0)));
         // 动量窗口（置顶卡）
         const momEl = document.getElementById('ind-mom');
-        if (momEl) momEl.innerHTML = byMom.map(r => indMomRow(r.symbol, r.mom_atr)).join('');
+        if (momEl) momEl.innerHTML = byMom.map(r => indMomRow(r.symbol, r.mom_atr, maxMom)).join('');
         document.getElementById('ind-m1').innerHTML =
           byM1.map(r => indRow(r.symbol, r.st_score_m1 ?? 0, r.st_dir_m1,
             r.st_dir_m1 === 1 ? '#26a69a' : '#ef5350', maxM1)).join('');
@@ -3578,29 +4759,88 @@
     });
 
     // 启动
+    function updateRiskBadge(r) {
+      const el = document.getElementById('risk-badge');
+      if (!el || !r) return;
+      riskHalted = !!r.halted;
+      updateTradeButtonsState();
+      if (r.halted) {
+        const pct = r.daily_pnl_pct != null ? (r.daily_pnl_pct * 100).toFixed(2) : null;
+        el.textContent = pct ? `⛔ 熔断 ${pct}%` : '⛔ 已熔断';
+        el.style.color = '#ef5350';
+        return;
+      }
+      if (r.daily_pnl_pct == null) {
+        el.textContent = '日盈亏 —';
+        el.style.color = '#787b86';
+        return;
+      }
+      const pct = (r.daily_pnl_pct * 100).toFixed(2);
+      const sign = (r.daily_pnl ?? 0) >= 0 ? '+' : '';
+      el.textContent = `日 ${sign}${pct}%`;
+      el.style.color = r.daily_pnl_pct < -0.005 ? '#ef5350' : (r.daily_pnl_pct > 0 ? '#26a69a' : '#787b86');
+    }
+    async function refreshRiskStatus() {
+      try {
+        const res = await fetch('/api/risk');
+        if (res.ok) updateRiskBadge(await res.json());
+      } catch (_) { /* 引擎离线 */ }
+    }
+    setInterval(refreshRiskStatus, 60000);
+
     loadData();
     loadIndicators();
     connectWS();
+    refreshRiskStatus();
+    pollEngineStatus();
 
-    // ─── 引擎心跳超时检查（每 5s 检查一次，超过 30s 无心跳 → 判定下线）──
-    setInterval(() => {
-      if (!lastHbTime) return; // 从未收到过心跳，不判断
-      const gap = Date.now() - lastHbTime;
+    function engineHeartbeatAgeS() {
+      if (!lastEngineHbTs) return null;
+      return Math.floor(Date.now() / 1000) - lastEngineHbTs;
+    }
+
+    function refreshEngineOnlineUI(notify) {
+      const age = engineHeartbeatAgeS();
+      const online = age != null && age >= 0 && age <= ENGINE_HEARTBEAT_MAX_AGE_S;
+      const wasOnline = engineOnline;
+      engineOnline = online;
       const dot = document.getElementById('hb-dot');
       const txt = document.getElementById('hb-text');
-      if (gap > 30000 && engineOnline) {
-        engineOnline = false;
-        sessionStorage.setItem('engineOnline', '0');
-        if (dot) dot.style.background = '#ef5350';
-        if (txt) txt.textContent = '引擎 离线';
-        speak('警告，引擎已离线', true);
-        showToast('⚠️ 引擎已离线！', 'warn');
-      } else if (gap <= 15000 && engineOnline) {
-        // 正常 → 更新秒数显示
-        const sec = Math.floor(gap / 1000);
-        if (txt) txt.textContent = `引擎 ${sec}s`;
+      if (online) {
+        if (dot) dot.style.background = '#26a69a';
+        if (txt) txt.textContent = age <= 1 ? '引擎 在线' : `引擎 ${age}s前`;
+        if (notify && !wasOnline) {
+          speak('引擎已上线', true);
+          showToast('✅ 引擎已上线', 'ok');
+        }
+      } else {
+        if (dot) dot.style.background = lastEngineHbTs ? '#ef5350' : '#787b86';
+        if (txt) txt.textContent = lastEngineHbTs ? '引擎 离线' : '引擎 —';
+        if (notify && wasOnline) {
+          speak('警告，引擎已离线', true);
+          showToast('⚠️ 引擎已离线！', 'warn');
+        }
       }
+      if (accountInfo) accountInfo.engine_online = online;
+    }
+
+    async function pollEngineStatus() {
+      try {
+        const res = await fetch('/api/engine-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.engine_heartbeat && data.engine_heartbeat.ts) {
+          lastEngineHbTs = Number(data.engine_heartbeat.ts);
+        }
+        refreshEngineOnlineUI(false);
+      } catch (_) { /* 前端未启动时忽略 */ }
+    }
+
+    // ─── 引擎心跳超时检查（每 5s：心跳 ts 与当前时间对比）──
+    setInterval(() => {
+      refreshEngineOnlineUI(true);
     }, 5000);
+    setInterval(pollEngineStatus, 30000);
 
     // ─── 30s 一致性巡检：对比 active-orders API 与本地状态 ──────────────
     // 兜底机制：漏事件、引擎重启、TWS 手动操作后自动修复价格线

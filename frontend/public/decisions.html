@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>决策复盘 · Decisions</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    .hidden { display: none !important; }
+    body {
+      background: #131722; color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+    .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
+    .page-subtitle b { color: #d1d4dc; }
+    .wrap { padding: 14px 20px 48px; display: flex; flex-direction: column; gap: 18px; }
+
+    /* 漏斗 */
+    .funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .fstep {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; padding: 12px 14px;
+      position: relative;
+    }
+    .fstep .label { font-size: 11px; color: #787b86; text-transform: uppercase; letter-spacing: .5px; }
+    .fstep .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+    .fstep .pct { font-size: 11px; color: #787b86; margin-top: 2px; }
+    .accent-blue { color: #2962ff; }
+    .accent-green { color: #26a69a; }
+    .accent-red { color: #ef5350; }
+    .accent-amber { color: #ff9800; }
+
+    .panel {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; padding: 14px 16px;
+    }
+    .panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+    .row-2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 18px; }
+    @media (max-width: 900px) { .row-2 { grid-template-columns: 1fr; } }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #2a2e39; white-space: nowrap; }
+    th { color: #787b86; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+    th:first-child, td:first-child { text-align: left; }
+    tbody tr:hover { background: #252935; }
+    .sig-tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; background: #2a2e39; }
+    .pos { color: #26a69a; } .neg { color: #ef5350; } .muted { color: #787b86; }
+
+    .st { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+    .st-executed { background: rgba(38,166,154,.18); color: #26a69a; }
+    .st-approved { background: rgba(41,98,255,.18); color: #5b8cff; }
+    .st-rejected { background: rgba(239,83,80,.18); color: #ef5350; }
+    .st-pending  { background: rgba(255,152,0,.18); color: #ff9800; }
+
+    /* 驳回原因条 */
+    .reason-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+    .reason-row .rname { width: 160px; color: #d1d4dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .reason-row .rbar { flex: 1; height: 16px; background: #2a2e39; border-radius: 3px; overflow: hidden; }
+    .reason-row .rbar > div { height: 100%; background: #ef5350; }
+    .reason-row .rcnt { width: 32px; text-align: right; color: #787b86; }
+
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+    select { background: #131722; border: 1px solid #2a2e39; color: #d1d4dc; padding: 5px 9px; border-radius: 4px; font-size: 13px; }
+    .empty { padding: 30px 16px; text-align: center; color: #787b86; font-size: 14px; }
+    .empty b { color: #d1d4dc; }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <p class="page-subtitle">决策复盘 · 每条提案的去向（批准/驳回/执行）落库于 <b>.run/journal.jsonl</b>，回答「为什么没下这单」。</p>
+
+  <div class="wrap">
+    <div class="funnel" id="funnel"></div>
+
+    <div class="row-2">
+      <div class="panel">
+        <h2>按信号类型 · 转化漏斗</h2>
+        <div id="signal-wrap"></div>
+      </div>
+      <div class="panel">
+        <h2>驳回原因分布</h2>
+        <div id="reason-wrap"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>提案档案</h2>
+      <div class="toolbar">
+        <select id="f-status">
+          <option value="">全部状态</option>
+          <option value="executed">已执行</option>
+          <option value="approved">已批准/进行中</option>
+          <option value="rejected">已驳回/取消</option>
+          <option value="pending">待审批</option>
+        </select>
+        <select id="f-signal"><option value="">全部信号</option></select>
+      </div>
+      <div id="table-wrap"></div>
+    </div>
+  </div>
+
+  <script src="/shared/status-bar.js"></script>
+  <script>
+    StatusBar.mount('status-bar-root', 'decisions');
+
+    const SIGNAL_LABEL = {
+      pullback_vwap: '回踩 VWAP', pullback_supertrend: '回踩 ST',
+      pullback_dema20: '回踩 DEMA20', pullback_dema: '回踩 DEMA',
+      opening_breakout: '开盘突破', manual: '手动', auto: '自动', unknown: '未知',
+    };
+    const sigLabel = (s) => SIGNAL_LABEL[s] || s || '—';
+    const STATUS_LABEL = { executed: '已执行', approved: '进行中', rejected: '已驳回', pending: '待审批' };
+    const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+
+    let allProposals = [];
+
+    function classify(p) {
+      const ev = p.event || '', status = p.status || '', phase = p.execution_phase || '';
+      if (ev === 'executed' || status === 'executed') return 'executed';
+      if (ev === 'rejected' || ev === 'cancelled' || status === 'rejected') return 'rejected';
+      if (ev === 'approved' || phase === 'approved_wait' || phase === 'ready_to_execute') return 'approved';
+      return 'pending';
+    }
+
+    function renderFunnel(d) {
+      const f = d.funnel || {};
+      const pct = (n) => f.total ? (n / f.total * 100).toFixed(0) + '%' : '—';
+      const steps = [
+        { label: '提案总数', value: f.total || 0, c: 'accent-blue', sub: '全部生成' },
+        { label: '待审批', value: f.pending || 0, c: 'accent-amber', sub: pct(f.pending || 0) },
+        { label: '已批准', value: f.approved || 0, c: 'accent-blue', sub: pct(f.approved || 0) },
+        { label: '已执行', value: f.executed || 0, c: 'accent-green', sub: pct(f.executed || 0) },
+        { label: '已驳回', value: f.rejected || 0, c: 'accent-red', sub: pct(f.rejected || 0) },
+        { label: '决策执行率', value: d.execution_rate != null ? d.execution_rate + '%' : '—', c: 'accent-green', sub: '执行/已决策' },
+      ];
+      document.getElementById('funnel').innerHTML = steps.map((s) => `
+        <div class="fstep">
+          <div class="label">${s.label}</div>
+          <div class="value ${s.c}">${s.value}</div>
+          <div class="pct">${s.sub}</div>
+        </div>`).join('');
+    }
+
+    function renderSignal(bySignal) {
+      const wrap = document.getElementById('signal-wrap');
+      const entries = Object.entries(bySignal || {});
+      if (!entries.length) { wrap.innerHTML = `<div class="empty">暂无提案数据</div>`; return; }
+      entries.sort((a, b) => b[1].proposed - a[1].proposed);
+      wrap.innerHTML = `
+        <table>
+          <thead><tr><th>信号</th><th>提案</th><th>批准</th><th>执行</th><th>驳回</th><th>执行率</th></tr></thead>
+          <tbody>
+            ${entries.map(([k, g]) => `
+              <tr>
+                <td><span class="sig-tag">${sigLabel(k)}</span></td>
+                <td>${g.proposed}</td>
+                <td class="accent-blue">${g.approved}</td>
+                <td class="pos">${g.executed}</td>
+                <td class="neg">${g.rejected}</td>
+                <td>${g.approval_rate != null ? g.approval_rate + '%' : '—'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function renderReasons(reasons) {
+      const wrap = document.getElementById('reason-wrap');
+      const entries = Object.entries(reasons || {});
+      if (!entries.length) { wrap.innerHTML = `<div class="empty">暂无驳回记录</div>`; return; }
+      entries.sort((a, b) => b[1] - a[1]);
+      const max = Math.max(...entries.map((e) => e[1]), 1);
+      wrap.innerHTML = entries.map(([name, cnt]) => `
+        <div class="reason-row">
+          <div class="rname" title="${name}">${name}</div>
+          <div class="rbar"><div style="width:${(cnt / max * 100).toFixed(0)}%"></div></div>
+          <div class="rcnt">${cnt}</div>
+        </div>`).join('');
+    }
+
+    function renderTable() {
+      const fs = document.getElementById('f-status').value;
+      const fsig = document.getElementById('f-signal').value;
+      let rows = allProposals.map((p) => ({ ...p, _cls: classify(p) }));
+      if (fs) rows = rows.filter((r) => r._cls === fs);
+      if (fsig) rows = rows.filter((r) => (r.signal_type || 'unknown') === fsig);
+      const wrap = document.getElementById('table-wrap');
+      if (!rows.length) { wrap.innerHTML = `<div class="empty">无匹配提案</div>`; return; }
+      wrap.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>更新</th><th>标的</th><th>方向</th><th>信号</th><th>状态</th>
+            <th>入场</th><th>止损</th><th>RR(半)</th><th>驳回原因</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr>
+                <td class="muted">${fmtTime(r.ts)}</td>
+                <td>${r.symbol || '—'}</td>
+                <td class="${r.side === 'SHORT' ? 'neg' : 'pos'}">${r.side === 'SHORT' ? '空' : (r.side === 'LONG' ? '多' : '—')}</td>
+                <td><span class="sig-tag">${sigLabel(r.signal_type)}</span></td>
+                <td><span class="st st-${r._cls}">${STATUS_LABEL[r._cls]}</span></td>
+                <td>${r.entry_price != null ? Number(r.entry_price).toFixed(2) : '—'}</td>
+                <td>${r.stop_price != null ? Number(r.stop_price).toFixed(2) : '—'}</td>
+                <td>${r.rr_half_est != null ? Number(r.rr_half_est).toFixed(2) : '—'}</td>
+                <td class="muted" style="text-align:left">${r._cls === 'rejected' ? (r.reason || '未注明') : ''}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function fillSignalFilter() {
+      const syms = [...new Set(allProposals.map((p) => p.signal_type || 'unknown'))];
+      const sel = document.getElementById('f-signal');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">全部信号</option>' + syms.map((s) => `<option value="${s}">${sigLabel(s)}</option>`).join('');
+      if (cur && syms.includes(cur)) sel.value = cur;
+    }
+
+    async function loadAll() {
+      try {
+        const [decRes, propRes] = await Promise.all([
+          fetch('/api/journal/decisions'),
+          fetch('/api/journal/proposals?limit=500'),
+        ]);
+        const dec = await decRes.json();
+        allProposals = await propRes.json();
+        renderFunnel(dec);
+        renderSignal(dec.by_signal);
+        renderReasons(dec.reject_reasons);
+        fillSignalFilter();
+        renderTable();
+      } catch (e) { console.error('加载决策失败', e); }
+    }
+
+    document.getElementById('f-status').addEventListener('change', renderTable);
+    document.getElementById('f-signal').addEventListener('change', renderTable);
+
+    loadAll();
+    setInterval(loadAll, 30000);
+
+    (function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}`);
+      ws.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.channel === 'proposal:update') setTimeout(loadAll, 500);
+        } catch (_) {}
+      };
+      ws.onclose = () => setTimeout(connectWS, 3000);
+    })();
+  </script>
+</body>
+</html>

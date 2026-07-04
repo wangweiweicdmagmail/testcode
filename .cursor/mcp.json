@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "alpha": {
+      "command": "bash",
+      "args": ["${workspaceFolder}/nautilus_mcp/run.sh"],
+      "env": {
+        "REDIS_HOST": "localhost",
+        "REDIS_PORT": "6379",
+        "ALPHA_SYMBOLS": "NVDA,TSLA,AAPL"
+      }
+    }
+  }
+}

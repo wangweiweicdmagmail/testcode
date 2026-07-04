@@ -7,9 +7,244 @@ const { WebSocketServer } = require("ws");
 const Redis = require("ioredis");
 const http = require("http");
 const path = require("path");
+const fs = require("fs");
+const { spawn, execSync } = require("child_process");
+const journal = require("./journal");
 
-const PORT = 3000;
+const PORT = parseInt(process.env.NAUTILUS_PORT || "3000", 10);
+const HOST = process.env.NAUTILUS_BIND_HOST || "127.0.0.1";
+const NAUTILUS_API_SECRET = process.env.NAUTILUS_API_SECRET || "";
+const ORDER_GATEWAY_SECRET = process.env.ORDER_GATEWAY_SECRET || "";
+const DEFAULT_ALPHA_SYMBOLS = (process.env.ALPHA_SYMBOLS || "NVDA,TSLA,AAPL")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
 const SYMBOL = process.env.SYMBOL || "QQQ";
+
+// 加载项目根 .env（不覆盖已有环境变量）
+(function loadDotEnv() {
+    const envPath = path.join(__dirname, "..", ".env");
+    if (!fs.existsSync(envPath)) return;
+    try {
+        for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+            const eq = trimmed.indexOf("=");
+            const key = trimmed.slice(0, eq).trim();
+            let val = trimmed.slice(eq + 1).trim();
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                val = val.slice(1, -1);
+            }
+            if (key && process.env[key] === undefined) process.env[key] = val;
+        }
+    } catch (_) { /* ignore */ }
+})();
+
+const FEISHU_VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN || "";
+const FEISHU_REQUIRE_TOKEN = !["0", "false", "no", "off"].includes(
+    String(process.env.FEISHU_REQUIRE_TOKEN || (NAUTILUS_API_SECRET ? "1" : "0")).toLowerCase()
+);
+function getApiToken(req) {
+    const h = req.headers["x-nautilus-token"] || req.headers["authorization"] || "";
+    if (typeof h === "string" && h.startsWith("Bearer ")) return h.slice(7).trim();
+    return String(h || "").trim();
+}
+
+function requireApiSecret(req, res, next) {
+    if (!NAUTILUS_API_SECRET) return next();
+    if (getApiToken(req) === NAUTILUS_API_SECRET) return next();
+    return res.status(401).json({
+        error: "unauthorized",
+        hint: "设置 Header X-Nautilus-Token 或 Authorization: Bearer <NAUTILUS_API_SECRET>",
+    });
+}
+
+async function hasActiveProposalForSymbol(symbol) {
+    const sym = String(symbol || "").toUpperCase();
+    if (!sym) return false;
+    const now = Math.floor(Date.now() / 1000);
+    const indexes = { pending: "proposal:pending:index", approved: "proposal:approved:index" };
+    for (const st of ["pending", "approved"]) {
+        const ids = await redis.zrevrange(indexes[st], 0, 99);
+        for (const id of ids) {
+            const p = await parseProposalHash(`proposal:${st}:${id}`);
+            if (!p || String(p.symbol || "").toUpperCase() !== sym) continue;
+            if (st === "pending") return true;
+            if (p.executed_at) continue;
+            const phase = String(p.execution_phase || "");
+            if (phase === "approved_wait" || phase === "ready_to_execute") {
+                const exp = parseInt(p.expires_at || "0", 10);
+                if (!exp || now <= exp) return true;
+            }
+        }
+    }
+    return false;
+}
+
+const FEISHU_AGENT_ENABLED = !["0", "false", "no", "off"].includes(
+    String(process.env.FEISHU_AGENT_ENABLED || "true").toLowerCase()
+);
+const PROJECT_ROOT = path.join(__dirname, "..");
+const PID_FILE = path.join(PROJECT_ROOT, ".frontend.pid");
+
+// ─── 单例保护：端口 + PID 文件（对齐 main.py .engine.pid）────────────────────
+function isProcessAlive(pid) {
+    if (!pid || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function getPidsOnPort(port) {
+    // 仅匹配 LISTEN 状态的进程：客户端到该端口的 ESTABLISHED 连接（如浏览器
+    // 打开着页面）不算占用，否则重启时会把浏览器连接误判为旧服务器而拒绝启动。
+    try {
+        const out = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf8" }).trim();
+        if (!out) return [];
+        return [...new Set(
+            out.split("\n")
+                .map((s) => parseInt(s.trim(), 10))
+                .filter((n) => Number.isFinite(n) && n > 0 && n !== process.pid)
+        )];
+    } catch {
+        return [];
+    }
+}
+
+function collectConflictPids() {
+    const conflict = new Set();
+    for (const pid of getPidsOnPort(PORT)) {
+        conflict.add(pid);
+    }
+    if (fs.existsSync(PID_FILE)) {
+        try {
+            const oldPid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
+            if (isProcessAlive(oldPid)) {
+                conflict.add(oldPid);
+            }
+        } catch {
+            /* stale pid file */
+        }
+    }
+    return [...conflict];
+}
+
+function printBanner(message) {
+    const inner = ` ${message} `;
+    const border = "*".repeat(inner.length + 2);
+    console.log(`\n${border}`);
+    console.log(`*${inner}*`);
+    console.log(`${border}\n`);
+}
+
+function sleepMs(ms) {
+    // 真正阻塞当前线程而不空转 CPU（用于启动期同步等待）
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function killProcess(pid) {
+    if (!isProcessAlive(pid)) return;
+    try {
+        process.kill(pid, "SIGTERM");
+    } catch {
+        return;
+    }
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+        if (!isProcessAlive(pid)) return;
+        sleepMs(250);
+    }
+    try {
+        process.kill(pid, "SIGKILL");
+    } catch {
+        /* already gone */
+    }
+}
+
+function ensureFrontendSingleton() {
+    // ── 1. 端口占用（启动前最先检查）────────────────────────────────────
+    const portPids = getPidsOnPort(PORT);
+    if (portPids.length > 0) {
+        console.log(`\n⚠️  端口 ${PORT} 已被占用 (PID: ${portPids.join(", ")})`);
+    }
+
+    // ── 2. PID 文件（对齐 main.py .engine.pid）──────────────────────────
+    if (fs.existsSync(PID_FILE)) {
+        try {
+            const oldPid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
+            if (isProcessAlive(oldPid) && !portPids.includes(oldPid)) {
+                console.log(`\n⚠️  前端已在运行中 (PID=${oldPid})`);
+            }
+        } catch {
+            /* ignore */
+        }
+    }
+
+    const pids = collectConflictPids();
+    if (pids.length === 0) {
+        fs.writeFileSync(PID_FILE, String(process.pid));
+        return;
+    }
+
+    console.log(`   自动终止旧进程并启动新前端...`);
+    for (const pid of pids) {
+        killProcess(pid);
+    }
+    try {
+        fs.unlinkSync(PID_FILE);
+    } catch {
+        /* ignore */
+    }
+    const left = getPidsOnPort(PORT);
+    if (left.length > 0) {
+        console.error(`   端口 ${PORT} 仍被占用 (PID: ${left.join(", ")})，请手动: lsof -i :${PORT}\n`);
+        process.exit(1);
+    }
+    console.log(`   已终止 PID=${pids.join(", ")}，正在启动新前端...\n`);
+
+    fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+// 单例检查必须在 Redis/HTTP 初始化之前完成（直接清理旧进程，无交互）
+ensureFrontendSingleton();
+
+function cleanupPidFile() {
+    try {
+        if (!fs.existsSync(PID_FILE)) return;
+        const saved = fs.readFileSync(PID_FILE, "utf8").trim();
+        if (saved === String(process.pid)) {
+            fs.unlinkSync(PID_FILE);
+        }
+    } catch {
+        /* ignore */
+    }
+}
+
+process.on("exit", cleanupPidFile);
+process.on("SIGINT", () => process.exit(0));
+process.on("SIGTERM", () => process.exit(0));
+
+function spawnFeishuAgentJob(body) {
+  const tmpDir = path.join(PROJECT_ROOT, ".run", "feishu_events");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const tmpFile = path.join(
+    tmpDir,
+    `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify(body), "utf8");
+  const script = path.join(PROJECT_ROOT, "gateway", "handle_feishu_message.py");
+  const child = spawn("python3", [script, tmpFile], {
+    cwd: PROJECT_ROOT,
+    env: process.env,
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  console.log(`[FeishuAgent] queued ${path.basename(tmpFile)} pid=${child.pid}`);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -59,9 +294,82 @@ function getETOffsetSec() {
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
+const ENGINE_HEARTBEAT_MAX_AGE_S = parseInt(process.env.ENGINE_HEARTBEAT_MAX_AGE_S || "30", 10);
+
+function parseEngineHeartbeat(raw) {
+    if (!raw) return { heartbeat: null, age_s: null, online: false };
+    let hb = raw;
+    let age_s = null;
+    try {
+        hb = JSON.parse(raw);
+        if (hb && hb.ts) {
+            age_s = Math.max(0, Math.floor(Date.now() / 1000) - Number(hb.ts));
+        }
+    } catch (_) { /* keep raw */ }
+    const online = age_s != null && age_s <= ENGINE_HEARTBEAT_MAX_AGE_S;
+    return { heartbeat: hb, age_s, online };
+}
+
+// GET /api/config/public — 前端公开配置（不含密钥）
+app.get("/api/config/public", (req, res) => {
+    res.json({
+        api_auth_required: Boolean(NAUTILUS_API_SECRET),
+        alpha_symbols: DEFAULT_ALPHA_SYMBOLS,
+        bind_host: HOST,
+    });
+});
+
+// GET /api/engine-status — 引擎心跳（ts 与当前时间差判定在线）
+app.get("/api/engine-status", async (req, res) => {
+    try {
+        const raw = await redis.get("engine:heartbeat");
+        const { heartbeat, age_s, online } = parseEngineHeartbeat(raw);
+        res.json({
+            engine_online: online,
+            engine_heartbeat: heartbeat,
+            engine_heartbeat_age_s: age_s,
+            engine_heartbeat_max_age_s: ENGINE_HEARTBEAT_MAX_AGE_S,
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message, engine_online: false });
+    }
+});
+
+
+// GET /api/signals/touches/:symbol — 图表回踩触线标记（VWAP / M5 ST / DEMA20）
+app.get("/api/signals/touches/:symbol", async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    try {
+        const rawList = await redis.lrange(`signals:markers:${symbol}`, 0, -1);
+        const touches = rawList.map((s) => {
+            try { return JSON.parse(s); } catch (_) { return null; }
+        }).filter(Boolean);
+        touches.sort((a, b) => (a.touch_time || 0) - (b.touch_time || 0));
+        res.json({ symbol, count: touches.length, touches });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 
 // REST API：获取所有数据（M3: 最多返回最近 500 根 K 线，避免大 JSON 打爆 Node）
 const MAX_BARS = 500;
+const RTH_OPEN_SEC = 9 * 3600 + 30 * 60;   // 09:30 ET
+const RTH_CLOSE_SEC = 16 * 3600;            // 16:00 ET
+const PREMARKET_CHART_START_SEC = 9 * 3600; // 09:00 ET（开盘前 30 分钟）
+
+function isPremarketChartSec(secOfDay) {
+    return secOfDay >= PREMARKET_CHART_START_SEC && secOfDay < RTH_OPEN_SEC;
+}
+
+function isChartSecOfDay(secOfDay) {
+    return isPremarketChartSec(secOfDay)
+        || (secOfDay >= RTH_OPEN_SEC && secOfDay < RTH_CLOSE_SEC);
+}
+
+function filterChartBars(bars) {
+    return bars.filter(b => isChartSecOfDay(b.time % 86400));
+}
 const ALL_SYMBOLS = ["NVDA", "AAPL", "GOOG", "AVGO", "SPY", "TSLA", "PLTR", "AMZN", "AMD", "META", "MSFT", "QQQ", "TSM", "MU", "NFLX"];
 
 app.get("/api/data/:symbol", async (req, res) => {
@@ -88,23 +396,13 @@ app.get("/api/data/:symbol", async (req, res) => {
             return Array.from(map.values()).sort((a, b) => a.time - b.time);
         }
 
-        // 只保留美股正市时间（09:30-16:00 ET）的 bars
-        // bars.time 为 ET fake-UTC 秒，直接按当天秒偏移判断
-        function filterRTH(bars) {
-            const RTH_OPEN = 9 * 3600 + 30 * 60;  // 09:30 = 34200s
-            const RTH_CLOSE = 16 * 3600;             // 16:00 = 57600s
-            return bars.filter(b => {
-                const secOfDay = b.time % 86400;
-                return secOfDay >= RTH_OPEN && secOfDay < RTH_CLOSE;
-            });
-        }
-
+        // 图表时段：盘前 30 分钟 + 正市
         // 计算昨日 H/L/C（从 5m bars 中筛选昨日 ET 日期数据）
         // ET fake-UTC：bars.time 已是 ET fake-UTC 秒
         function calcPrevDay(m5Bars) {
             if (!m5Bars.length) return null;
             const etOff = getETOffsetSec();
-            const now = Date.now() / 1000;
+            const etNow = Date.now() / 1000 + etOff;
             // 今日 ET 凌晨 0:00（fake-UTC）
             const todayMidnight = etNow - (etNow % 86400);
             // 昨日 ET 凌晨 0:00
@@ -122,8 +420,8 @@ app.get("/api/data/:symbol", async (req, res) => {
 
         res.json({
             symbol,
-            m1_bars: filterRTH(dedupBars(m1All)).slice(-MAX_BARS),
-            m5_bars: filterRTH(dedupBars(m5All)).slice(-MAX_BARS),
+            m1_bars: filterChartBars(dedupBars(m1All)).slice(-MAX_BARS),
+            m5_bars: filterChartBars(dedupBars(m5All)).slice(-MAX_BARS),
             // 含盘前预热数据的原始 M1 bars（供前端 ATR14 计算，不用于图表显示）
             m1_atr_bars: dedupBars(m1All).slice(-50),
             position: posRaw ? JSON.parse(posRaw) : null,
@@ -427,9 +725,11 @@ function proxyToEngine(method, path, body, fallback) {
     return new Promise((resolve) => {
         const http = require('http');
         const postData = body ? JSON.stringify(body) : null;
+        const headers = { 'Content-Type': 'application/json' };
+        if (ORDER_GATEWAY_SECRET) headers['X-Order-Token'] = ORDER_GATEWAY_SECRET;
         const opts = {
             host: '127.0.0.1', port: 8888, path, method,
-            headers: { 'Content-Type': 'application/json' },
+            headers,
         };
         if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
 
@@ -470,18 +770,67 @@ app.get('/api/positions', async (req, res) => {
     res.json(data);
 });
 
+// GET /api/positions-redis — 轻量持仓快照（直接读 Redis position:*，不拉 K 线）
+// 供 Status Bar 在引擎离线时快速统计四格持仓，避免对 /api/data/:sym 全量轮询
+app.get('/api/positions-redis', async (req, res) => {
+    try {
+        const want = (req.query.symbols || '')
+            .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        const symbols = want.length ? want : Object.keys(SYMBOL_MAP);
+        const keys = symbols.map(s => `position:${s}`);
+        const raws = await redis.mget(keys);
+        const out = {};
+        symbols.forEach((sym, i) => {
+            if (!raws[i]) return;
+            try {
+                const pos = JSON.parse(raws[i]);
+                if (pos && Math.abs(pos.quantity || 0) > 0) out[sym] = pos;
+            } catch (_) { /* skip malformed */ }
+        });
+        res.json(out);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // GET /api/active-orders — 当前活跃订单（入场价 + 止损价），供前端恢复价格线
 app.get('/api/active-orders', async (req, res) => {
     const data = await proxyToEngine('GET', '/active-orders', null, {});
     res.json(data);
 });
 
+// GET /api/auto-config — 生效的自动交易风控配置（供前端护栏：fixed_qty>0 弹警告）
+app.get('/api/auto-config', async (req, res) => {
+    try {
+        const raw = await redis.get('config:auto');
+        res.json(raw ? JSON.parse(raw) : {});
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/close-all — 一键全平所有持仓（kill switch，代理引擎 /close-all）
+// 注意：引擎侧会同时触发当日熔断（禁止再开仓），这是预期的紧急行为
+app.post('/api/close-all', async (req, res) => {
+    const result = await proxyToEngine('POST', '/close-all', {}, { engine_offline: true });
+    if (result && (result.engine_offline || result.error)) {
+        return res.json({ ok: false, error: result.error || '引擎未启动' });
+    }
+    res.json({ ok: true, engine: result });
+});
+
 // POST /api/order/:symbol — 下单代理
-app.post('/api/order/:symbol', async (req, res) => {
+app.post('/api/order/:symbol', requireApiSecret, async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     const instrumentId = SYMBOL_MAP[symbol];
     if (!instrumentId) {
         return res.status(400).json({ error: `未知标的: ${symbol}，支持: ${Object.keys(SYMBOL_MAP).join(', ')}` });
+    }
+    if (await hasActiveProposalForSymbol(symbol) && !req.body?.manual_override) {
+        return res.status(403).json({
+            error: "该标的有待审批或待执行建议，禁止手动开仓",
+            hint: "请先处理 Alpha 建议，或设置 manual_override=true（需 API 鉴权）",
+        });
     }
     const { side, qty, stop_loss, order_type = 'BRACKET', price, tp_price, tp_qty, entry_price } = req.body;
     if (!side || !qty) {
@@ -564,6 +913,322 @@ app.post('/api/modify-entry/:symbol', async (req, res) => {
     res.json({ ok: true, engine: result });
 });
 
+// GET /api/risk — 今日风险状态（代理引擎）
+app.get("/api/risk", async (req, res) => {
+    try {
+        const data = await proxyToEngine("GET", "/risk");
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ─── Alpha Agent 交易建议（审批流）────────────────────────────────────
+
+// Redis key 保留时长（默认 8h），与建议 expires_at 交易有效期无关
+const PROPOSAL_REDIS_RETENTION = parseInt(
+    process.env.PROPOSAL_REDIS_RETENTION_SECONDS || String(8 * 3600), 10
+);
+
+const PROPOSAL_INDEX = {
+    pending: "proposal:pending:index",
+    approved: "proposal:approved:index",
+    rejected: "proposal:rejected:index",
+    executed: "proposal:executed:index",
+};
+
+async function parseProposalHash(key) {
+    const raw = await redis.hgetall(key);
+    if (!raw || !Object.keys(raw).length) return null;
+    const obj = {};
+    for (const [k, v] of Object.entries(raw)) {
+        try { obj[k] = JSON.parse(v); } catch { obj[k] = v; }
+    }
+    return obj;
+}
+
+async function listProposalsByStatus(status, { symbol, limit = 50, executionPhase = null } = {}) {
+    const indexKey = PROPOSAL_INDEX[status];
+    if (!indexKey) return [];
+    const ids = await redis.zrevrange(indexKey, 0, limit - 1);
+    const out = [];
+    for (const id of ids) {
+        const p = await parseProposalHash(`proposal:${status}:${id}`);
+        if (!p) {
+            await redis.zrem(indexKey, id);
+            continue;
+        }
+        if (symbol && String(p.symbol || "").toUpperCase() !== symbol.toUpperCase()) continue;
+        if (executionPhase && String(p.execution_phase || "") !== executionPhase) continue;
+        out.push(p);
+    }
+    return out;
+}
+
+// GET /api/stack-health — 策略栈轻量健康检查（监控用）
+app.get("/api/stack-health", async (req, res) => {
+    const out = { ok: true, checks: {}, ts: Math.floor(Date.now() / 1000) };
+    try {
+        await redis.ping();
+        out.checks.redis = { ok: true };
+    } catch (e) {
+        out.ok = false;
+        out.checks.redis = { ok: false, error: e.message };
+    }
+    try {
+        const pending = await redis.zcard(PROPOSAL_INDEX.pending);
+        out.checks.proposals = { ok: true, pending };
+    } catch (e) {
+        out.checks.proposals = { ok: false, error: e.message };
+    }
+    res.json(out);
+});
+
+// GET /api/proposals?status=pending|approved|rejected|executed&symbol=QQQ&execution_phase=approved_wait
+app.get("/api/proposals", async (req, res) => {
+    try {
+        const status = req.query.status || "pending";
+        const symbol = req.query.symbol ? req.query.symbol.toUpperCase() : null;
+        const executionPhase = req.query.execution_phase || null;
+        const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+        const proposals = await listProposalsByStatus(status, { symbol, limit, executionPhase });
+        res.json({ status, count: proposals.length, proposals });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/proposals/:id
+app.get("/api/proposals/:id", async (req, res) => {
+    const id = req.params.id;
+    try {
+        for (const st of ["pending", "approved", "rejected", "executed"]) {
+            const p = await parseProposalHash(`proposal:${st}:${id}`);
+            if (p) return res.json({ status: st, proposal: p });
+        }
+        res.status(404).json({ error: "proposal not found" });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+async function applyProposalDecision(id, decision, approver = "operator", comment = "") {
+    const valid = ["approved_live", "approved_observe", "rejected"];
+    if (!valid.includes(decision)) {
+        throw new Error(`decision 必须是 ${valid.join("|")}`);
+    }
+    if (decision.startsWith("approved")) {
+        const rawHb = await redis.get("engine:heartbeat");
+        const { online } = parseEngineHeartbeat(rawHb);
+        if (!online) {
+            const err = new Error("引擎离线，暂不允许批准（避免重启后意外自动执行）");
+            err.statusCode = 503;
+            throw err;
+        }
+    }
+    const keyPending = `proposal:pending:${id}`;
+    const proposal = await parseProposalHash(keyPending);
+    if (!proposal) {
+        const err = new Error("待审批建议不存在或已处理");
+        err.statusCode = 404;
+        throw err;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const isApproved = decision.startsWith("approved");
+    const payload = {
+        ...proposal,
+        status: isApproved ? "approved" : "rejected",
+        decision,
+        approver,
+        comment,
+        decided_at: now,
+    };
+    if (isApproved) {
+        payload.execution_phase = "approved_wait";
+        payload.approved_at = now;
+        if (payload.execution_mode === "st_super_immediate") {
+            payload.execution_phase = "ready_to_execute";
+            payload.reclaim_note = "超级信号：审批通过，执行层下一根 M1 可下单";
+        } else if (payload.touch_reclaimed_at_submit) {
+            payload.reclaim_note = "触线当根已收回，仍由执行层确认后下单";
+        } else {
+            payload.reclaim_note = payload.reclaim_label || "等待回踩 reclaim 完成后执行";
+        }
+    }
+    const targetStatus = payload.status;
+    const targetKey = `proposal:${targetStatus}:${id}`;
+    const targetIndex = PROPOSAL_INDEX[targetStatus];
+    const hashMapping = {};
+    for (const [k, v] of Object.entries(payload)) {
+        hashMapping[k] = JSON.stringify(v);
+    }
+    const pipe = redis.pipeline();
+    pipe.hset(targetKey, hashMapping);
+    pipe.expire(targetKey, PROPOSAL_REDIS_RETENTION);
+    pipe.zadd(targetIndex, now, id);
+    pipe.del(keyPending);
+    pipe.zrem(PROPOSAL_INDEX.pending, id);
+    pipe.publish("proposal:update", JSON.stringify({
+        event: decision,
+        proposal_id: id,
+        symbol: payload.symbol,
+        side: payload.side,
+        signal_type: payload.signal_type,
+        decision,
+        approver,
+    }));
+    await pipe.exec();
+    console.log(`📋 建议审批 [${payload.symbol}] ${decision} id=${id} by ${approver}`);
+    return payload;
+}
+
+async function applyProposalCancel(id, approver = "operator", comment = "") {
+    const keyApproved = `proposal:approved:${id}`;
+    const proposal = await parseProposalHash(keyApproved);
+    if (!proposal) {
+        const err = new Error("已批准建议不存在或已处理");
+        err.statusCode = 404;
+        throw err;
+    }
+    const phase = String(proposal.execution_phase || "");
+    if (proposal.executed_at) {
+        const err = new Error("已执行，无法取消");
+        err.statusCode = 400;
+        throw err;
+    }
+    if (!["approved_wait", "ready_to_execute"].includes(phase)) {
+        const err = new Error(`当前阶段不可取消: ${phase || "unknown"}`);
+        err.statusCode = 400;
+        throw err;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+        ...proposal,
+        status: "rejected",
+        decision: "rejected",
+        execution_phase: "cancelled",
+        approver,
+        comment: comment || "用户取消批准",
+        cancelled_at: now,
+        decided_at: proposal.decided_at || now,
+    };
+    const hashMapping = {};
+    for (const [k, v] of Object.entries(payload)) {
+        hashMapping[k] = JSON.stringify(v);
+    }
+    const pipe = redis.pipeline();
+    pipe.hset(`proposal:rejected:${id}`, hashMapping);
+    pipe.expire(`proposal:rejected:${id}`, PROPOSAL_REDIS_RETENTION);
+    pipe.zadd(PROPOSAL_INDEX.rejected, now, id);
+    pipe.del(keyApproved);
+    pipe.zrem(PROPOSAL_INDEX.approved, id);
+    pipe.del(`proposal:exec_claim:${id}`);
+    pipe.publish("proposal:update", JSON.stringify({
+        event: "cancelled",
+        proposal_id: id,
+        symbol: payload.symbol,
+        side: payload.side,
+        operator: approver,
+    }));
+    await pipe.exec();
+    console.log(`📋 建议取消批准 [${payload.symbol}] id=${id} by ${approver}`);
+    return payload;
+}
+
+// POST /api/proposals/:id/decision
+// body: { decision: approved_live|approved_observe|rejected, approver?, comment? }
+app.post("/api/proposals/:id/decision", requireApiSecret, async (req, res) => {
+    const id = req.params.id;
+    const { decision, approver = "operator", comment = "" } = req.body || {};
+    try {
+        const payload = await applyProposalDecision(id, decision, approver, comment);
+        res.json({ ok: true, proposal: payload });
+    } catch (e) {
+        res.status(e.statusCode || 500).json({ error: e.message });
+    }
+});
+
+// POST /api/proposals/:id/cancel — 撤销已批准（approved_wait / ready_to_execute）
+app.post("/api/proposals/:id/cancel", requireApiSecret, async (req, res) => {
+    const id = req.params.id;
+    const { approver = "operator", comment = "" } = req.body || {};
+    try {
+        const payload = await applyProposalCancel(id, approver, comment);
+        res.json({ ok: true, proposal: payload });
+    } catch (e) {
+        res.status(e.statusCode || 500).json({ error: e.message });
+    }
+});
+
+// POST /api/feishu/webhook — 飞书事件订阅 + 卡片按钮回调
+app.post("/api/feishu/webhook", async (req, res) => {
+    const body = req.body || {};
+
+    // URL 验证（旧版 challenge 或 schema 2.0）
+    if (body.challenge) {
+        return res.json({ challenge: body.challenge });
+    }
+    const eventType = body.header?.event_type || body.type;
+    if (eventType === "url_verification") {
+        const challenge = body.event?.challenge || body.challenge;
+        return res.json({ challenge });
+    }
+
+    if (FEISHU_REQUIRE_TOKEN && !FEISHU_VERIFICATION_TOKEN) {
+        return res.status(503).json({ error: "FEISHU_VERIFICATION_TOKEN 未配置" });
+    }
+    if (FEISHU_VERIFICATION_TOKEN) {
+        const token = body.header?.token || body.token;
+        if (!token || token !== FEISHU_VERIFICATION_TOKEN) {
+            return res.status(403).json({ error: "invalid verification token" });
+        }
+    } else if (NAUTILUS_API_SECRET && eventType === "card.action.trigger") {
+        return res.status(403).json({ error: "飞书审批需配置 FEISHU_VERIFICATION_TOKEN" });
+    }
+
+    if (eventType === "card.action.trigger") {
+        const action = body.event?.action || body.action || {};
+        const value = action.value || {};
+        const proposalId = value.proposal_id;
+        const decision = value.decision;
+        const operator = body.event?.operator?.open_id || body.operator?.open_id || "feishu";
+        if (!proposalId || !decision) {
+            return res.json({
+                toast: { type: "warning", content: "无效回调参数" },
+            });
+        }
+        try {
+            const payload = await applyProposalDecision(
+                proposalId, decision, `feishu:${operator}`, "feishu card"
+            );
+            const label = {
+                approved_live: "已批准实盘",
+                approved_observe: "已批准观察",
+                rejected: "已驳回",
+            }[decision] || "已处理";
+            return res.json({
+                toast: { type: "info", content: `${label} ${payload.symbol || ""}`.trim() },
+            });
+        } catch (e) {
+            return res.json({
+                toast: { type: "error", content: e.message || "审批失败" },
+            });
+        }
+    }
+
+    // 飞书 IM 消息 → 异步调用 Cursor Agent（须 3 秒内 HTTP 响应）
+    if (eventType === "im.message.receive_v1" && FEISHU_AGENT_ENABLED) {
+        try {
+            spawnFeishuAgentJob(body);
+        } catch (e) {
+            console.error(`[FeishuAgent] queue failed: ${e.message}`);
+        }
+        return res.json({});
+    }
+
+    res.json({ ok: true });
+});
+
 // GET /api/settings/:symbol — 读取当前策略开关设置
 app.get("/api/settings/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
@@ -582,6 +1247,17 @@ app.post("/api/settings/:symbol", async (req, res) => {
     const existing = await redis.get(`settings:${symbol}`);
     const settings = existing ? JSON.parse(existing) : {};
     Object.assign(settings, req.body);
+    // 自动策略开启时强制关闭 ExitManager 跟踪止盈（后端兜底，防 Redis 直写）
+    if (req.body.auto_strategy || req.body.auto_observe) {
+        settings.trail_mode = 0;
+        settings.opening_breakout_live = false;
+        settings.opening_breakout_observe = false;
+    }
+    if (req.body.opening_breakout_live || req.body.opening_breakout_observe) {
+        settings.trail_mode = 0;
+        settings.auto_strategy = false;
+        settings.auto_observe = false;
+    }
     await redis.set(`settings:${symbol}`, JSON.stringify(settings));
     console.log(`⚙️  设置更新 [${symbol}]:`, settings);
 
@@ -603,6 +1279,75 @@ app.post("/api/settings/:symbol", async (req, res) => {
 
     res.json({ ok: true, settings });
 });
+
+// GET /api/premarket-ref/:symbol — 盘前锚定（开盘突破）
+app.get("/api/premarket-ref/:symbol", async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    try {
+        const raw = await redis.get(`premarket:ref:${symbol}`);
+        if (!raw) return res.json(null);
+        res.json(JSON.parse(raw));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/opening-breakout/status/:symbol — 今日是否已触发
+app.get("/api/opening-breakout/status/:symbol", async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+    try {
+        const refRaw = await redis.get(`premarket:ref:${symbol}`);
+        const ref = refRaw ? JSON.parse(refRaw) : null;
+        const sessionDate = ref?.session_date || null;
+        let fired = null;
+        if (sessionDate) {
+            const firedRaw = await redis.get(`opening_breakout:fired:${symbol}:${sessionDate}`);
+            fired = firedRaw ? JSON.parse(firedRaw) : null;
+        }
+        res.json({ ref, fired, session_date: sessionDate });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+// ── 交易日志 / 绩效（落库自 journal.js，独立于 Redis 过期）──────────────
+// GET /api/journal/stats — 总体 + 按信号类型的胜率/期望/平均R/滑点
+app.get("/api/journal/stats", (_req, res) => {
+    try { res.json(journal.getStats()); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/equity — 资金曲线（累计已实现盈亏）
+app.get("/api/journal/equity", (_req, res) => {
+    try { res.json(journal.getEquityCurve()); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/trades?limit=100 — 最近往返成交
+app.get("/api/journal/trades", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || "100", 10) || 100, 1000);
+    try { res.json(journal.getTrades(limit)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/rdist — R 倍数分布直方图
+app.get("/api/journal/rdist", (_req, res) => {
+    try { res.json(journal.getRDistribution()); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/decisions — 决策复盘聚合（漏斗/转化率/驳回原因）
+app.get("/api/journal/decisions", (_req, res) => {
+    try { res.json(journal.getDecisionStats()); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/proposals?limit=200 — 审批决策档案
+app.get("/api/journal/proposals", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || "200", 10) || 200, 2000);
+    try { res.json(journal.getProposals(limit)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Redis 推送设置——防止连接丢失导致进程崩溃
 const REDIS_OPTS = {
     host: "localhost",
@@ -621,19 +1366,72 @@ redisSub.on("error", (err) => {
 });
 
 redisSub.on("ready", () => {
-    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:* / engine:*`);
-    redisSub.psubscribe("bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*", "position:*", "order:*", "account:*", "engine:*").catch(console.error);
+    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:* / engine:* / auto:* / proposal:* / signal:* / premarket:* / opening_breakout:*`);
+    redisSub.psubscribe(
+        "bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*",
+        "position:*", "order:*", "account:*", "engine:*",
+        "auto:*", "risk:*", "proposal:*", "signal:*",
+        "premarket:*", "opening_breakout:*",
+    ).catch(console.error);
 });
 
 // 判断当前时刻是否在美股正市（09:30-16:00 ET）
 function isRTH() {
     const { secOfDay } = getETInfo();
-    return secOfDay >= 34200 && secOfDay < 57600;  // 09:30 – 16:00
+    return secOfDay >= RTH_OPEN_SEC && secOfDay < RTH_CLOSE_SEC;
+}
+
+// 图表实时推送窗口：盘前 30 分 + 正市
+function isChartLiveSession() {
+    const { secOfDay } = getETInfo();
+    return secOfDay >= PREMARKET_CHART_START_SEC && secOfDay < RTH_CLOSE_SEC;
 }
 
 redisSub.on("pmessage", (_pattern, channel, message) => {
     try {
         const parsed = JSON.parse(message);
+
+        // auto:signal → 包装为 channel 字段，与 order:update 等一致
+        if (channel === 'auto:signal') {
+            const autoPayload = JSON.stringify({ channel: 'auto:signal', data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(autoPayload));
+            return;
+        }
+
+        // risk:update → 日亏损熔断通知
+        if (channel === 'risk:update') {
+            const riskPayload = JSON.stringify({ channel: 'risk:update', data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(riskPayload));
+            return;
+        }
+
+        // proposal:update → Alpha Agent 建议新增/审批/执行
+        if (channel === 'proposal:update') {
+            try { journal.recordProposalUpdate(parsed); } catch (e) { console.error(`[journal] proposal: ${e.message}`); }
+            const proposalPayload = JSON.stringify({ channel: 'proposal:update', data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(proposalPayload));
+            return;
+        }
+
+        // position:update → 落库（持仓快照缓存 + 平仓结算往返交易）
+        if (channel === 'position:update') {
+            try { journal.recordPositionUpdate(parsed); } catch (e) { console.error(`[journal] position: ${e.message}`); }
+            // 不 return：仍走默认广播逻辑推给前端
+        }
+
+        // signal:touch / signal:touch:backfill → 回踩触线图表标记
+        if (channel === 'signal:touch' || channel === 'signal:touch:backfill') {
+            const touchPayload = JSON.stringify({ channel, data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(touchPayload));
+            return;
+        }
+
+        // premarket:ref / opening_breakout:signal → 开盘突破 UI
+        if (channel.startsWith('premarket:ref:') || channel === 'opening_breakout:signal') {
+            const obPayload = JSON.stringify({ channel, data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(obPayload));
+            return;
+        }
 
         // kline:5m: 收盘事件 → 更新日内高低突破信号并广播（仅正市期间）
         if (channel.startsWith('kline:5m:')) {
@@ -650,10 +1448,10 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
         }
 
 
-        // 盘前/盘后：拦截 kline 和 bars 实时推送，只透传其他频道（order/position/account/engine 等）
+        // 盘前/盘后：拦截 kline 和 bars 实时推送（盘前 09:00 起放行）
         const isBarChannel = channel.startsWith('kline:') || channel.startsWith('bars:');
-        if (isBarChannel && !isRTH()) {
-            return;  // 非正市时段，丢弃行情推送
+        if (isBarChannel && !isChartLiveSession()) {
+            return;
         }
 
         const payload = JSON.stringify({ channel, data: parsed });
@@ -682,7 +1480,18 @@ process.on("unhandledRejection", (reason) => {
     console.error(`[未处理 Promise] ${reason}`);
 });
 
-server.listen(PORT, () => {
-    console.log(`✅ 服务器启动: http://localhost:${PORT}`);
-    console.log(`   监听频道: bars:1m:* / bars:5m:*`);
+server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+        console.error(`[启动失败] 端口 ${PORT} 仍被占用，请检查: lsof -i :${PORT}`);
+    } else {
+        console.error(`[启动失败] ${err.message}`);
+    }
+    process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+    const urlHost = HOST === "0.0.0.0" || HOST === "::" ? "localhost" : HOST;
+    printBanner(`SUCCESS: 前端已启动 http://${urlHost}:${PORT}  PID=${process.pid}`);
+    console.log(`   pidfile=${PID_FILE}`);
+    console.log(`   监听频道: bars:1m:* / bars:5m:* / signal:*`);
 });

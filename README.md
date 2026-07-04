@@ -52,8 +52,21 @@
 - ✅ 完整订单链路（下单 → 成交 → 仓位更新 → 止损管理）
 - ✅ 四图联动看盘（时间轴 + 十字线同步）
 - ✅ 止损可视化拖动开仓（BRACKET 单，风险金额自动测算）
-- ✅ 全标的指标排行：13个标的（NVDA/AAPL/GOOG/AVGO/SPY/TSLA/PLTR/AMZN/AMD/META/MSFT/QQQ/TSM）M1 ST / M5 ST / EMA偏离 / 日内新高四列同屏对比
-- ⚠️ 下一步：自动化信号 + Redis 告警
+- ✅ 全标的指标排行：13个标的 M1 ST / M5 ST / EMA偏离 / 日内新高四列同屏对比
+- 🚧 **超级信号 + Alpha 审批流水线**（未提交，见 [docs/UNRELEASED.md](docs/UNRELEASED.md)）
+
+---
+
+## 文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [docs/UNRELEASED.md](docs/UNRELEASED.md) | **未提交功能总结**（st_super、审批、四宫格、MCP） |
+| [docs/MCP_ALPHA.md](docs/MCP_ALPHA.md) | Cursor MCP Alpha 配置 |
+| [docs/ALPHA_AGENT.md](docs/ALPHA_AGENT.md) | 信号 Agent 架构与命令 |
+| [docs/SIGNAL_SPEC.md](docs/SIGNAL_SPEC.md) | 指标与 Redis 规格 |
+| [docs/FEISHU_SETUP.md](docs/FEISHU_SETUP.md) | 飞书审批配置 |
+| [env.example](env.example) | 环境变量模板 |
 
 ---
 
@@ -61,19 +74,30 @@
 
 ```
 nautilus_ibkr_helloworld/
-├── main.py            # 主程序：配置并启动 TradingNode（支持 --mode live/backtest）
-├── strategy.py        # 回测/实盘通用策略：1m K 线 + SuperTrend + EMA + 日K围栏 + 写Redis
-├── order_actor.py     # HTTP 下单网关 Actor（端口 8888）+ 订单状态 Redis 回调
-├── exit_manager.py    # 独立止盈/止损管理器，监听 bar.collected 事件
-├── events.py          # 自定义 MessageBus 事件类（ExternalOrderCommand 等）
-├── order_sender.py    # 外部下单测试脚本（MARKET / BRACKET）
+├── main.py              # TradingNode：BarLogger + OrderGateway + ExitManager + SignalDetector + AutoRunner
+├── strategy.py          # K 线、ST/EMA/VWAP、写 Redis
+├── signal_detector.py   # st_super 信号检测
+├── auto_runner.py       # 审批后自动执行编排
+├── order_actor.py       # HTTP 8888 下单网关
+├── exit_manager.py      # 跟踪止盈 / EOD
+├── approval/            # Alpha 扫描与建议 Redis 读写
+├── signals/             # st_super、回踩检测
+├── execution/           # AutoPM 仓位单元
+├── portfolio/           # RiskGate
+├── feishu/              # 飞书卡片与 notifier
+├── nautilus_mcp/        # Cursor MCP Server
+├── scripts/             # scan / approve / health_check 等 CLI
+├── env.example          # 环境变量模板
 └── frontend/
-    ├── server.js      # Node.js WebSocket + HTTP 代理服务（端口 3000）
+    ├── server.js        # WebSocket + HTTP API（:3000）
     └── public/
-        ├── index.html      # 单图 Dashboard（左K线 + 右指标面板 + 语音提醒）
-        ├── multi.html      # 四图总览（2×2 网格，时间轴/十字线联动，止损拖动开仓）
-        └── indicators.html # 四列指标排行（M1 ST / M5 ST / EMA偏离 / 日内新高）
+        ├── multi.html           # 四宫格 + 超级信号 + Alpha 审批
+        ├── proposals.html       # 建议列表
+        ├── index.html           # 单图 Dashboard
+        └── shared/              # alpha-cell, status-bar, api-auth
 ```
+
+> 完整未提交能力说明见 **[docs/UNRELEASED.md](docs/UNRELEASED.md)**。
 
 ## 架构设计
 
@@ -144,8 +168,8 @@ python main.py                          # 实盘（今日 + 昨日数据 + 实�
 python main.py --mode backtest          # 回测（上一交易日数据）
 python main.py --mode backtest --date 2026-02-25  # 回测指定日期
 
-# Step 2：启动前端 WebSocket 服务器
-cd frontend && node server.js
+# Step 2：启动前端 WebSocket 服务器（项目根目录）
+node frontend/server.js
 
 # 打开浏览器
 # 单图：    http://localhost:3000/?symbol=QQQ

@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Alpha 建议历史</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #131722; color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+    header {
+      display: none;
+    }
+
+    .page-subtitle {
+      padding: 8px 20px 0;
+      font-size: 12px;
+      color: #787b86;
+    }
+
+    .page-subtitle b { color: #d1d4dc; }
+    .toolbar {
+      display: flex; gap: 10px; align-items: center; padding: 12px 20px;
+      border-bottom: 1px solid #2a2e39; flex-wrap: wrap;
+      position: sticky; top: 0; z-index: 9; background: #131722;
+    }
+    .tabs button {
+      background: #131722; border: 1px solid #2a2e39; color: #787b86;
+      padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px;
+    }
+    .tabs button.active { color: #fff; border-color: #2962ff; }
+    select, input {
+      background: #131722; border: 1px solid #2a2e39; color: #d1d4dc;
+      padding: 6px 10px; border-radius: 4px; font-size: 13px;
+    }
+    .badge {
+      display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px;
+      background: #ef5350; color: #fff; border-radius: 9px; font-size: 11px;
+      text-align: center;
+    }
+    #list { padding: 16px 20px 40px; display: flex; flex-direction: column; gap: 12px; }
+    .card {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .card-head {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 10px; gap: 12px;
+    }
+    .sym { font-size: 20px; font-weight: 700; }
+    .side-long { color: #26a69a; }
+    .side-short { color: #ef5350; }
+    .meta { font-size: 12px; color: #787b86; line-height: 1.6; }
+    .thesis { margin: 10px 0; font-size: 14px; line-height: 1.5; }
+    .prices {
+      display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; margin-bottom: 12px;
+    }
+    .prices span label { color: #787b86; margin-right: 4px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      border: none; border-radius: 4px; padding: 8px 14px; font-size: 13px;
+      cursor: pointer; font-weight: 600;
+    }
+    .btn-approve { background: #26a69a; color: #fff; }
+    .btn-live { background: #ef5350; color: #fff; }
+    .btn-observe { background: #f0b90b; color: #131722; }
+    .btn-reject { background: #2a2e39; color: #d1d4dc; border: 1px solid #434651; }
+    .btn-cancel { background: #434651; color: #d1d4dc; border: 1px solid #5d606b; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .empty { text-align: center; color: #787b86; padding: 60px 20px; }
+    .card-head-right {
+      display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+    }
+    .link-multi {
+      font-size: 11px; color: #2962ff; text-decoration: none;
+    }
+    .link-multi:hover { text-decoration: underline; }
+    .status-approved_live { background: rgba(239,83,80,.2); color: #ef5350; }
+    .status-approved_observe { background: rgba(240,185,11,.2); color: #f0b90b; }
+    .status-rejected { background: rgba(120,123,134,.2); color: #787b86; }
+    .status-approved_wait { background: rgba(41,98,255,.2); color: #2962ff; }
+    .cond-banner {
+      font-size: 12px; color: #787b86; background: #131722;
+      border: 1px dashed #434651; border-radius: 4px; padding: 8px 10px;
+      margin-bottom: 10px; line-height: 1.5;
+    }
+    #toast {
+      position: fixed; top: 16px; right: 16px; z-index: 99;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .toast-item {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 6px;
+      padding: 10px 14px; font-size: 13px; min-width: 240px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.4);
+    }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <p class="page-subtitle">日常审批请在 <b><a href="/multi.html" style="color:#2962ff;text-decoration:none;">四宫格主控台</a></b> 完成；本页用于历史记录与批量查看。</p>
+
+  <div class="toolbar">
+    <div class="tabs">
+      <button class="active" data-status="pending">待审批 <span class="badge" id="badge-pending">0</span></button>
+      <button data-status="approved">已批准</button>
+      <button data-status="approved_wait">等待回踩</button>
+      <button data-status="rejected">已驳回</button>
+      <button data-status="executed">已执行</button>
+    </div>
+    <select id="filter-symbol">
+      <option value="">全部标的</option>
+    </select>
+    <button class="btn btn-reject" id="btn-refresh">刷新</button>
+  </div>
+
+  <div id="list"></div>
+  <div id="toast"></div>
+
+  <script src="/shared/status-bar.js"></script>
+  <script>
+    StatusBar.mount('status-bar-root', 'proposals');
+    StatusBar.startPolling(15000, () => { loadBadge(); });
+  </script>
+  <script>
+    let currentStatus = 'pending';
+    let ws;
+
+    const SIGNAL_LABEL = {
+      pullback_vwap: '回踩 VWAP',
+      pullback_supertrend: '回踩 SuperTrend',
+      pullback_dema20: '回踩 DEMA20',
+      pullback_dema: '回踩 DEMA',  // 旧版兼容
+    };
+
+    function showToast(msg) {
+      const el = document.createElement('div');
+      el.className = 'toast-item';
+      el.textContent = msg;
+      document.getElementById('toast').appendChild(el);
+      setTimeout(() => el.remove(), 4000);
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '—';
+      return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function decisionLabel(d) {
+      const m = {
+        approved_live: '实盘',
+        approved_observe: '观察',
+        rejected: '已驳回',
+      };
+      return m[d] || d || '';
+    }
+
+    function phaseLabel(p, status) {
+      const phase = p.execution_phase;
+      const dec = decisionLabel(p.decision);
+      if (phase === 'approved_wait' || status === 'approved_wait') {
+        return dec ? `${dec} · 等待回踩` : '等待回踩完成';
+      }
+      if (phase === 'ready_to_execute') return dec ? `${dec} · 待执行` : '待执行';
+      if (phase === 'failed') return dec ? `${dec} · 回踩失败` : '回踩失败';
+      if (p.decision === 'rejected' || status === 'rejected') return '已驳回';
+      if (dec) return dec;
+      return p.status || status;
+    }
+
+    function m5StLabel(p) {
+      const d = p.m5_st_dir;
+      if (d === 1) return 'M5 ST▲多';
+      if (d === -1) return 'M5 ST▼空';
+      return '';
+    }
+
+    function cardHtml(p, status) {
+      const sideCls = p.side === 'SHORT' ? 'side-short' : 'side-long';
+      const sideZh = p.side === 'SHORT' ? '做空' : '做多';
+      const sig = SIGNAL_LABEL[p.signal_type] || p.signal_type;
+      const conf = p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—';
+      const tag = phaseLabel(p, status);
+      const tagCls = 'status-tag status-' + (
+        p.execution_phase === 'approved_wait' ? 'approved_wait' :
+        p.execution_phase === 'ready_to_execute' ? 'executed' :
+        p.execution_phase === 'failed' ? 'rejected' :
+        (p.decision === 'rejected' || status === 'rejected') ? 'rejected' :
+        (p.decision || p.status || status)
+      );
+      const rr = p.rr_half_est != null ? p.rr_half_est : '—';
+      const cond = p.execution_mode === 'conditional_reclaim';
+      const condBanner = cond ? `
+        <div class="cond-banner">
+          <strong>条件执行</strong>：批准 ≠ 立即下单。${p.reclaim_label || '需 reclaim 后由引擎执行'}。
+          半仓止盈 ${p.tp_half_price ?? p.tp_price ?? '—'}，剩余仓位 trailing 另策。
+        </div>` : '';
+
+      let actions = '';
+      if (status === 'pending') {
+        actions = `
+          <div class="actions">
+            <button class="btn btn-approve" data-id="${p.proposal_id}" data-decision="approved_live">批准</button>
+            <button class="btn btn-reject" data-id="${p.proposal_id}" data-decision="rejected">驳回</button>
+          </div>`;
+      } else if (p.execution_phase === 'approved_wait' || p.execution_phase === 'ready_to_execute') {
+        actions = `
+          <div class="actions">
+            <button class="btn btn-cancel" data-id="${p.proposal_id}" data-cancel="1">取消批准</button>
+          </div>`;
+      }
+
+      return `
+        <div class="card" data-id="${p.proposal_id}">
+          <div class="card-head">
+            <div>
+              <span class="sym ${sideCls}">${p.symbol}</span>
+              <span class="${sideCls}" style="margin-left:8px;font-weight:600;">${sideZh}</span>
+              <span class="status-tag" style="margin-left:8px;">${sig}</span>
+              ${m5StLabel(p) ? `<span class="status-tag" style="margin-left:6px;">${m5StLabel(p)}</span>` : ''}
+            </div>
+            <div class="card-head-right">
+              <span class="${tagCls}">${tag}</span>
+              <a class="link-multi" href="/multi.html?focus=${p.symbol}">四宫格 ▸</a>
+            </div>
+          </div>
+          ${condBanner}
+          <div class="thesis">${p.thesis || '—'}</div>
+          <div class="prices">
+            <span><label>触发线</label>${p.trigger_level ?? '—'}</span>
+            <span><label>估入场</label>${p.entry_price ?? '—'}</span>
+            <span><label>止损</label>${p.stop_price ?? '—'}</span>
+            <span><label>半仓止盈</label>${p.tp_half_price ?? p.tp_price ?? '—'}</span>
+            <span><label>R:R½</label>${rr}</span>
+            <span><label>置信度</label>${conf}</span>
+          </div>
+          <div class="meta">
+            ID: ${p.proposal_id} · 触线 ${fmtTime(p.touch_time || p.bar_time)} · 创建 ${fmtTime(p.created_at)}
+            ${p.expires_at ? ' · 过期 ' + fmtTime(p.expires_at) : ''}
+            ${p.approver ? ' · 审批人 ' + p.approver : ''}
+            ${p.reclaim_note ? ' · ' + p.reclaim_note : ''}
+            ${p.reclaim_fail_reason ? ' · 失败: ' + p.reclaim_fail_reason : ''}
+            ${p.reclaim_close ? ' · reclaim 收盘 ' + p.reclaim_close : ''}
+            ${p.exec_result ? ' · 执行 ' + p.exec_result : ''}
+          </div>
+          ${actions}
+        </div>`;
+    }
+
+    async function loadSymbolOptions() {
+      try {
+        const res = await fetch('/api/indicators');
+        if (!res.ok) return;
+        const rows = await res.json();
+        const syms = [...new Set(rows.map((r) => r.symbol).filter(Boolean))].sort();
+        const sel = document.getElementById('filter-symbol');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">全部标的</option>'
+          + syms.map((s) => `<option value="${s}">${s}</option>`).join('');
+        if (cur && syms.includes(cur)) sel.value = cur;
+      } catch (_) {}
+    }
+
+    async function loadList() {
+      const sym = document.getElementById('filter-symbol').value;
+      let url;
+      if (currentStatus === 'approved_wait') {
+        url = `/api/proposals?status=approved&execution_phase=approved_wait&limit=100` + (sym ? `&symbol=${sym}` : '');
+      } else {
+        url = `/api/proposals?status=${currentStatus}&limit=100` + (sym ? `&symbol=${sym}` : '');
+      }
+      const res = await fetch(url);
+      const data = await res.json();
+      const list = document.getElementById('list');
+      if (!data.proposals || !data.proposals.length) {
+        list.innerHTML = '<div class="empty">暂无建议</div>';
+        return;
+      }
+      list.innerHTML = data.proposals.map(p => cardHtml(p, currentStatus === 'approved_wait' ? 'approved_wait' : currentStatus)).join('');
+      list.querySelectorAll('[data-decision]').forEach(btn => {
+        btn.addEventListener('click', () => decide(btn.dataset.id, btn.dataset.decision, btn));
+      });
+      list.querySelectorAll('[data-cancel]').forEach(btn => {
+        btn.addEventListener('click', () => cancelApproved(btn.dataset.id, btn));
+      });
+    }
+
+    async function loadBadge() {
+      try {
+        const res = await fetch('/api/proposals?status=pending&limit=200');
+        const data = await res.json();
+        document.getElementById('badge-pending').textContent = data.count || 0;
+      } catch (_) {}
+    }
+
+    async function cancelApproved(id, btn) {
+      if (!confirm('确认【取消批准】？\n引擎将停止跟踪该建议的回踩条件，不会自动下单。')) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/proposals/${id}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approver: 'operator' }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '取消失败');
+        showToast(`${data.proposal.symbol} 已取消批准`);
+        await loadList();
+        await loadBadge();
+      } catch (e) {
+        showToast('❌ ' + e.message);
+        btn.disabled = false;
+      }
+    }
+
+    async function decide(id, decision, btn) {
+      // 仅两种处理：批准 / 驳回，各一次确认
+      if (decision === 'approved_live') {
+        if (!confirm('确认【批准】该建议？\n批准后进入等待回踩，reclaim 条件满足后引擎自动下单。')) return;
+      } else if (decision === 'rejected') {
+        if (!confirm('确认【驳回】该建议？')) return;
+      }
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/proposals/${id}/decision`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ decision, approver: 'operator', comment: '' }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '审批失败');
+        const label = decision === 'approved_live' ? '已批准（等待回踩）' : '已驳回';
+        showToast(`${data.proposal.symbol} ${label}`);
+        await loadList();
+        await loadBadge();
+      } catch (e) {
+        showToast('❌ ' + e.message);
+        btn.disabled = false;
+      }
+    }
+
+    document.querySelectorAll('.tabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentStatus = btn.dataset.status;
+        loadList();
+      });
+    });
+    document.getElementById('filter-symbol').addEventListener('change', loadList);
+    document.getElementById('btn-refresh').addEventListener('click', () => { loadList(); loadBadge(); });
+
+    function connectWs() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}`);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.channel === 'proposal:update') {
+            loadBadge();
+            if (window.StatusBar) StatusBar.refresh();
+            if (currentStatus === 'pending' || currentStatus === 'approved_wait' ||
+                currentStatus === 'approved' ||
+                msg.data?.event === 'executed' || msg.data?.event === 'reclaim_ready' ||
+                msg.data?.event === 'reclaim_failed' || msg.data?.event === 'cancelled') loadList();
+            const d = msg.data || {};
+            if (d.event && d.event !== 'executed') {
+              showToast(`新建议事件: ${d.symbol} ${d.event}`);
+            }
+          }
+        } catch (_) {}
+      };
+      ws.onclose = () => setTimeout(connectWs, 3000);
+    }
+
+    loadSymbolOptions().then(() => {
+      loadList();
+      loadBadge();
+    });
+    connectWs();
+  </script>
+</body>
+</html>

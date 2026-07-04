@@ -63,8 +63,8 @@ python main.py
 # 回测
 python main.py --mode backtest
 
-# 前端
-cd frontend && node server.js
+# 前端（项目根目录）
+node frontend/server.js
 ```
 
 > [!IMPORTANT]
@@ -75,7 +75,7 @@ cd frontend && node server.js
 > # 重启引擎（前后端都重启时）
 > pkill -f "python main.py"; pkill -f "node server.js"
 > cd /Users/weiweiwang/testcode/nautilus_ibkr_helloworld && python main.py > /tmp/engine.log 2>&1 &
-> cd frontend && node server.js > /tmp/frontend.log 2>&1 &
+> node frontend/server.js > /tmp/frontend.log 2>&1 &
 > ```
 
 

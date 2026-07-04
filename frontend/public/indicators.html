@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>指标积分排行 — Trading Dashboard</title>
+    <link rel="stylesheet" href="/shared/status-bar.css">
     <style>
         * {
             margin: 0;
@@ -57,6 +58,20 @@
             background: rgba(41, 98, 255, .15);
             color: #2962ff;
         }
+
+        .ind-alpha-pill {
+            display: inline-block;
+            margin-left: 4px;
+            font-size: 9px;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-weight: 600;
+            vertical-align: middle;
+        }
+
+        .ip-pending { background: rgba(239,83,80,.2); color: #ef5350; }
+        .ip-wait { background: rgba(41,98,255,.2); color: #2962ff; }
+        .ip-ready { background: rgba(38,166,154,.2); color: #26a69a; }
 
         /* ── 六表并排布局 ── */
         #main {
@@ -253,14 +268,7 @@
 
 <body>
 
-    <div id="nav">
-        <h1>📈 Trading Dashboard</h1>
-        <div class="nav-links">
-            <a href="/">单图</a>
-            <a href="/multi.html">⊞ 四图</a>
-            <a href="/indicators.html" class="active">📊 积分</a>
-        </div>
-    </div>
+    <div id="status-bar-root"></div>
 
     <div id="main">
         <!-- 动量背离（原动量窗口位置） -->
@@ -427,7 +435,16 @@
 
     </div>
 
+    <script src="/shared/status-bar.js"></script>
+    <script src="/shared/alpha-pills.js"></script>
     <script>
+        StatusBar.mount('status-bar-root', 'indicators');
+        StatusBar.startPolling(15000, async (snap) => {
+            if (window.AlphaPills) {
+                await AlphaPills.refresh(snap);
+                AlphaPills.patchTable();
+            }
+        });
         const REFRESH_MS = 10_000;
 
         // ET fake-UTC 秒 → "HH:MM ET" 字符串
@@ -465,7 +482,7 @@
             return `
         <tr class="${cls}">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${color}">${sign}${score}</span>
             <div class="bar-bg">
@@ -485,7 +502,7 @@
             return `
         <tr class="${cls}">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${color}">${val}</span>
             <div class="bar-bg">
@@ -565,7 +582,7 @@
             return `
         <tr class="${rowCls}">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${color}">${sign}${score}</span>
             <div class="bar-bg">
@@ -598,7 +615,7 @@
             return `
         <tr style="${cfg.bg ? 'background:' + cfg.bg + ';' : ''}border-top:1px solid #2a2e3944">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${scoreColor}">${display}</span>
             <div class="bar-bg">
@@ -631,7 +648,7 @@
             return `
         <tr class="${cls}">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${color}">${display}</span>
             <div class="bar-bg">
@@ -659,7 +676,7 @@
             return `
         <tr class="${cls}">
           <td><span class="rank">${rank}</span></td>
-          <td><a href="/?symbol=${sym}" class="sym">${sym}</a></td>
+          <td>${window.AlphaPills ? AlphaPills.symCell(sym) : `<a href="/multi.html" class="sym">${sym}</a>`}</td>
           <td class="right">
             <span class="score" style="color:${color}">${display}</span>
             <div class="bar-bg">
@@ -737,7 +754,7 @@
                 document.getElementById('ct-ema').textContent = tm5;
                 document.getElementById('ct-nh').textContent  = tm5;
 
-                const now = new Date();
+                if (window.AlphaPills) AlphaPills.patchTable();
             } catch (e) {
                 ['tbody-m1', 'tbody-m5', 'tbody-ema'].forEach(id => {
                     document.getElementById(id).innerHTML =
@@ -747,14 +764,26 @@
         }
 
         function connectWS() {
-            const ws = new WebSocket('ws://localhost:3000');
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            const ws = new WebSocket(`${proto}://${location.host}`);
             ws.onmessage = ({ data }) => {
                 const { channel } = JSON.parse(data);
                 if (channel.startsWith('kline:1m:') && !channel.includes('tick')) loadData();
+                if (channel === 'proposal:update') {
+                    if (window.StatusBar && window.AlphaPills) {
+                        StatusBar.refresh()
+                            .then((snap) => AlphaPills.refresh(snap))
+                            .then(() => loadData());
+                    } else {
+                        loadData();
+                    }
+                    return;
+                }
             };
             ws.onclose = () => setTimeout(connectWS, 3000);
         }
 
+        // startPolling 首拍已触发 AlphaPills.refresh + patchTable，无需再单独 StatusBar.refresh
         loadData();
         setInterval(loadData, REFRESH_MS);
         connectWS();

@@ -22,6 +22,7 @@ import json
 import os
 import queue
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -29,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import redis as _redis
 
-from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
+from nautilus_trader.indicators import AverageTrueRange, DoubleExponentialMovingAverage, ExponentialMovingAverage
 from nautilus_trader.indicators.averages import MovingAverageType
 
 from nautilus_trader.config import StrategyConfig
@@ -39,13 +40,16 @@ from nautilus_trader.model.enums import (
 )
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
-from events import BarCollectedEvent, BarCollectedM5Event
+from events import BarCollectedEvent, BarCollectedM5Event, BarsHistoryFlushedEvent
 
 
 # ── Redis 配置 ────────────────────────────────────────────────────────────
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 MAX_BARS   = 500   # Redis 每个 key 保留最大根数
+# 图表展示：盘前最后 30 分钟（09:00–09:30 ET）+ RTH（09:30–16:00）
+PREMARKET_CHART_START_ET_SEC = 9 * 3600
+RTH_OPEN_ET_SEC = 9 * 3600 + 30 * 60
 
 # FA 子账户 ID（如 "DU123456"），留空则使用 FA 主账户聚合数据
 FA_ACCOUNT_ID = os.environ.get("IB_FA_ACCOUNT_ID", "")
@@ -59,9 +63,9 @@ FA_GROUP = os.environ.get("IB_FA_GROUP", "dt_test")
 # ============================================================
 class _STState:
     """
-    SuperTrend 在线状态机。
-    ATR 使用鹦鹉螺内置 AverageTrueRange(WILDER)，与 data_feeder.py 的
-    Wilder's RMA 计算方式一致。Band 收紧逻辑与 data_feeder.py 完全对齐。
+    SuperTrend 在线状态机（与 TradingView ta.supertrend 转向规则对齐）。
+    ATR 使用鹦鹉螺内置 AverageTrueRange(WILDER)。
+    转向判定：收盘价 vs 上一根 K 线的 band（非当根收紧后的 band）。
     """
 
     def __init__(self, period: int = 10, mult: float = 3.5):
@@ -72,6 +76,7 @@ class _STState:
         self._prev_close:   float = 0.0
         self._prev_upper_b: float = 0.0
         self._prev_lower_b: float = 0.0
+        self._prev_st_val:  float = 0.0   # 上一根 K 线收盘时的 ST 线（图上那条线）
         # TradingView 初始 direction=1 → ST=upperBand（空头），
         # 我们的约定 -1=空头，与 TV 保持一致
         self._prev_dir:     int   = -1
@@ -92,6 +97,10 @@ class _STState:
         basic_upper = hl2 + self.mult * atr
         basic_lower = hl2 - self.mult * atr
 
+        # 保存上一根 ST 线（转向判断必须用这根，不能用当根收紧后的 band）
+        flip_upper = self._prev_upper_b
+        flip_lower = self._prev_lower_b
+
         if not self._initialized:
             # 第一次 ATR 有效：初始化 band
             upper_b = basic_upper
@@ -102,21 +111,21 @@ class _STState:
             prev_lower = self._prev_lower_b
             prev_close = self._prev_close
 
-            # 与 data_feeder.py 完全一致的 band 收紧逻辑
-            # Upper band：只有 basic_upper 更小 OR 前收盘突破上轨 才允许重置
+            # 与 TradingView 一致的 band 收紧逻辑
             upper_b = basic_upper if (
                 basic_upper < prev_upper or prev_close > prev_upper
             ) else prev_upper
 
-            # Lower band：只有 basic_lower 更大 OR 前收盘跌破下轨 才允许重置
             lower_b = basic_lower if (
                 basic_lower > prev_lower or prev_close < prev_lower
             ) else prev_lower
 
-        # 方向判断（与 data_feeder.py 一致）
-        if self._prev_dir == -1 and c > upper_b:
+        # 转向：收盘价 vs 上一根 K 线的 band（TV: finalBand[1]），非当根 band
+        # 多头时 ST 在下轨 → 翻空须 close < 上一根 lower band（即上一根 ST 值）
+        # 空头时 ST 在上轨 → 翻多须 close > 上一根 upper band
+        if self._prev_dir == -1 and c > flip_upper:
             st_dir = 1
-        elif self._prev_dir == 1 and c < lower_b:
+        elif self._prev_dir == 1 and c < flip_lower:
             st_dir = -1
         else:
             st_dir = self._prev_dir
@@ -126,6 +135,7 @@ class _STState:
         self._prev_close   = c
         self._prev_upper_b = upper_b
         self._prev_lower_b = lower_b
+        self._prev_st_val  = st_val
         self._prev_dir     = st_dir
         return round(st_val, 4), st_dir, round(upper_b, 4), round(lower_b, 4)
 
@@ -195,6 +205,54 @@ class _EMAState:
 
 
 # ============================================================
+# 工具类 2c：Session VWAP（M1 增量，RTH 日切 reset）
+# ============================================================
+class _SessionVWAPState:
+    """Session VWAP = Σ(typical_price × volume) / Σ(volume)，新交易日 reset。"""
+
+    def __init__(self) -> None:
+        self._date: Optional[str] = None
+        self._pv = 0.0
+        self._vol = 0.0
+
+    def reset(self) -> None:
+        self._date = None
+        self._pv = 0.0
+        self._vol = 0.0
+
+    def update(
+        self, session_date: str, high: float, low: float, close: float, volume: int,
+    ) -> Optional[float]:
+        if self._date != session_date:
+            self._date = session_date
+            self._pv = 0.0
+            self._vol = 0.0
+        if volume <= 0:
+            # IBKR 偶发 volume=0：不纳入累计，避免 v=1 虚假权重拉歪 VWAP
+            if self._vol > 0:
+                return round(self._pv / self._vol, 4)
+            return None
+        tp = (high + low + close) / 3.0
+        self._pv += tp * float(volume)
+        self._vol += float(volume)
+        return round(self._pv / self._vol, 4)
+
+
+# ============================================================
+# 工具类 2d：DEMA(M5) — 鹦鹉螺内置 DoubleExponentialMovingAverage
+# ============================================================
+class _DEMA20State:
+    def __init__(self, period: int = 20) -> None:
+        self._dema = DoubleExponentialMovingAverage(period)
+
+    def update(self, close: float) -> Optional[float]:
+        self._dema.update_raw(close)
+        if not self._dema.initialized:
+            return None
+        return round(self._dema.value, 4)
+
+
+# ============================================================
 # 工具类 3：M5 K 线实时聚合
 # ============================================================
 class _M5Bucket:
@@ -218,7 +276,11 @@ class _M5Bucket:
             self._cur_bucket = bucket
             self._bars = []
 
-        self._bars.append(bar)
+        # 同一分钟修订（IBKR 重复推送）：替换而非追加，避免 M5 OHLC/ST 双喂
+        if self._bars and self._bars[-1]["time"] == bar["time"]:
+            self._bars[-1] = bar
+        else:
+            self._bars.append(bar)
         return out   # 旧 bucket 完成时输出，None 表示当前 bucket 还在累积
 
     def _flush(self) -> dict:
@@ -267,9 +329,10 @@ class BarLoggerStrategyConfig(StrategyConfig, frozen=True):
     instrument_ids: tuple[str, ...] = ()
     bar_step:       int   = 1
     st_period:      int   = 10
-    st_mult:        float = 3.5    # M1 ST 乘数
-    st_mult_m5:     float = 3.0    # M5 ST 乘数（更敏感，与 TradingView 默认对齐）
+    st_mult:        float = 3.0    # M1 ST 乘数（与超级信号 st_super 一致）
+    st_mult_m5:     float = 3.5    # M5 ST 乘数（定方向，与超级信号一致）
     ema_period:     int   = 21
+    dema_period_m5: int   = 20   # M5 DEMA 周期
     history_days:   int   = 1
     backtest_mode:  bool  = False
     backtest_date:  str   = ""
@@ -314,6 +377,10 @@ class BarLoggerStrategy(Strategy):
         # 每个标的 M1 ATR（14周期 Wilder，按 M1 bar 更新，供 mom_atr 使用）
         self._atr_m1: dict[str, AverageTrueRange] = {}
 
+        # Session VWAP（M1 更新）/ DEMA20（M5 更新）
+        self._vwap: dict[str, _SessionVWAPState] = {}
+        self._dema20_m5: dict[str, _DEMA20State] = {}
+
         # 历史 bar 缓冲（按标的聚合， flush 时一次性覆盖写入 Redis）
         self._hist_m1: dict[str, list[dict]] = defaultdict(list)
         self._hist_m5: dict[str, list[dict]] = defaultdict(list)  # M5 单独缓冲
@@ -326,6 +393,11 @@ class BarLoggerStrategy(Strategy):
 
         # 日K 缓冲（每个标的，合并后取倒数第二根即是昨日）
         self._hist_daily: dict[str, list[dict]] = defaultdict(list)
+
+        # 盘前锚定（开盘突破策略）：最后一根盘前 M1 / M5
+        self._premarket_last_m1: dict[str, dict] = {}
+        self._premarket_last_m5: dict[str, dict] = {}
+        self._premarket_ref_date: dict[str, str] = {}
 
     # ── 解析所有订阅合约 ────────────────────────────────────────────────
     def _all_instrument_ids(self) -> list[InstrumentId]:
@@ -356,6 +428,168 @@ class BarLoggerStrategy(Strategy):
         dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
         et_minutes = dt.hour * 60 + dt.minute
         return (9 * 60 + 30) <= et_minutes < (16 * 60)   # [09:30, 16:00)
+
+    @staticmethod
+    def _is_premarket_chart_et(et_fake_utc: int) -> bool:
+        """盘前图表窗口：开盘前 30 分钟（09:00–09:30 ET）。"""
+        if BarLoggerStrategy._is_rth(et_fake_utc):
+            return False
+        from datetime import timezone as _tz
+        dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
+        sec = dt.hour * 3600 + dt.minute * 60 + dt.second
+        return PREMARKET_CHART_START_ET_SEC <= sec < RTH_OPEN_ET_SEC
+
+    @staticmethod
+    def _is_chart_et(et_fake_utc: int) -> bool:
+        """应写入 Redis / 前端图表的 K 线时段。"""
+        return (
+            BarLoggerStrategy._is_rth(et_fake_utc)
+            or BarLoggerStrategy._is_premarket_chart_et(et_fake_utc)
+        )
+
+    @staticmethod
+    def _is_premarket_et(et_fake_utc: int) -> bool:
+        """盘前时段（< 09:30 ET），与 _is_rth 互斥。"""
+        if BarLoggerStrategy._is_rth(et_fake_utc):
+            return False
+        from datetime import timezone as _tz
+        dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
+        return dt.hour * 60 + dt.minute < 9 * 60 + 30
+
+    def _session_date_from_et(self, et_fake_utc: int) -> str:
+        from datetime import timezone as _tz
+        dt = datetime.fromtimestamp(et_fake_utc, tz=_tz.utc)
+        return dt.strftime("%Y-%m-%d")
+
+    def _capture_premarket_from_hist(self, sym: str) -> None:
+        """历史 flush 后：从缓冲中取最后一根盘前 M1/M5，写入 premarket:ref。"""
+        if not self._premarket_last_m1.get(sym):
+            for b in reversed(self._hist_m1.get(sym, [])):
+                if self._is_premarket_et(b["time"]):
+                    self._premarket_last_m1[sym] = b
+                    break
+        if not self._premarket_last_m5.get(sym):
+            for b in reversed(self._hist_m5.get(sym, [])):
+                if self._is_premarket_et(b["time"]):
+                    self._premarket_last_m5[sym] = b
+                    break
+        session_date = self._today_et_date
+        if not session_date and self._premarket_last_m1.get(sym):
+            session_date = self._session_date_from_et(int(self._premarket_last_m1[sym]["time"]))
+        if session_date:
+            self._write_premarket_ref(sym, session_date)
+
+    def _write_premarket_ref(self, sym: str, session_date: str) -> None:
+        """盘前锚定 → Redis premarket:ref:{sym}（开盘突破策略用）。"""
+        m1 = self._resolve_last_premarket_m1(sym)
+        m5 = self._resolve_last_premarket_m5(sym)
+        if not m1 or not m5:
+            self.log.warning(f"[PremarketRef] {sym}: 缺少盘前 M1/M5，跳过写入")
+            return
+        if self._premarket_ref_date.get(sym) == session_date:
+            return
+
+        st_dir = int(m5.get("st_dir") or 0)
+        m5_open, m5_close = float(m5["open"]), float(m5["close"])
+        m5_bull = m5_close > m5_open
+        m5_bear = m5_close < m5_open
+        payload = {
+            "symbol": sym,
+            "session_date": session_date,
+            "m1_anchor": {
+                "time": int(m1["time"]),
+                "open": float(m1["open"]),
+                "high": float(m1["high"]),
+                "low": float(m1["low"]),
+                "close": float(m1["close"]),
+            },
+            "m5_last": {
+                "time": int(m5["time"]),
+                "open": m5_open,
+                "high": float(m5["high"]),
+                "low": float(m5["low"]),
+                "close": m5_close,
+                "st_dir": st_dir,
+                "st_value": float(m5.get("st_value") or 0),
+            },
+            "armed_short": st_dir == -1 and m5_bear,
+            "armed_long": st_dir == 1 and m5_bull,
+            "ts": int(time.time()),
+        }
+        self._premarket_ref_date[sym] = session_date
+        if not self._redis:
+            return
+        try:
+            key = f"premarket:ref:{sym}"
+            self._redis.set(key, json.dumps(payload, ensure_ascii=False))
+            self._redis.publish(key, json.dumps(payload, ensure_ascii=False))
+            self.log.info(
+                f"[PremarketRef] {sym} {session_date}  "
+                f"anchor H={payload['m1_anchor']['high']:.2f} L={payload['m1_anchor']['low']:.2f}  "
+                f"armed↑={payload['armed_long']} ↓={payload['armed_short']}"
+            )
+        except Exception as e:
+            self.log.error(f"[PremarketRef] {sym}: Redis 写入失败: {e}")
+
+    def _resolve_last_premarket_m1(self, sym: str) -> Optional[dict]:
+        """最后一根盘前 M1（< 09:30 ET），优先内存，回退历史缓冲。"""
+        m1 = self._premarket_last_m1.get(sym)
+        if m1 and self._is_premarket_et(m1["time"]):
+            return m1
+        for b in reversed(self._hist_m1.get(sym, [])):
+            if self._is_premarket_et(b["time"]):
+                return b
+        return None
+
+    def _resolve_last_premarket_m5(self, sym: str) -> Optional[dict]:
+        m5 = self._premarket_last_m5.get(sym)
+        if m5 and self._is_premarket_et(m5["time"]):
+            return m5
+        for b in reversed(self._hist_m5.get(sym, [])):
+            if self._is_premarket_et(b["time"]):
+                return b
+        return None
+
+    def _apply_session_vwap(self, sym: str, bar: dict) -> Optional[float]:
+        """M1 收盘：增量 Session VWAP → 写入 bar['vwap']。"""
+        if sym not in self._vwap:
+            self._vwap[sym] = _SessionVWAPState()
+        session_date = self._session_date_from_et(int(bar["time"]))
+        vwap = self._vwap[sym].update(
+            session_date,
+            float(bar["high"]),
+            float(bar["low"]),
+            float(bar["close"]),
+            int(bar.get("volume") or 0),
+        )
+        if vwap is not None:
+            bar["vwap"] = vwap
+        return vwap
+
+    def _write_indicators_active(
+        self,
+        sym: str,
+        m5_bar_time: int,
+        st_val: float,
+        st_dir: int,
+        dema20: Optional[float],
+    ) -> None:
+        """M5 收盘：写入冻结水平线 indicators:active:{sym}。"""
+        if not self._redis:
+            return
+        payload = {
+            "m5_bar_time": m5_bar_time,
+            "supertrend": {"value": st_val, "dir": st_dir},
+            "dema20": dema20,
+            "updated_at": int(time.time()),
+        }
+        try:
+            self._redis.set(
+                f"indicators:active:{sym}",
+                json.dumps(payload, ensure_ascii=False),
+            )
+        except Exception as e:
+            self.log.warning(f"[M5] {sym}: indicators:active 写入失败: {e}")
 
     def _push_ema_diff_int(self, sym: str, ema9: float | None, ema21: float | None) -> float | None:
         """向滑动窗口追加 (EMA9-EMA21) 并计算归一化积分。
@@ -495,6 +729,8 @@ class BarLoggerStrategy(Strategy):
                 self._mom_m5[sym]      = _MomentumATRState()
                 self._atr_m1[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)  # M1 ATR 供动量窗口使用
                 self._m5_bucket[sym]   = _M5Bucket()
+                self._vwap[sym]        = _SessionVWAPState()
+                self._dema20_m5[sym]   = _DEMA20State()
                 self.log.info(f"[Strategy][Async] {sym}: 状态机初始化完成")
 
             # 构造 BarType 并请求历史数据
@@ -681,6 +917,19 @@ class BarLoggerStrategy(Strategy):
             self.log.debug(f"[HIST] {sym}: 跳过盘后 bar time={et}")
             return
 
+        # flush 后：仅增量写 Redis（poll 回放），不得先喂 VWAP/ST 再在去重处 return
+        if self._hist_flushed.get(sym):
+            if self._is_chart_et(et):
+                self._inc_update_redis(sym, {
+                    "time": et,
+                    "open": round(o, 4),
+                    "high": round(h, 4),
+                    "low": round(lo, 4),
+                    "close": round(c, 4),
+                    "volume": v,
+                })
+            return
+
         n = len(self._hist_m1[sym])   # 当前已缓冲数量
         if n == 0:
             self.log.info(
@@ -708,11 +957,11 @@ class BarLoggerStrategy(Strategy):
             "st_upper": st_up,
             "st_lower": st_lo,
         }
+        if self._is_rth(et):
+            self._apply_session_vwap(sym, bar_dict)
         self._hist_m1[sym].append(bar_dict)
-
-        # ──【增量更新】如果初始历史已刷完，则后续进来的历史 bar 直接更新 Redis（用于轮询模式） ──
-        if self._hist_flushed.get(sym):
-            self._inc_update_redis(sym, bar_dict)
+        if self._is_premarket_et(et):
+            self._premarket_last_m1[sym] = bar_dict
 
         # 每 50 根打一次进度日志
         n += 1
@@ -724,49 +973,21 @@ class BarLoggerStrategy(Strategy):
                 f"[HIST] {sym}: 已缓冲 {n} 根  C={c:.2f}  EMA 预热中({self.config.ema_period}期)"
             )
 
-        # M5 聚合（历史模式：不写 Redis，存内存缓冲，等 flush 时一次性覆盖写入）
+        # M5 聚合（历史预热：仅内存，flush 时批量写 Redis）
         m5_out = self._m5_bucket[sym].push(bar_dict)
         if m5_out:
-            # 计算 M5 指标，但不写 Redis
-            o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
-            if sym not in self._st_m5:
-                self._st_m5[sym]       = _STState(self.config.st_period, self.config.st_mult_m5)
-                self._ema_m5[sym]      = _EMAState(self.config.ema_period)
-                self._ema9_m5[sym]     = _EMAState(9)
-                self._atr_m5[sym]      = AverageTrueRange(14, MovingAverageType.WILDER)
-                self._ema_diff_win[sym] = []
-                self._mom_m5[sym]      = _MomentumATRState()
-            if sym not in self._mom_m5:
-                self._mom_m5[sym] = _MomentumATRState()
-            if sym not in self._atr_m1:
-                self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
-            st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
-            ema21_5 = self._ema_m5[sym].update(c5)
-            ema9_5  = self._ema9_m5[sym].update(c5)
-            # 更新 M5 ATR
-            self._atr_m5[sym].update_raw(h5, lo5, c5)
-            # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
-            ema_diff_int = self._push_ema_diff_int(sym, ema9_5, ema21_5)
-            # 获取当前 M1 ATR 值（已按每根 M1 bar 更新）
-            m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
-            mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val)
-            m5_bar = {
-                **m5_out,
-                "ema21":        ema21_5,
-                "ema9":         ema9_5,         # EMA9 on M5（供前端分类判断）
-                "st_value":     st_val5,
-                "st_dir":       st_dir5,
-                "st_upper":     st_up5,
-                "st_lower":     st_lo5,
-                "mom_atr":      mom_atr5,
-                "ema_diff_int": ema_diff_int,  # 30分钟EMA差值积分 / M5_ATR14
-            }
-            self._hist_m5[sym].append(m5_bar)
-            self.log.debug(
-                f"[HIST-M5] {sym}: 缓冲 M5 bar  "
-                f"time={m5_out['time']}  C={c5:.2f}  "
-                f"ST={st_val5:.2f}({'↑' if st_dir5==1 else '↓'})"
+            m5_bar = self._process_m5_bar(
+                sym, m5_out, publish=False, write_redis=False, update_active=True,
             )
+            if m5_bar:
+                self._hist_m5[sym].append(m5_bar)
+                if self._is_premarket_et(m5_bar["time"]):
+                    self._premarket_last_m5[sym] = m5_bar
+                self.log.debug(
+                    f"[HIST-M5] {sym}: 缓冲 M5 bar  "
+                    f"time={m5_out['time']}  C={m5_out['close']:.2f}  "
+                    f"ST={m5_bar['st_value']:.2f}({'↑' if m5_bar['st_dir']==1 else '↓'})"
+                )
 
     def _flush_history_for(self, sym: str) -> None:
         """
@@ -795,17 +1016,23 @@ class BarLoggerStrategy(Strategy):
             if not self._redis:
                 self.log.warning(f"[FLUSH] {sym}: ⚠ Redis 不可用，跳过写入")
             else:
-                # ── 步骤1：写入 M1 历史 K 线（仅 RTH：09:30-16:00 ET）────
-                # 盘前数据已用于指标预热（on_historical_data），此处只写正式交易时段
-                rth_m1 = [b for b in bars if self._is_rth(b["time"])]
+                # ── 步骤1：写入 M1 历史 K 线（盘前30分 + RTH）────
+                chart_m1 = [b for b in bars if self._is_chart_et(b["time"])]
+                pm_chart_n = sum(1 for b in chart_m1 if self._is_premarket_chart_et(b["time"]))
+                rth_n = len(chart_m1) - pm_chart_n
                 self.log.info(
-                    f"[FLUSH] {sym}: 过滤 RTH  "
-                    f"总缓冲={len(bars)} 根  RTH={len(rth_m1)} 根  "
-                    f"盘前={len(bars)-len(rth_m1)} 根（已用于指标预热，不写图表）"
+                    f"[FLUSH] {sym}: 过滤图表时段  "
+                    f"总缓冲={len(bars)} 根  盘前30分={pm_chart_n}  RTH={rth_n}  "
+                    f"更早盘前={len(bars)-len(chart_m1)} 根（仅指标预热）"
                 )
                 try:
                     key_m1 = f"bars:1m:{sym}"
-                    written = rth_m1[-MAX_BARS:]
+                    written = []
+                    for b in chart_m1[-MAX_BARS:]:
+                        row = dict(b)
+                        if self._is_premarket_chart_et(b["time"]):
+                            row["premarket"] = True
+                        written.append(row)
                     # 切换为 Redis List 结构
                     self._redis.delete(key_m1)
                     if written:
@@ -847,21 +1074,28 @@ class BarLoggerStrategy(Strategy):
                     })
                     self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket（仅展示）  C={c5:.2f}  EMA21={ema21_5}")
 
-                # ── 步骤3：整体覆盖写入 M5 历史 K 线（仅 RTH）────────────
-                rth_m5 = [b for b in m5_bars if self._is_rth(b["time"])]
+                # ── 步骤3：整体覆盖写入 M5 历史 K 线（盘前30分 + RTH）────────────
+                chart_m5 = [b for b in m5_bars if self._is_chart_et(b["time"])]
                 key_m5 = f"bars:5m:{sym}"
-                written_m5 = rth_m5[-MAX_BARS:]
+                written_m5 = []
+                for b in chart_m5[-MAX_BARS:]:
+                    row = dict(b)
+                    if self._is_premarket_chart_et(b["time"]):
+                        row["premarket"] = True
+                    written_m5.append(row)
                 try:
                     self._redis.delete(key_m5)
                     if written_m5:
                         self._redis.rpush(key_m5, *[json.dumps(b) for b in written_m5])
                     self.log.info(
                         f"[FLUSH] {sym}: ✓ bars:5m 覆盖写入完成  "
-                        f"RTH={len(rth_m5)} 根"
+                        f"图表={len(chart_m5)} 根"
                         + (f"  最新 C={written_m5[-1]['close']}" if written_m5 else "")
                     )
                 except Exception as e:
                     self.log.error(f"[FLUSH] {sym}: ✗ bars:5m Redis 写入失败: {e}")
+
+        self._capture_premarket_from_hist(sym)
 
         # ── 步骤4：订阅实时 K 线（仅实盘模式）──────────────────────────
         if self.config.backtest_mode:
@@ -875,6 +1109,11 @@ class BarLoggerStrategy(Strategy):
                 self._schedule_poll(sym)
             else:
                 self.log.error(f"[FLUSH] {sym}: ✗ 无法订阅实时")
+
+        self.msgbus.publish(
+            "bars.history.flushed",
+            BarsHistoryFlushedEvent(sym, self._today_et_date or ""),
+        )
 
     def _schedule_poll(self, sym: str) -> None:
         """安排下一次历史数据轮询（60s 后）"""
@@ -896,53 +1135,64 @@ class BarLoggerStrategy(Strategy):
         self._schedule_poll(sym)
 
     def _inc_update_redis(self, sym: str, bar_dict: dict) -> None:
-        """增量更新 Redis（去重 + M1 写入 + M5 聚合 + PUBLISH），仅 RTH 正市数据"""
-        if not self._redis: return
-        # 盘后 bar（≥16:00 ET）：不写 Redis，不影响指标
-        RTH_CLOSE = 16 * 3600
-        if bar_dict["time"] % 86400 >= RTH_CLOSE:
+        """增量更新 Redis（去重优先 → 再算指标 → M1 写入 + M5 聚合），盘前30分 + RTH。"""
+        if not self._redis:
+            return
+        et = int(bar_dict["time"])
+        sec = et % 86400
+        if sec >= 16 * 3600:
+            return
+        if not self._is_chart_et(et):
             return
         try:
             key_m1 = f"bars:1m:{sym}"
-            # 1. 去重检查：只处理比 Redis 中最后一根更晚的 bar
             last_json = self._redis.execute_command("LINDEX", key_m1, -1)
             if last_json:
                 last_bar = json.loads(last_json)
                 if bar_dict["time"] <= last_bar["time"]:
-                    return  # 已存在
+                    return
 
-            # 2. 写入 M1
-            data_json = json.dumps(bar_dict)
+            o = float(bar_dict["open"])
+            h = float(bar_dict["high"])
+            lo = float(bar_dict["low"])
+            c = float(bar_dict["close"])
+            v = int(bar_dict.get("volume") or 0)
+
+            if sym not in self._st_m1:
+                self._st_m1[sym] = _STState(self.config.st_period, self.config.st_mult)
+                self._ema_m1[sym] = _EMAState(self.config.ema_period)
+                self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
+
+            st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
+            ema21 = self._ema_m1[sym].update(c)
+            if sym in self._atr_m1:
+                self._atr_m1[sym].update_raw(h, lo, c)
+
+            enriched = {
+                **bar_dict,
+                "symbol": sym,
+                "ema21": ema21,
+                "st_value": st_val,
+                "st_dir": st_dir,
+                "st_upper": st_up,
+                "st_lower": st_lo,
+            }
+            if self._is_rth(et):
+                self._apply_session_vwap(sym, enriched)
+            elif self._is_premarket_chart_et(et):
+                enriched["premarket"] = True
+
+            data_json = json.dumps(enriched)
             self._redis.rpush(key_m1, data_json)
             self._redis.ltrim(key_m1, -MAX_BARS, -1)
             self._redis.publish(f"kline:1m:{sym}", data_json)
-            self.log.info(f"[INC-UPDATE] {sym}: M1 增量更新 (Time={bar_dict['time']} C={bar_dict['close']})")
+            self.log.info(
+                f"[INC-UPDATE] {sym}: M1 增量更新 (Time={et} C={c} vwap={enriched.get('vwap')})"
+            )
 
-            # 3. 驱动 M5 聚合
-            m5_out = self._m5_bucket[sym].push(bar_dict)
+            m5_out = self._m5_bucket[sym].push(enriched)
             if m5_out:
-                o5, h5, lo5, c5 = m5_out["open"], m5_out["high"], m5_out["low"], m5_out["close"]
-                st_val5, st_dir5, st_up5, st_lo5 = self._st_m5[sym].update(o5, h5, lo5, c5)
-                ema21_5 = self._ema_m5[sym].update(c5)
-                ema9_5  = self._ema9_m5[sym].update(c5) if sym in self._ema9_m5 else None
-                # 更新 M5 ATR
-                if sym in self._atr_m5:
-                    self._atr_m5[sym].update_raw(h5, lo5, c5)
-                # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
-                ema_diff_int5 = self._push_ema_diff_int(sym, ema9_5, ema21_5)
-                m1_atr_val = self._atr_m1[sym].value if sym in self._atr_m1 and self._atr_m1[sym].initialized else None
-                mom_atr5 = self._mom_m5[sym].update(o5, c5, m1_atr_val) if sym in self._mom_m5 else None
-                m5_bar = {
-                    **m5_out, "symbol": sym, "ema21": ema21_5, "ema9": ema9_5,
-                    "st_value": st_val5, "st_dir": st_dir5, "st_upper": st_up5, "st_lower": st_lo5,
-                    "mom_atr": mom_atr5, "ema_diff_int": ema_diff_int5,
-                }
-                m5_json = json.dumps(m5_bar)
-                key_m5 = f"bars:5m:{sym}"
-                self._redis.rpush(key_m5, m5_json)
-                self._redis.ltrim(key_m5, -MAX_BARS, -1)
-                self._redis.publish(f"kline:5m:{sym}", m5_json)
-                self.log.info(f"[INC-UPDATE] {sym}: M5 聚合完成 (C={c5:.2f})")
+                self._process_m5_bar(sym, m5_out, publish=True)
         except Exception as e:
             self.log.error(f"[INC-UPDATE] {sym}: 失败 - {e}")
 
@@ -971,17 +1221,13 @@ class BarLoggerStrategy(Strategy):
                 )
                 return
 
-        # ─ RTH 过滤 ──────────────────────────────────────────────────────
-        # 对盘前（<09:30 ET）：更新指标状态机（预热）但不写 Redis，不显示在图表
-        # 对盘后（≥16:00 ET）：完全跳过（忽略）
-        is_rth      = self._is_rth(et)
-        is_premarket = not is_rth and (
-            datetime.fromtimestamp(et, tz=timezone.utc).hour * 60
-            + datetime.fromtimestamp(et, tz=timezone.utc).minute
-        ) < (9 * 60 + 30)
+        # ─ RTH / 盘前图表 过滤 ───────────────────────────────────────────
+        # 04:00–09:00：仅指标预热；09:00–09:30：写入 Redis 并展示；≥16:00：忽略
+        is_rth       = self._is_rth(et)
+        is_pm_chart  = self._is_premarket_chart_et(et)
+        is_premarket = self._is_premarket_et(et)
 
         if not is_rth and not is_premarket:
-            # 盘后 bar（≥16:00 ET）：完全跳过
             self.log.debug(
                 f"[BAR] {sym}: 跳过盘后 bar  "
                 f"et_hour={datetime.fromtimestamp(et, tz=timezone.utc).hour:02d}:"
@@ -1000,54 +1246,79 @@ class BarLoggerStrategy(Strategy):
 
         st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
         ema21 = self._ema_m1[sym].update(c)
-        # 更新 M1 ATR（供动量窗口使用）
         if sym in self._atr_m1:
             self._atr_m1[sym].update_raw(h, lo, c)
 
-        # 盘前 bar：指标已更新（继续预热），但不写 Redis / 不显示图表
-        if is_premarket:
-            self._cur_bar[sym] = None   # 清空 tick，避免盘前 tick 残留
+        # 更早盘前（04:00–09:00）：只预热指标，不写 Redis
+        if is_premarket and not is_pm_chart:
+            pre_dict = {
+                "time": et,
+                "open": round(o, 4),
+                "high": round(h, 4),
+                "low": round(lo, 4),
+                "close": round(c, 4),
+                "volume": v,
+                "ema21": ema21,
+                "st_value": st_val,
+                "st_dir": st_dir,
+            }
+            self._premarket_last_m1[sym] = pre_dict
+            if sym in self._m5_bucket:
+                m5_out = self._m5_bucket[sym].push(pre_dict)
+                if m5_out:
+                    m5_bar = self._process_m5_bar(sym, m5_out, publish=False, write_redis=False)
+                    if m5_bar:
+                        self._premarket_last_m5[sym] = m5_bar
+            self._cur_bar[sym] = None
             self.log.debug(
-                f"[BAR] {sym}: 盘前 bar 指标预热（不写 Redis）  "
-                f"C={c:.2f}  ST={st_val:.2f}"
+                f"[BAR] {sym}: 盘前预热（<09:00，不写 Redis）  C={c:.2f}  ST={st_val:.2f}"
             )
             return
 
+        if is_rth:
+            session_date = self._session_date_from_et(et)
+            if self._premarket_ref_date.get(sym) != session_date:
+                self._write_premarket_ref(sym, session_date)
+
         bar_dict = {
-            "symbol":   sym,    # 前端二次校验，防止数据串台
-            "time":     et,     # ET fake-UTC 秒级时间戳（bar 开始时刻）
+            "symbol":   sym,
+            "time":     et,
             "open":     round(o, 4),
             "high":     round(h, 4),
             "low":      round(lo, 4),
             "close":    round(c, 4),
             "volume":   v,
-            "ema21":    ema21,   # None 表示 EMA 尚未预热完成
-            "st_value": st_val,  # 0.0 表示 ATR 尚未预热
-            "st_dir":   st_dir,  # 1=多头 -1=空头
+            "ema21":    ema21,
+            "st_value": st_val,
+            "st_dir":   st_dir,
             "st_upper": st_up,
             "st_lower": st_lo,
         }
+        if is_rth:
+            self._apply_session_vwap(sym, bar_dict)
+        else:
+            bar_dict["premarket"] = True
+            self._premarket_last_m1[sym] = dict(bar_dict)
 
         # 实时 K 线日志
+        tag = "盘前" if is_pm_chart else "RTH"
         if ema21 is not None:
             self.log.info(
-                f"[BAR #{self._bar_count}] {sym}  "
+                f"[BAR #{self._bar_count}] {sym} [{tag}]  "
                 f"O={o:.2f} H={h:.2f} L={lo:.2f} C={c:.2f} V={v}  "
                 f"ST={st_val:.2f}({'↑' if st_dir==1 else '↓'})  "
                 f"ST_UP={st_up:.2f}  ST_LO={st_lo:.2f}  EMA21={ema21:.2f}"
             )
         else:
             self.log.info(
-                f"[BAR #{self._bar_count}] {sym}  "
+                f"[BAR #{self._bar_count}] {sym} [{tag}]  "
                 f"O={o:.2f} H={h:.2f} L={lo:.2f} C={c:.2f} V={v}  "
                 f"ST={st_val:.2f}({'↑' if st_dir==1 else '↓'})  "
                 f"EMA21=预热中"
             )
 
-        # ─ 清空 tick K 线（该分钟已收盘，下一根分钟事件到来时重新初始化）───
         self._cur_bar[sym] = None
 
-        # ─ M5 聚合（push 返回不为 None 表示一个 M5 bucket 已满）─────────
         if sym in self._m5_bucket:
             m5_out = self._m5_bucket[sym].push(bar_dict)
             if m5_out:
@@ -1055,9 +1326,10 @@ class BarLoggerStrategy(Strategy):
                     f"[BAR→M5] {sym}: M5 bucket 输出  "
                     f"time={m5_out['time']}  O={m5_out['open']:.2f} C={m5_out['close']:.2f}"
                 )
-                self._process_m5_bar(sym, m5_out, publish=True)
+                m5_bar = self._process_m5_bar(sym, m5_out, publish=True)
+                if m5_bar and is_pm_chart:
+                    self._premarket_last_m5[sym] = m5_bar
 
-        # ─ 写入 Redis + PUBLISH kline:1m:──────────────────────────────
         if not self._redis:
             self.log.warning(f"[BAR] {sym}: Redis 不可用，跳过写入")
             return
@@ -1065,12 +1337,10 @@ class BarLoggerStrategy(Strategy):
         key = f"bars:1m:{sym}"
         ch  = f"kline:1m:{sym}"
         try:
-            # 去重：与最后一根时间戳相同时替换（防止 IBKR 重复推送）
             last_json = self._redis.lindex(key, -1)
             if last_json:
                 last_bar = json.loads(last_json)
                 if last_bar["time"] == bar_dict["time"]:
-                    # 用 lset 替换末尾元素
                     self._redis.lset(key, -1, json.dumps(bar_dict))
                     self.log.debug(f"[BAR] {sym}: 替换重复时间戳 bar time={bar_dict['time']}")
                 else:
@@ -1078,7 +1348,6 @@ class BarLoggerStrategy(Strategy):
                     self._redis.ltrim(key, -MAX_BARS, -1)
             else:
                 self._redis.rpush(key, json.dumps(bar_dict))
-            # kline:1m: 事件通过 Redis PubSub 推送到 server.js，再由 WebSocket 广播到前端
             self._redis.publish(ch, json.dumps(bar_dict))
             self.log.debug(
                 f"[BAR] {sym}: ✓ Redis RPUSH bars:1m + PUBLISH {ch}"
@@ -1086,14 +1355,22 @@ class BarLoggerStrategy(Strategy):
         except Exception as e:
             self.log.error(f"[BAR] {sym}: ✗ Redis 写入失败: {e}")
 
-        # ★ 发布内部事件供 ExitManager 止盈逻辑使用（在 try 外面，不被 Redis 异常影响）
-        bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
-        self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
+        if is_rth:
+            bar_dict_with_id = {**bar_dict, "instrument_id": str(bar.bar_type.instrument_id)}
+            self.msgbus.publish("bar.collected", BarCollectedEvent(sym, bar_dict_with_id))
 
 
     # ── M5 处理（历史/实时共用）────────────────────────────────────────
-    def _process_m5_bar(self, sym: str, m5_raw: dict, publish: bool) -> None:
-        """计算 M5 指标并写 Redis（publish=True 时同时 PUBLISH WebSocket 事件）"""
+    def _process_m5_bar(
+        self,
+        sym: str,
+        m5_raw: dict,
+        publish: bool,
+        *,
+        write_redis: bool = True,
+        update_active: Optional[bool] = None,
+    ) -> Optional[dict]:
+        """计算 M5 指标；返回带指标的 m5_bar（历史缓冲用）。publish=True 时 PUBLISH + 内部事件。"""
         o, h, lo, c = m5_raw["open"], m5_raw["high"], m5_raw["low"], m5_raw["close"]
 
         if sym not in self._st_m5:
@@ -1110,9 +1387,13 @@ class BarLoggerStrategy(Strategy):
         if sym not in self._atr_m1:
             self._atr_m1[sym] = AverageTrueRange(14, MovingAverageType.WILDER)
 
+        if sym not in self._dema20_m5:
+            self._dema20_m5[sym] = _DEMA20State()
+
         st_val, st_dir, st_up, st_lo = self._st_m5[sym].update(o, h, lo, c)
         ema21_m5 = self._ema_m5[sym].update(c)
         ema9_m5  = self._ema9_m5[sym].update(c)
+        dema20_m5 = self._dema20_m5[sym].update(c)
         # 更新 M5 ATR
         self._atr_m5[sym].update_raw(h, lo, c)
         # 计算 ema_diff_int（公共方法，含窗口截断 + ATR 归一化）
@@ -1121,20 +1402,22 @@ class BarLoggerStrategy(Strategy):
         m1_atr_val = self._atr_m1[sym].value if self._atr_m1[sym].initialized else None
         mom_atr = self._mom_m5[sym].update(o, c, m1_atr_val)
 
-        # ─ 计算日内连续新高  ─────────────────────────────────────────────
-        today_str = self._today_et_date  # 'YYYY-MM-DD'
+        # ─ 计算日内连续新高（仅 RTH M5，盘前不计入）────────────────────
+        today_str = self._today_et_date
         nh = self._nh_state.get(sym)
-        if nh is None or nh["date"] != today_str:
-            # 新的一天（或首次）：从 bars 重算，避免重启导致状态丢失
-            nh = {"date": today_str, "day_high": c, "count": 1}
-        else:
-            if c > nh["day_high"]:
-                nh["day_high"] = c
-                nh["count"] += 1
+        if self._is_rth(m5_raw["time"]):
+            if nh is None or nh["date"] != today_str:
+                nh = {"date": today_str, "day_high": c, "count": 1}
             else:
-                nh["count"] = 0  # 跌破新高，清零
-        self._nh_state[sym] = nh
-        nh_score = nh["count"]
+                if c > nh["day_high"]:
+                    nh["day_high"] = c
+                    nh["count"] += 1
+                else:
+                    nh["count"] = 0
+            self._nh_state[sym] = nh
+            nh_score = nh["count"]
+        else:
+            nh_score = nh["count"] if nh and nh.get("date") == today_str else 0
 
         m5_bar = {
             **m5_raw,
@@ -1144,10 +1427,13 @@ class BarLoggerStrategy(Strategy):
             "st_dir":       st_dir,
             "st_upper":     st_up,
             "st_lower":     st_lo,
+            "dema20":       dema20_m5,
             "nh_score":     nh_score,     # 日内连续新高计数（跌破清零）
             "mom_atr":      mom_atr,      # 归一化动量窗口 = (C₀-C₋₂)/ATR₁₄
             "ema_diff_int": ema_diff_int, # 30分钟EMA差值积分/M5_ATR14
         }
+        if self._is_premarket_chart_et(m5_raw["time"]):
+            m5_bar["premarket"] = True
 
         self.log.info(
             f"[M5] {sym}: {'PUBLISH' if publish else 'HIST'}  "
@@ -1157,9 +1443,23 @@ class BarLoggerStrategy(Strategy):
             + (f"EMA21={ema21_m5:.2f}" if ema21_m5 else "EMA21=预热中")
         )
 
+        write_active = publish if update_active is None else update_active
+        if write_active and self._is_rth(m5_raw["time"]) and st_dir in (1, -1) and st_val:
+            self._write_indicators_active(sym, m5_raw["time"], st_val, st_dir, dema20_m5)
+
+        if publish:
+            bar_type = self._bar_types.get(sym)
+            iid_str = str(bar_type.instrument_id) if bar_type else ""
+            self.msgbus.publish(
+                "bar.collected.m5",
+                BarCollectedM5Event(sym, {**m5_bar, "instrument_id": iid_str}),
+            )
+
+        if not write_redis:
+            return m5_bar
         if not self._redis:
             self.log.warning(f"[M5] {sym}: Redis 不可用，跳过写入")
-            return
+            return m5_bar
         key = f"bars:5m:{sym}"
         ch  = f"kline:5m:{sym}"
         try:
@@ -1183,15 +1483,7 @@ class BarLoggerStrategy(Strategy):
         except Exception as e:
             self.log.error(f"[M5] {sym}: ✗ Redis 写入失败: {e}")
 
-        # ★ 发布内部事件供 ExitManager 执行 M5 ST 跟踪止盈（publish M5 bar 才触发）
-        if publish:
-            bar_type = self._bar_types.get(sym)
-            # 注意：不硬编码 .NASDAQ，避免 TSM.NYSE / SPY.ARCA 等合约映射错误
-            iid_str = str(bar_type.instrument_id) if bar_type else ""
-            self.msgbus.publish(
-                "bar.collected.m5",
-                BarCollectedM5Event(sym, {**m5_bar, "instrument_id": iid_str})
-            )
+        return m5_bar
 
 
     # ── QuoteTick 实时更新（P2）────────────────────────────────────
@@ -1213,7 +1505,7 @@ class BarLoggerStrategy(Strategy):
         sym = tick.instrument_id.symbol.value
         # 盘后 tick（≥16:00 ET）：不推送到前端
         et_tick = self._et_fake_utc(tick.ts_event)
-        if not self._is_rth(et_tick):
+        if not (self._is_rth(et_tick) or self._is_premarket_chart_et(et_tick)):
             return
         # 使用 bid/ask 中间价作为证券实时价格近似
         mid = (float(tick.bid_price) + float(tick.ask_price)) / 2

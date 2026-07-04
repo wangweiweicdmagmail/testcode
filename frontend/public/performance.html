@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>绩效 · Performance</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    .hidden { display: none !important; }
+    body {
+      background: #131722; color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+    .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
+    .page-subtitle b { color: #d1d4dc; }
+
+    .wrap { padding: 14px 20px 48px; display: flex; flex-direction: column; gap: 18px; }
+
+    /* KPI 卡片 */
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .kpi {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .kpi .label { font-size: 11px; color: #787b86; text-transform: uppercase; letter-spacing: .5px; }
+    .kpi .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+    .kpi .sub { font-size: 11px; color: #787b86; margin-top: 2px; }
+    .pos { color: #26a69a; }
+    .neg { color: #ef5350; }
+    .muted { color: #787b86; }
+
+    .panel {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #d1d4dc; }
+    #equity-chart { width: 100%; height: 280px; }
+    #dd-chart { width: 100%; height: 220px; }
+
+    /* R 分布直方图 */
+    .rbars { display: flex; align-items: flex-end; gap: 3px; height: 200px; padding-top: 8px; }
+    .rcol { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+    .rcol .bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 1px; transition: height .2s; }
+    .rcol .bar.win { background: #26a69a; }
+    .rcol .bar.loss { background: #ef5350; }
+    .rcol .cnt { font-size: 10px; color: #d1d4dc; margin-bottom: 2px; height: 12px; }
+    .rcol .lbl { font-size: 9px; color: #787b86; margin-top: 4px; white-space: nowrap; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #2a2e39; white-space: nowrap; }
+    th { color: #787b86; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+    th:first-child, td:first-child { text-align: left; }
+    tbody tr:hover { background: #252935; }
+    .sig-tag {
+      display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px;
+      background: #2a2e39; color: #d1d4dc;
+    }
+    .side-long { color: #26a69a; }
+    .side-short { color: #ef5350; }
+
+    .empty {
+      padding: 36px 16px; text-align: center; color: #787b86; font-size: 14px;
+    }
+    .empty b { color: #d1d4dc; }
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    @media (max-width: 900px) { .row-2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <p class="page-subtitle">绩效复盘 · 数据落库于 <b>.run/journal.jsonl</b>（独立于 Redis 过期，断电不丢）。引擎产生成交后自动累计。</p>
+
+  <div class="wrap">
+    <div class="kpis" id="kpis"></div>
+
+    <div class="panel">
+      <h2>资金曲线（累计已实现盈亏 $）</h2>
+      <div id="equity-chart"></div>
+      <div id="equity-empty" class="empty hidden">尚无成交记录。引擎运行并完成一笔往返交易后，<b>资金曲线</b>会自动出现。</div>
+    </div>
+
+    <div class="row-2">
+      <div class="panel">
+        <h2>回撤曲线（距峰值 $）</h2>
+        <div id="dd-chart"></div>
+        <div id="dd-empty" class="empty hidden">暂无回撤数据</div>
+      </div>
+      <div class="panel">
+        <h2>R 倍数分布</h2>
+        <div id="rdist"></div>
+        <div id="rdist-empty" class="empty hidden">暂无带止损的成交（无法计算 R）</div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="panel">
+        <h2>按信号类型</h2>
+        <div id="signal-table-wrap"></div>
+      </div>
+      <div class="panel">
+        <h2>最近成交</h2>
+        <div id="trades-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/status-bar.js"></script>
+  <script>
+    StatusBar.mount('status-bar-root', 'performance');
+
+    const SIGNAL_LABEL = {
+      pullback_vwap: '回踩 VWAP',
+      pullback_supertrend: '回踩 ST',
+      pullback_dema20: '回踩 DEMA20',
+      pullback_dema: '回踩 DEMA',
+      opening_breakout: '开盘突破',
+      manual: '手动',
+      auto: '自动',
+    };
+    const sigLabel = (s) => SIGNAL_LABEL[s] || s || '—';
+
+    const fmtMoney = (v) => {
+      if (v == null) return '—';
+      const n = Number(v);
+      return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
+    };
+    const cls = (v) => (Number(v) > 0 ? 'pos' : Number(v) < 0 ? 'neg' : 'muted');
+    const fmtTime = (ts) => {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    // ── KPI ────────────────────────────────────────────────────────────
+    function renderKpis(o) {
+      const streakTxt = o.current_streak > 0 ? `连胜 ${o.current_streak}`
+        : o.current_streak < 0 ? `连亏 ${-o.current_streak}` : '—';
+      const cards = [
+        { label: '总盈亏', value: fmtMoney(o.total_pnl), c: cls(o.total_pnl), sub: '$' },
+        { label: '成交笔数', value: o.trades ?? 0, c: '', sub: `胜 ${o.wins ?? 0} / 负 ${o.losses ?? 0}` },
+        { label: '胜率', value: o.win_rate != null ? o.win_rate + '%' : '—', c: o.win_rate != null && o.win_rate >= 50 ? 'pos' : '', sub: '' },
+        { label: '期望/笔', value: fmtMoney(o.expectancy), c: cls(o.expectancy), sub: '$' },
+        { label: '平均 R', value: o.avg_r != null ? o.avg_r.toFixed(2) + 'R' : '—', c: cls(o.avg_r), sub: '风险倍数' },
+        { label: '盈亏比', value: o.profit_factor != null ? o.profit_factor.toFixed(2) : (o.trades ? '∞' : '—'), c: o.profit_factor != null ? (o.profit_factor >= 1 ? 'pos' : 'neg') : '', sub: '毛利/毛损' },
+        { label: '最大回撤', value: o.max_drawdown != null ? '-' + Number(o.max_drawdown).toFixed(2) : '—', c: o.max_drawdown > 0 ? 'neg' : '', sub: '$' },
+        { label: '连续/最长', value: streakTxt, c: o.current_streak > 0 ? 'pos' : o.current_streak < 0 ? 'neg' : '', sub: `最长 ${o.max_consecutive_wins ?? 0}W / ${o.max_consecutive_losses ?? 0}L` },
+      ];
+      document.getElementById('kpis').innerHTML = cards.map((k) => `
+        <div class="kpi">
+          <div class="label">${k.label}</div>
+          <div class="value ${k.c}">${k.value}</div>
+          <div class="sub">${k.sub}</div>
+        </div>`).join('');
+    }
+
+    // ── 资金曲线 ────────────────────────────────────────────────────────
+    let chart, equitySeries;
+    function ensureChart() {
+      if (chart) return;
+      const el = document.getElementById('equity-chart');
+      chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth, height: 280,
+        layout: { background: { color: '#1e222d' }, textColor: '#d1d4dc' },
+        grid: { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } },
+        rightPriceScale: { borderColor: '#2a2e39' },
+        timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      });
+      equitySeries = chart.addAreaSeries({
+        lineColor: '#2962ff', topColor: 'rgba(41,98,255,0.30)', bottomColor: 'rgba(41,98,255,0.02)',
+        lineWidth: 2, priceLineVisible: false,
+      });
+      window.addEventListener('resize', () => chart && chart.applyOptions({ width: el.clientWidth }));
+    }
+
+    function renderEquity(curve) {
+      const emptyEl = document.getElementById('equity-empty');
+      const chartEl = document.getElementById('equity-chart');
+      if (!curve || curve.length === 0) {
+        emptyEl.classList.remove('hidden');
+        chartEl.style.display = 'none';
+        return;
+      }
+      emptyEl.classList.add('hidden');
+      chartEl.style.display = 'block';
+      ensureChart();
+      // LightweightCharts 要求 time 升序且唯一；多笔同秒时累加偏移
+      let lastT = 0;
+      const data = curve.map((p) => {
+        let t = p.ts || 0;
+        if (t <= lastT) t = lastT + 1;
+        lastT = t;
+        return { time: t, value: p.equity };
+      });
+      equitySeries.setData(data);
+      chart.timeScale().fitContent();
+    }
+
+    // ── 回撤曲线 ────────────────────────────────────────────────────────
+    let ddChart, ddSeries;
+    function renderDrawdown(curve) {
+      const emptyEl = document.getElementById('dd-empty');
+      const el = document.getElementById('dd-chart');
+      if (!curve || curve.length === 0) {
+        emptyEl.classList.remove('hidden'); el.style.display = 'none'; return;
+      }
+      emptyEl.classList.add('hidden'); el.style.display = 'block';
+      if (!ddChart) {
+        ddChart = LightweightCharts.createChart(el, {
+          width: el.clientWidth, height: 220,
+          layout: { background: { color: '#1e222d' }, textColor: '#d1d4dc' },
+          grid: { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } },
+          rightPriceScale: { borderColor: '#2a2e39' },
+          timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
+        });
+        ddSeries = ddChart.addAreaSeries({
+          lineColor: '#ef5350', topColor: 'rgba(239,83,80,0.02)', bottomColor: 'rgba(239,83,80,0.30)',
+          lineWidth: 2, priceLineVisible: false, invertFilledArea: true,
+        });
+        window.addEventListener('resize', () => ddChart && ddChart.applyOptions({ width: el.clientWidth }));
+      }
+      let peak = 0, lastT = 0;
+      const data = curve.map((p) => {
+        if (p.equity > peak) peak = p.equity;
+        let t = p.ts || 0; if (t <= lastT) t = lastT + 1; lastT = t;
+        return { time: t, value: Number((p.equity - peak).toFixed(2)) }; // ≤0
+      });
+      ddSeries.setData(data);
+      ddChart.timeScale().fitContent();
+    }
+
+    // ── R 分布直方图 ────────────────────────────────────────────────────
+    function renderRDist(dist) {
+      const wrap = document.getElementById('rdist');
+      const emptyEl = document.getElementById('rdist-empty');
+      if (!dist || !dist.total) {
+        emptyEl.classList.remove('hidden'); wrap.innerHTML = ''; return;
+      }
+      emptyEl.classList.add('hidden');
+      const maxCnt = Math.max(...dist.buckets.map((b) => b.count), 1);
+      wrap.innerHTML = `<div class="rbars">${dist.buckets.map((b) => {
+        const h = (b.count / maxCnt) * 100;
+        const win = b.lo >= 0;
+        const lbl = `${b.lo > 0 ? '+' : ''}${b.lo}`;
+        return `<div class="rcol" title="${b.lo}R ~ ${b.hi}R: ${b.count} 笔">
+            <div class="cnt">${b.count || ''}</div>
+            <div class="bar ${win ? 'win' : 'loss'}" style="height:${h}%"></div>
+            <div class="lbl">${lbl}</div>
+          </div>`;
+      }).join('')}</div>`;
+    }
+
+    // ── 按信号类型表 ────────────────────────────────────────────────────
+    function renderSignalTable(bySignal) {
+      const wrap = document.getElementById('signal-table-wrap');
+      const entries = Object.entries(bySignal || {});
+      if (entries.length === 0) {
+        wrap.innerHTML = `<div class="empty">暂无分组数据</div>`;
+        return;
+      }
+      entries.sort((a, b) => (b[1].total_pnl || 0) - (a[1].total_pnl || 0));
+      wrap.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>信号</th><th>笔数</th><th>胜率</th><th>期望</th><th>平均R</th><th>总盈亏</th><th>滑点</th>
+          </tr></thead>
+          <tbody>
+            ${entries.map(([k, s]) => `
+              <tr>
+                <td><span class="sig-tag">${sigLabel(k)}</span></td>
+                <td>${s.trades}</td>
+                <td>${s.win_rate != null ? s.win_rate + '%' : '—'}</td>
+                <td class="${cls(s.expectancy)}">${fmtMoney(s.expectancy)}</td>
+                <td class="${cls(s.avg_r)}">${s.avg_r != null ? s.avg_r.toFixed(2) : '—'}</td>
+                <td class="${cls(s.total_pnl)}">${fmtMoney(s.total_pnl)}</td>
+                <td class="muted">${s.avg_slippage != null ? s.avg_slippage.toFixed(3) : '—'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    // ── 最近成交表 ──────────────────────────────────────────────────────
+    function renderTrades(trades) {
+      const wrap = document.getElementById('trades-table-wrap');
+      if (!trades || trades.length === 0) {
+        wrap.innerHTML = `<div class="empty">尚无成交</div>`;
+        return;
+      }
+      wrap.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>时间</th><th>标的</th><th>方向</th><th>信号</th><th>R</th><th>盈亏</th>
+          </tr></thead>
+          <tbody>
+            ${trades.map((t) => `
+              <tr>
+                <td class="muted">${fmtTime(t.ts)}</td>
+                <td>${t.symbol}</td>
+                <td class="${t.side === 'SHORT' ? 'side-short' : 'side-long'}">${t.side === 'SHORT' ? '空' : '多'}</td>
+                <td><span class="sig-tag">${sigLabel(t.signal_type)}</span></td>
+                <td class="${cls(t.r_multiple)}">${t.r_multiple != null ? t.r_multiple.toFixed(2) : '—'}</td>
+                <td class="${cls(t.realized_pnl)}">${fmtMoney(t.realized_pnl)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    // ── 拉取并渲染 ──────────────────────────────────────────────────────
+    async function loadAll() {
+      try {
+        const [statsRes, equityRes, tradesRes, rdistRes] = await Promise.all([
+          fetch('/api/journal/stats'),
+          fetch('/api/journal/equity'),
+          fetch('/api/journal/trades?limit=50'),
+          fetch('/api/journal/rdist'),
+        ]);
+        const stats = await statsRes.json();
+        const equity = await equityRes.json();
+        const trades = await tradesRes.json();
+        const rdist = await rdistRes.json();
+        renderKpis(stats.overall || {});
+        renderEquity(equity);
+        renderDrawdown(equity);
+        renderRDist(rdist);
+        renderSignalTable(stats.by_signal || {});
+        renderTrades(trades);
+      } catch (e) {
+        console.error('加载绩效失败', e);
+      }
+    }
+
+    loadAll();
+    // 成交相对低频，30s 轮询足够；StatusBar 自己 15s 轮询引擎状态
+    setInterval(loadAll, 30000);
+
+    // WebSocket：平仓事件即时刷新绩效
+    (function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}`);
+      ws.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.channel === 'position:update' && (m.data?.closed === true || m.data?.closed === 'true')) {
+            setTimeout(loadAll, 800); // 等落库写入完成
+          }
+        } catch (_) {}
+      };
+      ws.onclose = () => setTimeout(connectWS, 3000);
+    })();
+  </script>
+</body>
+</html>

@@ -70,6 +70,19 @@ class ExitManager(Strategy):
         self.log.info("[ExitManager] 已停止")
 
     # ── 读取 trail_mode ──────────────────────────────────────────────────
+    def _is_auto_managed(self, sym: str) -> bool:
+        """全自动策略接管时，ExitManager 不跟踪止盈、不代为 EOD 平仓。"""
+        if not self._redis:
+            return False
+        try:
+            raw = self._redis.get(f"settings:{sym}")
+            if not raw:
+                return False
+            s = json.loads(raw)
+            return bool(s.get("auto_strategy") or s.get("auto_observe"))
+        except Exception:
+            return False
+
     def _get_trail_mode(self, sym: str) -> int:
         """从 Redis settings:{sym} 读取 trail_mode，失败返回 0（关闭）。"""
         if not self._redis:
@@ -96,7 +109,7 @@ class ExitManager(Strategy):
             self._check_eod_close(bar_time)
 
         mode = self._get_trail_mode(sym)
-        if mode == TRAIL_OFF:
+        if mode == TRAIL_OFF or self._is_auto_managed(sym):
             return
 
         iid_str = bar.get("instrument_id", "")
@@ -133,7 +146,9 @@ class ExitManager(Strategy):
             for key in self._redis.keys("position:*"):
                 raw = self._redis.get(key)
                 if raw:
-                    syms_with_pos.append(key.split(":", 1)[1])
+                    sym = key.split(":", 1)[1]
+                    if not self._is_auto_managed(sym):
+                        syms_with_pos.append(sym)
         except Exception as e:
             self.log.warning(f"[EOD] Redis 查询持仓列表失败: {e}")
             return
@@ -172,6 +187,8 @@ class ExitManager(Strategy):
     # ── M5 bar 收盘：处理 mode=2（M5 ST）────────────────────────────────
     def _on_m5_bar(self, event: BarCollectedM5Event) -> None:
         sym = event.symbol
+        if self._is_auto_managed(sym):
+            return
         mode = self._get_trail_mode(sym)
         if mode != TRAIL_M5_ST:
             return

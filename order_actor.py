@@ -24,6 +24,7 @@ OrderGatewayActor — 使用 NautilusTrader 标准 MessageBus 消息架构的订
 """
 import asyncio
 import json
+import os
 import time
 import queue
 import threading
@@ -48,6 +49,7 @@ from nautilus_trader.model.orders.list import OrderList
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
 from events import STTrailSettingsEvent, EMATrailSettingsEvent, TERMINAL_STATUS
+from portfolio.sessions import et_session_date, et_minute_now
 
 # 订单终态集合（全局复用，来自 events.py）
 TERMINAL = TERMINAL_STATUS
@@ -251,6 +253,21 @@ class OrderGatewayActor(Strategy):
             daemon=True,
             name="FAGroupAccountQuery",
         ).start()
+
+        self._print_engine_ready_banner()
+
+    def _print_engine_ready_banner(self) -> None:
+        if getattr(OrderGatewayActor, "_ready_banner_printed", False):
+            return
+        OrderGatewayActor._ready_banner_printed = True
+        port = self.config.http_port
+        inner = (
+            f" SUCCESS: 引擎网关就绪 | HTTP :{port}/order | Redis 心跳已开启 | PID={os.getpid()} "
+        )
+        border = "*" * (len(inner) + 2)
+        print(f"\n{border}", flush=True)
+        print(f"*{inner}*", flush=True)
+        print(f"{border}\n", flush=True)
 
     def on_stop(self) -> None:
         """停止：取消订阅 + 关闭 HTTP Server + 取消止损修改 tasks"""
@@ -465,10 +482,13 @@ class OrderGatewayActor(Strategy):
         while self._heartbeat_running:
             try:
                 if self._redis:
-                    self._redis.publish("engine:heartbeat", json.dumps({
+                    payload = json.dumps({
                         "ts": int(time.time()),
                         "status": "alive",
-                    }))
+                    })
+                    self._redis.publish("engine:heartbeat", payload)
+                    # 供 MCP/CLI/前端 REST GET（pub/sub 无订阅者时不可见）
+                    self._redis.setex("engine:heartbeat", 60, payload)
             except Exception:
                 pass
             # 分段 sleep，使停止时能快速响应
@@ -682,8 +702,104 @@ class OrderGatewayActor(Strategy):
                     f"[Account] 余额已同步 Redis  "
                     f"total={usd['total']:,.2f}  free={usd['free']:,.2f}  USD"
                 )
+                # ── 记录当日起始净值（SOD equity），用于日亏损计算 ──────────
+                # 每个交易日第一次写入时设置，过期时间到次日 UTC 凌晨
+                if usd['total'] > 0:
+                    today = et_session_date()  # ET 日历日，避免 UTC+8 机器盘中翻篇
+                    sod_key = f'risk:equity_sod:{today}'
+                    if not self._redis.exists(sod_key):
+                        self._redis.set(sod_key, str(usd['total']))
+                        # 设置 30 小时过期（跨日自动清除）
+                        self._redis.expire(sod_key, 30 * 3600)
+                        # 护栏：若首次锚定 SOD 时已进入/越过 RTH（盘中冷启动），
+                        # 该基准并非真实日开盘净值，日亏损熔断会从此刻起算 →
+                        # 显式告警，提醒运营者熔断基准不可靠。
+                        et_min = et_minute_now()
+                        if et_min >= 9 * 60 + 35:  # 09:35 ET 之后才首记 → 视为晚启动
+                            self.log.warning(
+                                f"[Risk] ⚠️ SOD 起始净值在盘中({et_min // 60:02d}:{et_min % 60:02d} ET)"
+                                f"才首次锚定={usd['total']:,.2f}：熔断基准非真实日开盘，"
+                                f"日亏损将从此刻起算。如需准确请尽早启动引擎或手动校正 {sod_key}。"
+                            )
+                        else:
+                            self.log.info(
+                                f"[Risk] 今日起始净值已记录: {usd['total']:,.2f} USD  key={sod_key}"
+                            )
         except Exception as e:
             self.log.warning(f"[Account] Redis 写入失败: {e}")
+        self._maybe_trigger_risk_halt()
+
+    DAILY_LOSS_LIMIT_PCT = -0.01
+
+    def _maybe_trigger_risk_halt(self) -> None:
+        """账户余额更新后检查日亏损；触及 -1% 则全平并熔断（每交易日一次）。"""
+        if not self._redis or self._loop is None:
+            return
+        try:
+            status = self.get_risk_status()
+            if status.get("halted") or status.get("error"):
+                return
+            pct = status.get("daily_pnl_pct")
+            limit = status.get("limit_pct", self.DAILY_LOSS_LIMIT_PCT)
+            if pct is None or pct > limit:
+                return
+            self.log.warning(
+                f"[Risk] 日亏损 {pct:.2%} ≤ 限制 {limit:.2%}，触发自动全平+熔断"
+            )
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_close_all(), self._loop
+            )
+            future.result(timeout=30.0)
+        except Exception as e:
+            self.log.error(f"[Risk] 自动熔断检查失败: {e}")
+
+    def get_risk_status(self) -> dict:
+        """返回今日风险状态供 HTTP GET /risk 调用"""
+        if not self._redis:
+            return {'error': 'Redis 未连接'}
+        try:
+            today = et_session_date()  # ET 日历日（统一口径）
+            sod_key  = f'risk:equity_sod:{today}'
+            halt_key = f'risk:halt:{today}'
+
+            sod_raw  = self._redis.get(sod_key)
+            acct_raw = self._redis.get('account:funds')
+            halted   = bool(self._redis.get(halt_key))
+
+            equity_sod = float(sod_raw) if sod_raw else None
+            equity_now = None
+            if acct_raw:
+                acct = json.loads(acct_raw)
+                usd = next(
+                    (b for b in acct.get('balances', []) if b['currency'] == 'USD'), None
+                )
+                if usd:
+                    equity_now = usd['total']
+
+            limit_pct = -0.01  # 日内熔断阈值（-1%）
+            daily_pnl = None
+            daily_pnl_pct = None
+            remaining_loss_pct = None
+            if equity_sod and equity_now:
+                daily_pnl     = round(equity_now - equity_sod, 2)
+                daily_pnl_pct = round(daily_pnl / equity_sod, 6)
+                # 离熔断还有多少个百分点（百分比单位）：当前收益率与熔断线的距离
+                # 例：当前 -0.8% 时 = (-0.008 - (-0.01)) × 100 = 0.20（pp）
+                remaining_loss_pct = round((daily_pnl_pct - limit_pct) * 100, 4)
+
+            return {
+                'equity_sod':    equity_sod,
+                'equity_now':    equity_now,
+                'daily_pnl':     daily_pnl,
+                'daily_pnl_pct': daily_pnl_pct,
+                'remaining_loss_pct': remaining_loss_pct,
+                'halted':        halted,
+                'limit_pct':     limit_pct,
+                'ts':            int(time.time()),
+            }
+        except Exception as e:
+            self.log.warning(f"[Risk] get_risk_status 失败: {e}")
+            return {'error': str(e)}
 
 
     # ------------------------------------------------------------------
@@ -882,11 +998,103 @@ class OrderGatewayActor(Strategy):
     # ★ 标准 MessageBus 消息处理器
     # ------------------------------------------------------------------
 
+    def _has_active_alpha_proposal(self, sym: str) -> bool:
+        """pending 或 approved_wait/ready_to_execute 未过期建议存在。"""
+        if not self._redis:
+            return False
+        import time as _time
+        now = int(_time.time())
+        for status in ("pending", "approved"):
+            index = f"proposal:{status}:index"
+            try:
+                ids = self._redis.zrevrange(index, 0, 99)
+            except Exception:
+                continue
+            for pid in ids:
+                key = f"proposal:{status}:{pid}"
+                raw = self._redis.hgetall(key)
+                if not raw:
+                    continue
+                try:
+                    p = {}
+                    for k, v in raw.items():
+                        try:
+                            p[k] = json.loads(v)
+                        except (json.JSONDecodeError, TypeError):
+                            p[k] = v
+                except Exception:
+                    continue
+                if str(p.get("symbol", "")).upper() != sym.upper():
+                    continue
+                if status == "pending":
+                    return True
+                if p.get("executed_at"):
+                    continue
+                phase = str(p.get("execution_phase") or "")
+                if phase not in ("approved_wait", "ready_to_execute"):
+                    continue
+                exp = int(p.get("expires_at") or 0)
+                if exp and now > exp:
+                    continue
+                return True
+        return False
+
     def on_external_order_command(self, event: ExternalOrderCommand) -> None:
         """
         处理来自 MessageBus 的外部下单指令
         此函数由 msgbus.publish() 在引擎事件循环中同步触发
         """
+        # ── 日亏损熔断检查：超限则拒绝所有开仓 ──────────────────────
+        if self._redis:
+            today = et_session_date()  # ET 日历日（统一口径）
+            if self._redis.get(f'risk:halt:{today}'):
+                sym = event.instrument_id.split('.')[0]
+                self.log.error(
+                    f"[Risk] 今日亏损已超过1%限制，拒绝开仓指令: {event.order_type} {sym}"
+                )
+                try:
+                    self._redis.publish('order:update', json.dumps({
+                        'status': 'DENIED',
+                        'reason': '今日亏损已超过1%上限，禁止开仓',
+                        'symbol': sym,
+                        'ts': int(time.time()),
+                    }))
+                except Exception:
+                    pass
+                return
+
+        # ── 有待审批/待执行建议时，拒绝人工开仓（与 server.js 一致）──
+        sym = event.instrument_id.split('.')[0]
+        if self._redis and event.order_type in ("BRACKET", "MKT", "MARKET", "LMT", "LIMIT", "LIMIT_BRACKET"):
+            if self._has_active_alpha_proposal(sym):
+                self.log.error(f"[Alpha] {sym} 存在活跃建议，拒绝人工下单")
+                try:
+                    self._redis.publish('order:update', json.dumps({
+                        'status': 'DENIED',
+                        'reason': f'{sym} 有待审批/待执行建议，请走审批流程',
+                        'symbol': sym,
+                        'ts': int(time.time()),
+                    }))
+                except Exception:
+                    pass
+                return
+
+        # ── 全自动策略接管时，拒绝人工下单（避免与 AutoStrategy 冲突）──
+        if self._redis:
+            try:
+                raw = self._redis.get(f"settings:{sym}")
+                if raw and json.loads(raw).get("auto_strategy"):
+                    self.log.error(f"[Auto] {sym} 自动策略实盘中，拒绝人工下单")
+                    self._redis.publish('order:update', json.dumps({
+                        'status': 'DENIED',
+                        'reason': f'{sym} 自动策略实盘中，请先关闭自动策略',
+                        'symbol': sym,
+                        'ts': int(time.time()),
+                    }))
+                    return
+            except Exception:
+                pass
+
         self.log.info(
             f"[Order] ⬇ 收到下单指令  "
             f"类型={event.order_type}  "
@@ -1199,6 +1407,23 @@ class OrderGatewayActor(Strategy):
         self._pub_order("ACCEPTED", event)
 
 
+    def _find_active_stop_order(self, instrument_id):
+        """
+        在 cache 中查找该标的当前活跃的 STOP_MARKET 止损单。
+        用于加仓场景：如已有止损单，直接修改数量，不再新建。
+        返回 order 对象；若不存在返回 None。
+        """
+        for order in self.cache.orders():
+            if order.instrument_id != instrument_id:
+                continue
+            status_name = getattr(order.status,     "name", "")
+            type_name   = getattr(order.order_type, "name", "")
+            if status_name in TERMINAL:
+                continue
+            if type_name == "STOP_MARKET":
+                return order
+        return None
+
     def _persist_stop_order(self, sym: str, client_order_id: str, trigger_price) -> None:
         """将止损单 ID 写入 Redis order:stop:{sym}，供引擎重启后恢复。"""
         if not self._redis:
@@ -1381,37 +1606,73 @@ class OrderGatewayActor(Strategy):
                 # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
                 sl_order, sl_steps, sl_step_secs, instrument = pending
 
-                sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
-                sl_order_new = self.order_factory.stop_market(
-                    instrument_id=sl_order.instrument_id,
-                    order_side=sl_order.side,
-                    quantity=sl_qty_new,
-                    trigger_price=sl_order.trigger_price,
-                    time_in_force=TimeInForce.GTC,
-                    tags=self._fa_tags(),
-                )
-
-                self.log.info(
-                    f"[SL] BRACKET 入场单 {coid} 全量成交={actual_qty}股（原定{sl_order.quantity}股），"
-                    f"提交止损单 {sl_order_new.client_order_id} "
-                    f"@ trigger_price={sl_order_new.trigger_price}"
-                )
-                self.submit_order(sl_order_new)
-                self.log.info(f"[SL] submit_order 已调用，止损单={sl_order_new.client_order_id}")
-                # 止损价定时修改任务
-                for i, new_sl in enumerate(sl_steps):
-                    delay = sl_step_secs * (i + 1)
-                    self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
-                    task = asyncio.ensure_future(
-                        self._schedule_sl_modify(
-                            sl_order_id=sl_order_new.client_order_id.value,
-                            instrument=instrument,
-                            new_trigger_price=Decimal(str(new_sl)),
-                            delay_secs=delay,
-                            step_index=i + 1,
-                        )
+                # ── 加仓检测：若该标的已有活跃止损单，直接修改数量，保持止损价不变 ──
+                existing_sl = self._find_active_stop_order(sl_order.instrument_id)
+                if existing_sl is not None:
+                    # 加仓场景：累加新成交量到已有止损单
+                    old_qty    = int(existing_sl.quantity)
+                    new_total  = old_qty + actual_qty
+                    new_sl_qty = instrument.make_qty(Decimal(str(new_total)))
+                    self.log.info(
+                        f"[SL] 加仓检测：已有活跃止损单 {existing_sl.client_order_id}  "
+                        f"trigger_price={existing_sl.trigger_price}  "
+                        f"数量 {old_qty} → {new_total}（本次加仓 {actual_qty}股）"
                     )
-                    self._sl_tasks.append(task)
+                    self.modify_order(
+                        order=existing_sl,
+                        quantity=new_sl_qty,
+                        trigger_price=existing_sl.trigger_price,  # 保持原止损价
+                    )
+                    # 同步 Redis order:stop 中的数量（trigger_price 不变）
+                    sym = existing_sl.instrument_id.symbol.value
+                    if self._redis:
+                        try:
+                            stored = self._redis.get(f"order:stop:{sym}")
+                            if stored:
+                                data = json.loads(stored)
+                                # trigger_price 不覆盖，仅更新 qty 备注
+                                data["quantity"] = str(new_total)
+                                self._redis.set(f"order:stop:{sym}", json.dumps(data))
+                        except Exception:
+                            pass
+                    self.log.info(
+                        f"[SL] ✓ 加仓止损单修改完成  "
+                        f"{existing_sl.client_order_id} qty={new_total} "
+                        f"@ {existing_sl.trigger_price}"
+                    )
+                else:
+                    # 首次开仓：创建新止损单（原有逻辑）
+                    sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
+                    sl_order_new = self.order_factory.stop_market(
+                        instrument_id=sl_order.instrument_id,
+                        order_side=sl_order.side,
+                        quantity=sl_qty_new,
+                        trigger_price=sl_order.trigger_price,
+                        time_in_force=TimeInForce.GTC,
+                        tags=self._fa_tags(),
+                    )
+
+                    self.log.info(
+                        f"[SL] BRACKET 入场单 {coid} 全量成交={actual_qty}股（原定{sl_order.quantity}股），"
+                        f"提交止损单 {sl_order_new.client_order_id} "
+                        f"@ trigger_price={sl_order_new.trigger_price}"
+                    )
+                    self.submit_order(sl_order_new)
+                    self.log.info(f"[SL] submit_order 已调用，止损单={sl_order_new.client_order_id}")
+                    # 止损价定时修改任务
+                    for i, new_sl in enumerate(sl_steps):
+                        delay = sl_step_secs * (i + 1)
+                        self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
+                        task = asyncio.ensure_future(
+                            self._schedule_sl_modify(
+                                sl_order_id=sl_order_new.client_order_id.value,
+                                instrument=instrument,
+                                new_trigger_price=Decimal(str(new_sl)),
+                                delay_secs=delay,
+                                step_index=i + 1,
+                            )
+                        )
+                        self._sl_tasks.append(task)
         else:
             # 检查是否是 LIMIT_BRACKET 的止盈单成交
             coid_str = coid
@@ -1698,6 +1959,41 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.error(f"[Gateway] 设置发布失败: {e}")
 
+    async def _async_close_all(self) -> dict:
+        """
+        全部平仓（风控触发）：遍历所有开放仓位，逐一平仓。
+        同时设置 risk:halt:{today}=1，禁止当日后续开仓。
+        """
+        results = []
+        try:
+            positions = list(self.cache.positions_open())
+            if not positions:
+                self.log.warning("[Risk] _async_close_all: 无开放仓位")
+            for pos in positions:
+                sym = pos.instrument_id.symbol.value
+                self.log.warning(f"[Risk] 自动平仓触发: {sym}")
+                r = await self._async_close_position(sym)
+                results.append(r)
+
+            # 设置熔断标志（当日禁止开仓）
+            if self._redis:
+                today = et_session_date()  # ET 日历日（统一口径）
+                self._redis.set(f'risk:halt:{today}', '1')
+                self._redis.expire(f'risk:halt:{today}', 30 * 3600)
+                self._redis.publish('risk:update', json.dumps({
+                    'halted': True,
+                    'reason': '日亏损超过1%，自动平仓并熔断',
+                    'ts': int(time.time()),
+                }))
+                self.log.warning(
+                    f"[Risk] ⛔ 熔断已激活：今日禁止开仓  risk:halt:{today}=1"
+                )
+        except Exception as e:
+            self.log.error(f"[Risk] _async_close_all 失败: {e}")
+            results.append({'error': str(e)})
+
+        return {'closed': results, 'halted': True}
+
     async def _async_close_position(self, symbol: str) -> dict:
         """
         在引擎事件循环中执行真正的平仓操作：
@@ -1930,6 +2226,8 @@ class OrderGatewayActor(Strategy):
                     self._send(200, actor.get_positions())
                 elif self.path == "/active-orders":
                     self._send(200, actor.get_active_orders())
+                elif self.path == "/risk":
+                    self._send(200, actor.get_risk_status())
                 elif self.path == "/debug-orders":
                     # 调试：打印 cache 里所有订单和持仓状态
                     try:
@@ -1974,6 +2272,18 @@ class OrderGatewayActor(Strategy):
                         self._send(200, {"status": "ok"})
                     except Exception as e:
                         self._send(400, {"error": str(e)})
+                    return
+
+                if self.path == "/close-all":
+                    # POST /close-all — 风控：全部平仓 + 熔断（禁止当日开仓）
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            actor._async_close_all(), loop
+                        )
+                        result = future.result(timeout=10.0)
+                        self._send(200, result)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
                     return
 
                 if self.path.startswith("/close"):
