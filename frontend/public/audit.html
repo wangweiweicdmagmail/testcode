@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>收盘审计 · Audit</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    .hidden { display: none !important; }
+    body {
+      background: #131722; color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+    .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
+    .wrap { padding: 14px 20px 48px; display: flex; flex-direction: column; gap: 16px; }
+
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; padding: 12px 14px;
+    }
+    .toolbar label { font-size: 12px; color: #787b86; }
+    .toolbar input, .toolbar select {
+      background: #131722; border: 1px solid #363a45; color: #d1d4dc;
+      border-radius: 4px; padding: 6px 10px; font-size: 13px;
+    }
+    .toolbar button {
+      background: #2962ff; border: none; color: #fff; border-radius: 4px;
+      padding: 6px 14px; font-size: 13px; cursor: pointer;
+    }
+    .toolbar button:hover { background: #1e53e5; }
+    .toolbar button.secondary { background: #363a45; }
+    .toolbar button.secondary:hover { background: #434651; }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+    .stat {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; padding: 10px 12px;
+    }
+    .stat .label { font-size: 11px; color: #787b86; }
+    .stat .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+
+    .layout { display: grid; grid-template-columns: 280px 1fr; gap: 14px; min-height: 420px; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .panel-hd {
+      padding: 10px 14px; font-size: 12px; font-weight: 600; color: #787b86;
+      border-bottom: 1px solid #2a2e39; text-transform: uppercase; letter-spacing: .4px;
+    }
+    .panel-bd { flex: 1; overflow: auto; max-height: 65vh; }
+
+    .prop-item {
+      padding: 10px 14px; border-bottom: 1px solid #2a2e39; cursor: pointer; font-size: 13px;
+    }
+    .prop-item:hover { background: #252932; }
+    .prop-item.active { background: #1a2332; border-left: 3px solid #2962ff; }
+    .prop-item .sym { font-weight: 600; }
+    .prop-item .meta { font-size: 11px; color: #787b86; margin-top: 3px; }
+
+    .tl { padding: 8px 0; }
+    .tl-row {
+      display: grid; grid-template-columns: 72px 72px 1fr; gap: 8px;
+      padding: 8px 14px; border-bottom: 1px solid #252932; font-size: 12px; align-items: start;
+    }
+    .tl-row:hover { background: #252932; }
+    .tl-time { color: #787b86; font-variant-numeric: tabular-nums; }
+    .tl-kind {
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+      padding: 2px 6px; border-radius: 3px; text-align: center; align-self: start;
+    }
+    .k-proposal { background: #1a237e; color: #90caf9; }
+    .k-signal { background: #1b3a2f; color: #80cbc4; }
+    .k-order { background: #3e2723; color: #ffab91; }
+    .k-position { background: #263238; color: #b0bec5; }
+    .k-trade { background: #1b5e20; color: #a5d6a7; }
+    .tl-body { line-height: 1.45; word-break: break-word; }
+    .tl-body .hl { color: #fff; font-weight: 600; }
+    .pos { color: #26a69a; }
+    .neg { color: #ef5350; }
+    .muted { color: #787b86; }
+    .empty { padding: 24px; text-align: center; color: #787b86; font-size: 13px; }
+    .badge-exec { color: #26a69a; }
+    .badge-rej { color: #ef5350; }
+    .badge-pend { color: #ffb74d; }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <div class="page-subtitle">按 ET 交易日回放 <b>信号 → 审批 → 订单 → 持仓 → 成交</b> 全链路（JSONL 持久化，不受 Redis 过期影响）</div>
+  <div class="wrap">
+    <div class="toolbar">
+      <label>交易日 (ET)</label>
+      <input type="date" id="day-input">
+      <label>标的</label>
+      <select id="sym-filter"><option value="">全部</option></select>
+      <button id="btn-load">加载</button>
+      <button id="btn-today" class="secondary">今日 ET</button>
+      <button id="btn-all" class="secondary">全日时间线</button>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="layout">
+      <div class="panel">
+        <div class="panel-hd">当日提案</div>
+        <div class="panel-bd" id="prop-list"><div class="empty">选择日期加载</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-hd" id="tl-title">事件时间线</div>
+        <div class="panel-bd" id="timeline"><div class="empty">点击左侧提案或「全日时间线」</div></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/api-auth.js"></script>
+  <script src="/shared/status-bar.js"></script>
+  <script>
+    StatusBar.mount('status-bar-root', 'audit');
+
+    const KIND_LABEL = {
+      proposal: '提案', signal: '信号', order: '订单', position: '持仓', trade: '成交',
+    };
+    const fmtTime = (ts) => ts
+      ? new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '—';
+    const fmtDate = (ts) => new Date(ts * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+    let dayData = null;
+    let selectedPid = null;
+    let allEvents = [];
+
+    function etTodayInput() {
+      const now = new Date();
+      return now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    }
+
+    document.getElementById('day-input').value = etTodayInput();
+
+    function renderStats(s) {
+      if (!s) { document.getElementById('stats').innerHTML = ''; return; }
+      const items = [
+        { label: '信号', value: s.signals },
+        { label: '提案', value: s.proposals },
+        { label: '订单事件', value: s.orders },
+        { label: '成交', value: s.trades },
+        { label: '当日 PnL', value: (s.pnl >= 0 ? '+' : '') + s.pnl, cls: s.pnl >= 0 ? 'pos' : 'neg' },
+      ];
+      document.getElementById('stats').innerHTML = items.map((i) => `
+        <div class="stat"><div class="label">${i.label}</div>
+        <div class="value ${i.cls || ''}">${i.value}</div></div>`).join('');
+    }
+
+    function clsBadge(p) {
+      const ev = p.event || '', st = p.status || '';
+      if (ev === 'executed' || st === 'executed') return '<span class="badge-exec">已执行</span>';
+      if (ev === 'rejected' || st === 'rejected') return '<span class="badge-rej">已驳回</span>';
+      if (ev === 'executing') return '<span class="badge-pend">执行中</span>';
+      if (ev === 'submit_failed') return '<span class="badge-rej">提交失败</span>';
+      return '<span class="badge-pend">待/进行中</span>';
+    }
+
+    function renderPropList() {
+      const wrap = document.getElementById('prop-list');
+      const symF = document.getElementById('sym-filter').value;
+      let props = (dayData?.proposals || []).slice();
+      if (symF) props = props.filter((p) => p.symbol === symF);
+      if (!props.length) {
+        wrap.innerHTML = '<div class="empty">当日无提案</div>';
+        return;
+      }
+      wrap.innerHTML = props.map((p) => `
+        <div class="prop-item${selectedPid === p.proposal_id ? ' active' : ''}"
+             data-pid="${p.proposal_id}">
+          <div><span class="sym">${p.symbol || '—'}</span> ${p.side || ''} ${clsBadge(p)}</div>
+          <div class="meta">${p.signal_type || '—'} · ${fmtTime(p.ts)} · ${(p.proposal_id || '').slice(0, 8)}…</div>
+        </div>`).join('');
+      wrap.querySelectorAll('.prop-item').forEach((el) => {
+        el.addEventListener('click', () => loadTimeline(el.dataset.pid));
+      });
+    }
+
+    function describeEvent(ev) {
+      if (ev.kind === 'proposal') {
+        return `<span class="hl">${ev.event || ev.status}</span>`
+          + (ev.reason ? ` · ${ev.reason}` : '')
+          + (ev.exec_entry_px ? ` · 成交@${ev.exec_entry_px}` : '')
+          + (ev.exec_qty ? ` qty=${ev.exec_qty}` : '');
+      }
+      if (ev.kind === 'signal') {
+        if (ev.source === 'touch') {
+          return `触线 <span class="hl">${ev.signal_type}</span> ${ev.side} @ ${ev.trigger_level}`
+            + (ev.reclaim ? ' reclaim' : '');
+        }
+        return `auto <span class="hl">${ev.action}</span> mode=${ev.mode || '—'}`
+          + (ev.reason ? ` · ${ev.reason}` : '')
+          + (ev.qty ? ` qty=${ev.qty}` : '');
+      }
+      if (ev.kind === 'order') {
+        return `<span class="hl">${ev.status}</span> ${ev.side || ''} ${ev.order_type || ''}`
+          + (ev.last_px ? ` @ ${ev.last_px}` : '')
+          + (ev.quantity ? ` qty=${ev.quantity}` : '')
+          + (ev.reason ? ` · ${ev.reason}` : '')
+          + `<div class="muted">${ev.client_order_id || ''}</div>`;
+      }
+      if (ev.kind === 'position') {
+        return `${ev.side} qty=${ev.qty} entry=${ev.entry_price}`
+          + (ev.unrealized_pnl != null ? ` uPnL=${ev.unrealized_pnl}` : '');
+      }
+      if (ev.kind === 'trade') {
+        const pnl = Number(ev.realized_pnl || 0);
+        return `平仓 <span class="${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>`
+          + (ev.r_multiple != null ? ` · ${ev.r_multiple}R` : '')
+          + (ev.duration_s ? ` · ${Math.round(ev.duration_s / 60)}m` : '');
+      }
+      return JSON.stringify(ev).slice(0, 120);
+    }
+
+    function renderTimeline(events, title) {
+      document.getElementById('tl-title').textContent = title || '事件时间线';
+      const wrap = document.getElementById('timeline');
+      const symF = document.getElementById('sym-filter').value;
+      let rows = events || [];
+      if (symF) rows = rows.filter((e) => !e.symbol || e.symbol === symF);
+      if (!rows.length) {
+        wrap.innerHTML = '<div class="empty">无事件</div>';
+        return;
+      }
+      wrap.innerHTML = `<div class="tl">${rows.map((ev) => `
+        <div class="tl-row">
+          <div class="tl-time">${fmtTime(ev.ts)}</div>
+          <div class="tl-kind k-${ev.kind}">${KIND_LABEL[ev.kind] || ev.kind}</div>
+          <div class="tl-body">
+            ${ev.symbol ? `<span class="hl">${ev.symbol}</span> · ` : ''}${describeEvent(ev)}
+          </div>
+        </div>`).join('')}</div>`;
+    }
+
+    async function loadDay() {
+      const date = document.getElementById('day-input').value;
+      try {
+        const res = await fetch(`/api/journal/day?date=${encodeURIComponent(date)}`);
+        dayData = await res.json();
+        allEvents = dayData.events || [];
+        selectedPid = null;
+        renderStats(dayData.stats);
+        const syms = [...new Set((dayData.proposals || []).map((p) => p.symbol).filter(Boolean))].sort();
+        const sel = document.getElementById('sym-filter');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">全部</option>' + syms.map((s) => `<option value="${s}">${s}</option>`).join('');
+        if (syms.includes(cur)) sel.value = cur;
+        renderPropList();
+        renderTimeline([], `全日 · ${dayData.date}（点击提案查看单链）`);
+      } catch (e) {
+        console.error(e);
+        document.getElementById('timeline').innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
+      }
+    }
+
+    async function loadTimeline(pid) {
+      selectedPid = pid;
+      renderPropList();
+      try {
+        const res = await fetch(`/api/journal/timeline?proposal_id=${encodeURIComponent(pid)}&limit=1000`);
+        const data = await res.json();
+        const sym = data.symbol || '';
+        renderTimeline(data.events || [], `提案 ${pid.slice(0, 8)}… · ${sym}`);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function showAllDayTimeline() {
+      selectedPid = null;
+      renderPropList();
+      renderTimeline(allEvents, `全日时间线 · ${dayData?.date || ''} (${allEvents.length} 事件)`);
+    }
+
+    document.getElementById('btn-load').addEventListener('click', loadDay);
+    document.getElementById('btn-today').addEventListener('click', () => {
+      document.getElementById('day-input').value = etTodayInput();
+      loadDay();
+    });
+    document.getElementById('btn-all').addEventListener('click', showAllDayTimeline);
+    document.getElementById('sym-filter').addEventListener('change', () => {
+      renderPropList();
+      if (selectedPid) loadTimeline(selectedPid);
+      else if (allEvents.length) showAllDayTimeline();
+    });
+
+    loadDay();
+  </script>
+</body>
+</html>

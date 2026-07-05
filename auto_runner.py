@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,10 +21,18 @@ from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
-from approval.proposal_store import mark_executed, pop_approved_for_symbol, try_claim_execution
+from approval.proposal_store import (
+    get_proposal,
+    mark_executed,
+    mark_executing,
+    mark_submit_failed,
+    pop_approved_for_symbol,
+    try_claim_execution,
+)
 from execution.auto_pm import AutoPositionManager
 from portfolio.config import ExecutionConfig, PortfolioRiskConfig
 from portfolio.risk_gate import RiskGate
+from portfolio.trading_env import live_orders_allowed, trading_env
 from signals.base import BarContext, IntentAction, TradeIntent
 from signals.opening_breakout import OpeningBreakoutConfig, OpeningBreakoutEngine
 from signals.st_dema_m5 import StDemaM5Config, StDemaM5Engine
@@ -76,6 +85,7 @@ class AutoRunner(Strategy):
         self._risk: Optional[RiskGate] = None
         self._pm: Optional[AutoPositionManager] = None
         self._eod_closed_dates: set[str] = set()
+        self._pending_proposals: dict[str, dict] = {}
 
     def on_start(self) -> None:
         try:
@@ -104,6 +114,14 @@ class AutoRunner(Strategy):
             self.log.info(f"[Runner] 测试仓位: 固定 {risk_cfg.fixed_qty} 股/笔 (AUTO_FIXED_QTY，设 0 恢复动态)")
         else:
             self.log.info("[Runner] 仓位: 动态以损定量")
+        te = trading_env()
+        if not live_orders_allowed():
+            self.log.warning(
+                f"[Runner] TRADING_ENV={te} — AutoRunner 不会向 IBKR 提交实盘订单"
+                "（批准观察仍可用；实盘需 TRADING_ENV=live 并重启引擎）"
+            )
+        else:
+            self.log.info("[Runner] TRADING_ENV=live — 实盘报单已启用")
         # 暴露生效风控配置给前端（护栏：fixed_qty>0 时前端弹红条警告）
         if self._redis:
             try:
@@ -113,6 +131,19 @@ class AutoRunner(Strategy):
                     "max_position_pct": risk_cfg.max_position_pct,
                     "max_portfolio_positions": risk_cfg.max_portfolio_positions,
                     "max_trades_per_sym_per_day": risk_cfg.max_trades_per_sym_per_day,
+                    "rth_open_blackout_min": risk_cfg.rth_open_blackout_min,
+                    "pre_eod_blackout_min": risk_cfg.pre_eod_blackout_min,
+                    "cooldown_bars_after_stop": risk_cfg.cooldown_bars_after_stop,
+                    "min_qty": risk_cfg.min_qty,
+                    "atr_mult": self.config.atr_mult,
+                    "tp_rr": self.config.tp_rr,
+                    "max_units": self.config.max_units,
+                    "market_data_delayed": os.environ.get("MARKET_DATA_DELAYED", "0"),
+                    "market_data_mode": os.environ.get("MARKET_DATA_MODE", "realtime"),
+                    "ib_fa_group": self.config.fa_group,
+                    "ib_fa_method": self.config.fa_method,
+                    "trading_env": trading_env(),
+                    "live_orders_allowed": live_orders_allowed(),
                     "ts": int(time.time()),
                 }))
             except Exception as e:
@@ -164,6 +195,7 @@ class AutoRunner(Strategy):
             self._publish_signal,
             self._risk.set_cooldown,
             self._account_equity,
+            on_proposal_exec=self._on_proposal_exec,
         )
 
         self.msgbus.subscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
@@ -185,10 +217,23 @@ class AutoRunner(Strategy):
             self._redis.close()
 
     def _recover(self) -> None:
-        if self._pm:
-            recovered = self._pm.recover_all()
-            if recovered:
-                self.log.info(f"[Runner] 重启恢复: {recovered}")
+        if not self._pm:
+            return
+        recovered = self._pm.recover_all()
+        summary = self._pm.reconcile_startup()
+        if recovered:
+            self.log.info(f"[Runner] 重启恢复: {recovered}")
+        if summary.get("actions"):
+            self.log.info(f"[Runner] 启动对账: {summary['actions']}")
+        if self._redis:
+            try:
+                self._redis.set(
+                    "reconcile:startup",
+                    json.dumps({**summary, "ts": int(time.time())}),
+                    ex=86400,
+                )
+            except Exception as e:
+                self.log.warning(f"[Runner] 写 reconcile:startup 失败: {e}")
 
     def _on_m5_bar(self, event) -> None:
         sym = event.symbol
@@ -224,7 +269,7 @@ class AutoRunner(Strategy):
         mode = self._mode(sym)
         if mode == "off":
             return
-        live = mode == "live"
+        live = self._effective_live(mode)
 
         ctx = BarContext(symbol=sym, bar=bar, bar_time=bar_time, et_min=et_min, mode=mode)
         pos_ctx = self._pm.position_context(sym)
@@ -269,6 +314,14 @@ class AutoRunner(Strategy):
         bar = event.bar
         bar_time = int(bar.get("time", 0))
         et_min = (bar_time % 86400) // 60
+        try:
+            c = float(bar["close"])
+            self._pm.set_last_bar(sym, c, bar_time)
+        except (KeyError, TypeError, ValueError):
+            c = 0.0
+
+        self._drain_close_request(sym)
+
         if et_min >= EOD_CLOSE_ET_MINUTE:
             return
         ob_mode = self._opening_breakout_mode(sym)
@@ -285,7 +338,7 @@ class AutoRunner(Strategy):
     ) -> None:
         if not self._pm or not self._risk:
             return
-        live = mode == "live"
+        live = self._effective_live(mode)
         allow_long, allow_short = self._opening_breakout_dirs(sym)
         engine = self._engines[OPENING_BREAKOUT_PROFILE]
         engine.set_directions(sym, allow_long, allow_short)
@@ -373,8 +426,8 @@ class AutoRunner(Strategy):
     ) -> None:
         if not self._redis or not self._pm or not self._risk:
             return
-        live = mode == "live"
-        decision = "approved_live" if live else "approved_observe"
+        live = self._effective_live(mode)
+        decision = "approved_live" if mode == "live" else "approved_observe"
         proposals = pop_approved_for_symbol(self._redis, sym, decision=decision)
         if not proposals:
             return
@@ -391,6 +444,8 @@ class AutoRunner(Strategy):
             if not intent:
                 mark_executed(self._redis, p, result="invalid_intent")
                 continue
+            if c > 0:
+                intent = replace(intent, ref_price=c)
             verdict = self._risk.check_enter(
                 intent, self.config.atr_mult, self.config.max_units, live,
             )
@@ -404,16 +459,27 @@ class AutoRunner(Strategy):
                 continue
             if live:
                 self._risk.record_daily_trade(sym, bar_time)
-            self._pm.execute_enter(intent, verdict.qty, mode, live)
-            mark_executed(
-                self._redis, p,
-                result="executed" if live else "observed",
-                meta={"qty": verdict.qty, "live": live},
-            )
-            self.log.info(
-                f"[Runner][Agent] {'已执行' if live else '已观察'}建议 {p.get('proposal_id')} "
-                f"{sym} {p.get('side')} live={live} qty={verdict.qty}"
-            )
+            self._pending_proposals[pid] = dict(p)
+            if live:
+                mark_executing(
+                    self._redis, p,
+                    meta={"qty": verdict.qty, "live": True},
+                )
+                self._pm.execute_enter(intent, verdict.qty, mode, live)
+                self.log.info(
+                    f"[Runner][Agent] 已报单待成交 {pid} {sym} {p.get('side')} qty={verdict.qty}"
+                )
+            else:
+                self._pm.execute_enter(intent, verdict.qty, mode, live)
+                mark_executed(
+                    self._redis, p,
+                    result="observed",
+                    meta={"qty": verdict.qty, "live": False},
+                )
+                self._pending_proposals.pop(pid, None)
+                self.log.info(
+                    f"[Runner][Agent] 已观察建议 {pid} {sym} {p.get('side')} qty={verdict.qty}"
+                )
 
     def _proposal_to_intent(self, p: dict, bar_time: int) -> Optional[TradeIntent]:
         try:
@@ -421,7 +487,8 @@ class AutoRunner(Strategy):
             side = OrderSide.BUY if side_str == "LONG" else OrderSide.SELL
             entry = float(p["entry_price"])
             stop = float(p.get("stop_price") or 0)
-            tp = float(p.get("tp_price") or 0)
+            tp_raw = p.get("tp_half_price") if p.get("tp_half_price") is not None else p.get("tp_price")
+            tp = float(tp_raw or 0)
             atr_ref = abs(entry - stop) / self.config.atr_mult if stop else entry * 0.004
             return TradeIntent(
                 profile=str(p.get("signal_type") or "agent_proposal"),
@@ -443,6 +510,24 @@ class AutoRunner(Strategy):
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _drain_close_request(self, sym: str) -> None:
+        """消费 Redis auto:close:{sym}（上层 UI 路由的 AutoPM 平仓请求）。"""
+        if not self._redis or not self._pm:
+            return
+        key = f"auto:close:{sym.upper()}"
+        try:
+            raw = self._redis.get(key)
+            if not raw:
+                return
+            self._redis.delete(key)
+            payload = json.loads(raw) if isinstance(raw, str) else {}
+            reason = str(payload.get("reason") or "ui_close")
+            self._pm.close_all(sym, reason)
+            self._publish_signal(sym, "ui_close", "live", {"reason": reason})
+            self.log.info(f"[Runner] AutoPM 平仓 {sym} ({reason})")
+        except Exception as e:
+            self.log.warning(f"[Runner] 消费 auto:close {sym} 失败: {e}")
+
     def _maybe_eod(self, bar_time: int) -> None:
         date = datetime.fromtimestamp(bar_time, tz=timezone.utc).strftime("%Y-%m-%d")
         if date in self._eod_closed_dates:
@@ -456,6 +541,37 @@ class AutoRunner(Strategy):
             self._engines[DEFAULT_SIGNAL_PROFILE].reset_symbol(s)
         if closed:
             self.log.info(f"[Runner] EOD 全平: {closed}")
+
+    def _on_proposal_exec(self, proposal_id: str, result: str, meta: Optional[dict] = None) -> None:
+        """AutoPM 回调：入场成交 / 报单失败。"""
+        if not self._redis:
+            return
+        pid = str(proposal_id)
+        p = self._pending_proposals.pop(pid, None)
+        if not p:
+            p = get_proposal(self._redis, "approved", pid)
+        if not p:
+            p = get_proposal(self._redis, "executed", pid)
+        if not p:
+            self.log.warning(f"[Runner] proposal exec 回调无记录: {pid} result={result}")
+            return
+        if result == "filled":
+            mark_executed(
+                self._redis, p,
+                result="executed",
+                meta={**(meta or {}), "live": True},
+            )
+            self.log.info(f"[Runner][Agent] 建议成交完成 {pid} {p.get('symbol')}")
+        elif result == "submit_failed":
+            mark_submit_failed(
+                self._redis, p,
+                reason=str((meta or {}).get("reason") or "submit_failed"),
+                meta=meta,
+            )
+            self.log.warning(
+                f"[Runner][Agent] 建议报单失败 {pid} {p.get('symbol')}: "
+                f"{(meta or {}).get('reason')}"
+            )
 
     # ── 订单 / 仓位事件（转发给 PM）────────────────────────────────────
     def on_order_filled(self, event) -> None:
@@ -489,6 +605,14 @@ class AutoRunner(Strategy):
             self._engines[DEFAULT_SIGNAL_PROFILE].reset_symbol(sym)
 
     # ── 工具 ──────────────────────────────────────────────────────────
+    def _effective_live(self, mode: str) -> bool:
+        """settings 为 live 且 TRADING_ENV=live 时才向 IBKR 报单。"""
+        if mode != "live":
+            return False
+        if live_orders_allowed():
+            return True
+        return False
+
     def _mode(self, sym: str) -> str:
         if not self._redis:
             return "off"
@@ -559,5 +683,10 @@ class AutoRunner(Strategy):
             payload.update(extra)
         try:
             self._redis.publish("auto:signal", json.dumps(payload))
+            try:
+                from measurement.signal_store import record_auto
+                record_auto(payload)
+            except Exception as e:
+                self.log.debug(f"[Runner] signal_store: {e}")
         except Exception as e:
             self.log.warning(f"[Runner] auto:signal 推送失败: {e}")

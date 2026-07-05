@@ -221,10 +221,20 @@ Web：
 
 - 四宫格：http://localhost:3000/multi.html  
 - 建议列表：http://localhost:3000/proposals.html  
+- 收盘审计：http://localhost:3000/audit.html  
+- 系统配置：http://localhost:3000/settings.html  
+
+规格验收（冻结范围，不扩需求）：
+
+```bash
+python scripts/verify_scope.py
+```
 
 ---
 
-## 十一、已知限制 / 待办
+## 十一、已知限制
+
+**测量 / 审计 / 配置 UI 的需求边界见 [SCOPE_FIXED.md](./SCOPE_FIXED.md)（2026-07-05 冻结，不扩展）。**
 
 | 项 | 说明 |
 |----|------|
@@ -232,6 +242,7 @@ Web：
 | 四宫格换槽 | 全页 reload（非单格热插拔） |
 | `index.html` | 未改超级信号专用 UI（按约定保持原样） |
 | 审批 API | 设 `NAUTILUS_API_SECRET` 后前端首次操作需输入密钥 |
+| signal outcome 7d | 仅 touch；Redis 无历史 bar 则 skip（见 SCOPE_FIXED） |
 
 ---
 
@@ -239,6 +250,7 @@ Web：
 
 | 文档 | 内容 |
 |------|------|
+| [SCOPE_FIXED.md](./SCOPE_FIXED.md) | **需求边界（冻结）**：审计 / outcome / 对账 / OrderPolicy / CI / 配置 UI |
 | [MCP_ALPHA.md](./MCP_ALPHA.md) | Cursor MCP 配置与日常 |
 | [ALPHA_AGENT.md](./ALPHA_AGENT.md) | 架构与常用命令 |
 | [SIGNAL_SPEC.md](./SIGNAL_SPEC.md) | 指标与 Redis 约定（回踩规格；st_super 见本文） |

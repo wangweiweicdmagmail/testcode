@@ -88,7 +88,7 @@
       states[0] = 'done';
       states[1] = 'done';
       states[2] = 'active';
-    } else if (uiPhase === 'ready') {
+    } else if (uiPhase === 'ready' || uiPhase === 'executing') {
       states[0] = 'done';
       states[1] = 'done';
       states[2] = 'done';
@@ -99,6 +99,7 @@
 
   function pillForPhase(uiPhase) {
     if (uiPhase === 'pending') return { cls: 'pill-pending', text: '待审批' };
+    if (uiPhase === 'executing') return { cls: 'pill-executing', text: '执行中' };
     if (uiPhase === 'wait') return { cls: 'pill-wait', text: '等待回踩' };
     if (uiPhase === 'ready') return { cls: 'pill-ready', text: '待执行' };
     return { cls: 'pill-none', text: '无信号' };
@@ -163,6 +164,17 @@
     return proposal && !isStSuper(proposal);
   }
 
+  /** 执行结果文案 */
+  function execResultLabel(result) {
+    const m = {
+      executed: '已实盘执行',
+      observed: '已观察记录',
+      risk_rejected: '风控拒绝',
+      invalid_intent: '无效意图',
+    };
+    return m[result] || result || '已处理';
+  }
+
   global.AlphaCopy = {
     EXEC_ST_SUPER,
     EXEC_RECLAIM,
@@ -177,6 +189,7 @@
     ttlText,
     approveModalBody,
     showObserveApprove,
+    execResultLabel,
     SIGNAL_LABEL,
   };
 })(window);

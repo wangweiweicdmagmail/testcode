@@ -7,6 +7,7 @@ from nautilus_trader.model.enums import OrderSide
 
 class UnitState(str, Enum):
     PENDING_ENTRY = "pending_entry"
+    PENDING_CLOSE = "pending_close"
     ACTIVE = "active"
     BREAKEVEN = "breakeven"
     CLOSED = "closed"
@@ -32,3 +33,4 @@ class Unit:
     planned_stop_px: float = 0.0
     planned_tp_rr: float = 0.0
     manual_remainder: bool = False
+    proposal_id: str = ""

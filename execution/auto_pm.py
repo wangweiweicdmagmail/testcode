@@ -17,6 +17,8 @@ from nautilus_trader.trading.strategy import Strategy
 
 from events import TERMINAL_STATUS
 from execution.models import Unit, UnitState
+from portfolio.order_policy import data_state_from_env, decide_entry_order
+from portfolio.ib_orders import build_marketable_order
 from portfolio.config import ExecutionConfig
 from signals.base import IntentAction, PositionContext, TradeIntent
 
@@ -31,6 +33,7 @@ class AutoPositionManager:
         publish: Callable[[str, str, str, Optional[dict]], None],
         on_stop_cooldown: Callable[[str, int], None],
         equity_fn: Callable[[], Optional[float]],
+        on_proposal_exec: Optional[Callable[[str, str, Optional[dict]], None]] = None,
     ) -> None:
         self._host = host
         self._cfg = exec_cfg
@@ -39,10 +42,12 @@ class AutoPositionManager:
         self._publish = publish
         self._on_stop_cooldown = on_stop_cooldown
         self._equity_fn = equity_fn
+        self._on_proposal_exec = on_proposal_exec
         self._units: dict[str, list[Unit]] = {s: [] for s in iid_map}
         self._coid_index: dict[str, tuple[str, str]] = {}
         self._last_close: dict[str, float] = {}
         self._last_bar_time: dict[str, int] = {}
+        self._pending_close_reason: dict[str, str] = {}
 
     @property
     def units(self) -> dict[str, list[Unit]]:
@@ -64,6 +69,15 @@ class AutoPositionManager:
             all_breakeven=all(u.state == UnitState.BREAKEVEN for u in open_u),
             unit_sides=tuple(u.side for u in open_u),
         )
+
+    def _journal_map_coid(self, coid: str, proposal_id: Optional[str]) -> None:
+        """journal 归因：client_order_id → proposal_id（24h TTL）"""
+        if not self._redis or not coid or not proposal_id:
+            return
+        try:
+            self._redis.setex(f"journal:coid:{coid}", 86400, proposal_id)
+        except Exception:
+            pass
 
     # ── 执行意图 ──────────────────────────────────────────────────────
     def execute_enter(self, intent: TradeIntent, qty: int, mode: str, live: bool) -> None:
@@ -104,23 +118,47 @@ class AutoPositionManager:
         })
 
     def _submit_entry(self, sym: str, intent: TradeIntent, qty: int) -> None:
+        pid = str(intent.meta.get("proposal_id") or "")
         iid = self._iid_map[sym]
         instrument = self._host.cache.instrument(iid)
         if instrument is None:
             self._host.log.error(f"[PM] {sym}: 合约未加载")
+            if pid and self._on_proposal_exec:
+                self._on_proposal_exec(pid, "submit_failed", {"reason": "instrument_not_loaded"})
             return
 
-        entry = self._host.order_factory.market(
+        ref_px = float(intent.ref_price or 0) or float(self._last_close.get(sym, 0))
+        try:
+            decide_entry_order(
+                data_state=data_state_from_env(),
+                side=intent.side.name,
+                ref_price=ref_px,
+            )
+        except ValueError as e:
+            self._host.log.error(f"[PM] {sym}: 入场价无效 {e}")
+            if pid and self._on_proposal_exec:
+                self._on_proposal_exec(pid, "submit_failed", {"reason": str(e)})
+            return
+
+        entry, decision = build_marketable_order(
+            self._host.order_factory,
+            instrument=instrument,
             instrument_id=iid,
-            order_side=intent.side,
-            quantity=instrument.make_qty(Decimal(str(qty))),
-            time_in_force=TimeInForce.DAY,
+            side=intent.side,
+            qty=qty,
+            ref_price=ref_px,
             tags=self._fa_tags(),
+            log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
         )
+        if decision.use_limit:
+            self._host.log.info(
+                f"[PM] {sym}: 入场 {decision.reason} @ {decision.limit_price} (ref={ref_px})"
+            )
         unit = Unit(
             sym=sym, seq=intent.seq, side=intent.side,
             state=UnitState.PENDING_ENTRY, qty=qty,
             atr_ref=intent.atr_ref, entry_coid=entry.client_order_id.value,
+            proposal_id=pid,
         )
         if intent.meta.get("opening_breakout") and intent.stop_px:
             unit.planned_stop_px = float(intent.stop_px)
@@ -138,10 +176,12 @@ class AutoPositionManager:
         self._units[sym].append(unit)
         self._coid_index[unit.entry_coid] = (sym, "entry")
         self._host.submit_order(entry)
+        self._journal_map_coid(unit.entry_coid, pid)
         self._publish(sym, "open", "live", {
             "side": intent.side.name, "seq": intent.seq, "qty": qty,
             "entry": round(intent.ref_price, 2),
             "stop": intent.stop_px, "tp": intent.tp_px,
+            "proposal_id": pid or None,
         })
         self._host.log.info(f"[PM] {sym}: 开仓 seq={intent.seq} {intent.side.name} qty={qty}")
         self._persist(sym)
@@ -165,16 +205,58 @@ class AutoPositionManager:
             net = float(self._host.portfolio.net_position(iid))
         except Exception:
             net = 0.0
-        if net != 0 and instrument is not None:
-            side = OrderSide.SELL if net > 0 else OrderSide.BUY
-            close = self._host.order_factory.market(
-                instrument_id=iid, order_side=side,
-                quantity=instrument.make_qty(Decimal(str(abs(net)))),
-                time_in_force=TimeInForce.DAY, tags=self._fa_tags(),
-            )
-            self._host.submit_order(close)
-            self._host.log.info(f"[PM] {sym}: 全平 {side.name} qty={abs(net)} ({reason})")
 
+        if net == 0:
+            self._finalize_symbol_close(sym)
+            return
+
+        if instrument is None:
+            self._host.log.error(f"[PM] {sym}: 合约未加载，无法平仓")
+            return
+
+        ref_px = self._ref_price_for_sym(sym, iid)
+        if ref_px <= 0:
+            self._host.log.error(f"[PM] {sym}: 无参考价，无法提交平仓单")
+            return
+
+        side = OrderSide.SELL if net > 0 else OrderSide.BUY
+        close, decision = build_marketable_order(
+            self._host.order_factory,
+            instrument=instrument,
+            instrument_id=iid,
+            side=side,
+            qty=int(abs(net)),
+            ref_price=ref_px,
+            tags=self._fa_tags(),
+            log_fn=lambda m: self._host.log.info(f"[PM] {sym}: 平仓 {m}"),
+        )
+        close_coid = close.client_order_id.value
+        self._coid_index[close_coid] = (sym, "close")
+        self._pending_close_reason[sym] = reason
+        for unit in self._units.get(sym, []):
+            if unit.state != UnitState.CLOSED:
+                unit.state = UnitState.PENDING_CLOSE
+        self._persist(sym)
+        self._host.submit_order(close)
+        kind = "LMT" if decision.use_limit else "MKT"
+        self._host.log.info(
+            f"[PM] {sym}: 全平 {kind} {side.name} qty={abs(net)} ({reason}) coid={close_coid}"
+        )
+
+    def _ref_price_for_sym(self, sym: str, iid: InstrumentId) -> float:
+        ref = float(self._last_close.get(sym, 0))
+        if ref > 0:
+            return ref
+        pos = next((p for p in self._host.cache.positions_open() if p.instrument_id == iid), None)
+        if pos is not None:
+            try:
+                return float(pos.avg_px_open)
+            except Exception:
+                pass
+        return 0.0
+
+    def _finalize_symbol_close(self, sym: str) -> None:
+        self._pending_close_reason.pop(sym, None)
         for unit in self._units.get(sym, []):
             unit.state = UnitState.CLOSED
         self._coid_index = {k: v for k, v in self._coid_index.items() if v[0] != sym}
@@ -231,6 +313,11 @@ class AutoPositionManager:
         if ref is None:
             return
         sym, role = ref
+        if role == "close":
+            self._finalize_symbol_close(sym)
+            reason = self._pending_close_reason.get(sym, "filled")
+            self._host.log.info(f"[PM] {sym}: 平仓单成交 ({reason})")
+            return
         unit = self._unit_by_coid(sym, coid)
         if unit is None:
             return
@@ -265,19 +352,36 @@ class AutoPositionManager:
             return
         sym, role = ref
         unit = self._unit_by_coid(sym, coid)
+        if role == "close":
+            self._host.log.warning(f"[PM] {sym}: 平仓单 {why} — reconcile 将修复状态")
+            for u in self._units.get(sym, []):
+                if u.state == UnitState.PENDING_CLOSE:
+                    u.state = UnitState.ACTIVE if u.stop_coid else UnitState.PENDING_ENTRY
+            self._pending_close_reason.pop(sym, None)
+            self._persist(sym)
+            return
         if unit and role == "entry" and unit.state == UnitState.PENDING_ENTRY:
             if unit.entry_filled > 0:
-                # #9 部分成交后入场单被撤/拒：已有持仓但尚无止损保护 →
-                # 立即平掉残仓，避免留下无保护裸仓。
                 self._host.log.warning(
                     f"[PM] {sym}: 入场单 {why} 但已部分成交 {unit.entry_filled} 股，"
                     f"平残仓防裸仓"
                 )
-                unit.state = UnitState.CLOSED
+                pid = unit.proposal_id
                 self.close_all(sym, f"partial_entry_{why}")
+                if pid and self._on_proposal_exec:
+                    self._on_proposal_exec(
+                        pid, "submit_failed",
+                        {"reason": f"partial_entry_{why}", "symbol": sym},
+                    )
+                self._persist(sym)
             else:
                 unit.state = UnitState.CLOSED
                 self._host.log.warning(f"[PM] {sym}: 入场单 {why}，单元作废")
+                if unit.proposal_id and self._on_proposal_exec:
+                    self._on_proposal_exec(
+                        unit.proposal_id, "submit_failed",
+                        {"reason": why, "symbol": sym},
+                    )
                 self._persist(sym)
 
     def on_position_closed(self, sym: str) -> None:
@@ -314,18 +418,18 @@ class AutoPositionManager:
             return
 
         opp = OrderSide.SELL if unit.side == OrderSide.BUY else OrderSide.BUY
+        oca_group = f"PM-{sym}-{unit.entry_coid[-8:]}"
         stop = self._host.order_factory.stop_market(
             instrument_id=iid, order_side=opp,
             quantity=instrument.make_qty(Decimal(str(unit.qty))),
             trigger_price=instrument.make_price(Decimal(str(unit.hard_stop_px))),
-            time_in_force=TimeInForce.GTC, tags=self._fa_tags(),
+            time_in_force=TimeInForce.GTC, tags=self._fa_tags(oca_group=oca_group),
         )
         unit.stop_coid = stop.client_order_id.value
         self._coid_index[unit.stop_coid] = (sym, "stop")
         self._host.submit_order(stop)
+        self._journal_map_coid(unit.stop_coid, unit.proposal_id)
 
-        # #10 半数止盈：qty>=2 取一半（保留 runner）；qty==1 无法半止盈 →
-        # 退化为全量止盈（仍有明确止盈目标，不再是只能吃满止损）。
         tp_qty = unit.qty // 2
         if tp_qty < 1:
             tp_qty = unit.qty
@@ -334,14 +438,23 @@ class AutoPositionManager:
                 instrument_id=iid, order_side=opp,
                 quantity=instrument.make_qty(Decimal(str(tp_qty))),
                 price=instrument.make_price(Decimal(str(unit.tp_px))),
-                time_in_force=TimeInForce.GTC, tags=self._fa_tags(),
+                time_in_force=TimeInForce.GTC, tags=self._fa_tags(oca_group=oca_group),
             )
             unit.tp_coid = tp.client_order_id.value
             self._coid_index[unit.tp_coid] = (sym, "tp")
             self._host.submit_order(tp)
+            self._journal_map_coid(unit.tp_coid, unit.proposal_id)
 
         self._sync_position_redis(sym)
         self._persist(sym)
+        if unit.proposal_id and self._on_proposal_exec:
+            self._on_proposal_exec(unit.proposal_id, "filled", {
+                "symbol": sym,
+                "entry_px": unit.entry_px,
+                "qty": unit.qty,
+                "stop": unit.hard_stop_px,
+                "tp": unit.tp_px,
+            })
 
     def _on_tp_complete(self, sym: str, unit: Unit) -> None:
         iid = self._iid_map[sym]
@@ -403,6 +516,7 @@ class AutoPositionManager:
             "tp_coid": u.tp_coid, "entry_filled": u.entry_filled, "tp_filled": u.tp_filled,
             "planned_stop_px": u.planned_stop_px, "planned_tp_rr": u.planned_tp_rr,
             "manual_remainder": u.manual_remainder,
+            "proposal_id": u.proposal_id,
         }
 
     def _deserialize(self, d: dict) -> Unit:
@@ -419,6 +533,7 @@ class AutoPositionManager:
             planned_stop_px=float(d.get("planned_stop_px", 0)),
             planned_tp_rr=float(d.get("planned_tp_rr", 0)),
             manual_remainder=bool(d.get("manual_remainder")),
+            proposal_id=str(d.get("proposal_id") or ""),
         )
 
     def _persist(self, sym: str) -> None:
@@ -570,8 +685,13 @@ class AutoPositionManager:
             return None
         open_u = [u for u in self._units.get(sym, []) if u.state != UnitState.CLOSED]
 
-        # A) broker 已平，本地仍以为持仓 → 撤残单 + 重置（覆盖 close 漏确认 / 宕机止损）
+        # A) broker 已平，本地仍以为持仓 → 撤残单 + 重置
         if net == 0 and open_u:
+            pending_close = any(u.state == UnitState.PENDING_CLOSE for u in open_u)
+            if pending_close:
+                self._host.log.info(f"[Reconcile] {sym}: 平仓单已成交，本地 PENDING_CLOSE → 清状态")
+                self._finalize_symbol_close(sym)
+                return "close_confirmed"
             self._host.log.warning(
                 f"[Reconcile] {sym}: broker 已平但本地有 {len(open_u)} 单元 → 撤残单并重置"
             )
@@ -595,16 +715,46 @@ class AutoPositionManager:
                 return None
             return None
 
-        # C) 双方都有仓但数量不一致（FA 部分分配等）→ 仅告警
+        # C) 双方都有仓但数量不一致（FA 部分分配等）→ 同步止损数量
         if net != 0 and open_u:
             eng_qty = sum(u.qty for u in open_u
-                          if u.state in (UnitState.ACTIVE, UnitState.BREAKEVEN))
-            if eng_qty and abs(abs(net) - eng_qty) >= 1:
+                          if u.state in (UnitState.ACTIVE, UnitState.BREAKEVEN, UnitState.PENDING_CLOSE))
+            broker_qty = int(abs(net))
+            if eng_qty and abs(broker_qty - eng_qty) >= 1:
                 self._host.log.warning(
-                    f"[Reconcile] {sym}: 数量不一致 broker={net} 本地={eng_qty}（FA/部分成交?）"
+                    f"[Reconcile] {sym}: 数量不一致 broker={net} 本地={eng_qty} → 同步止损"
                 )
+                self._sync_unit_qty_to_broker(sym, broker_qty, open_u)
             return None
         return None
+
+    def _sync_unit_qty_to_broker(self, sym: str, broker_qty: int, open_u: list) -> None:
+        iid = self._iid_map.get(sym)
+        instrument = self._host.cache.instrument(iid) if iid else None
+        if instrument is None:
+            return
+        for u in open_u:
+            if u.state not in (UnitState.ACTIVE, UnitState.BREAKEVEN):
+                continue
+            if u.qty == broker_qty:
+                continue
+            u.qty = broker_qty
+            if not u.stop_coid:
+                self._persist(sym)
+                continue
+            stop = self._host.cache.order(ClientOrderId(u.stop_coid))
+            if stop and stop.is_open:
+                try:
+                    self._host.modify_order(
+                        order=stop,
+                        quantity=instrument.make_qty(Decimal(str(broker_qty))),
+                        trigger_price=stop.trigger_price,
+                    )
+                    self._host.log.info(f"[Reconcile] {sym}: 止损数量 → {broker_qty}")
+                except Exception as e:
+                    self._host.log.error(f"[Reconcile] {sym}: 同步止损数量失败: {e}")
+            self._persist(sym)
+            break
 
     def reconcile_all(self) -> None:
         for sym in self._iid_map:
@@ -612,6 +762,50 @@ class AutoPositionManager:
                 self.reconcile(sym)
             except Exception as e:
                 self._host.log.warning(f"[Reconcile] {sym}: 异常 {e}")
+
+    def reconcile_startup(self) -> dict:
+        """启动对账：broker 持仓 + cache 挂单 + Redis 单元（crash 后防双买/幽灵单元）。"""
+        actions: list[str] = []
+        for sym in self._iid_map:
+            tag = self.reconcile(sym)
+            if tag:
+                actions.append(f"{sym}:{tag}")
+            changed = False
+            for unit in list(self._units.get(sym, [])):
+                if unit.state != UnitState.PENDING_ENTRY or not unit.entry_coid:
+                    continue
+                st = self._order_status(unit.entry_coid)
+                if st == "FILLED":
+                    self._validate_recovered(sym)
+                    changed = True
+                elif st in TERMINAL_STATUS:
+                    self._host.log.warning(
+                        f"[StartupReconcile] {sym}: entry {st} → 单元作废"
+                    )
+                    unit.state = UnitState.CLOSED
+                    actions.append(f"{sym}:void_entry_{st}")
+                    changed = True
+                    if unit.proposal_id and self._on_proposal_exec:
+                        self._on_proposal_exec(
+                            unit.proposal_id, "submit_failed", {"reason": f"startup_{st}"},
+                        )
+                elif not st:
+                    actions.append(f"{sym}:entry_pending_cache")
+            if changed:
+                self._persist(sym)
+
+        open_strategy_orders = 0
+        try:
+            for o in self._host.cache.orders_open():
+                if getattr(o, "strategy_id", None) == self._host.id:
+                    open_strategy_orders += 1
+        except Exception:
+            pass
+        return {
+            "actions": actions,
+            "open_strategy_orders": open_strategy_orders,
+            "symbols_checked": len(self._iid_map),
+        }
 
     def _ensure_protective_stop(self, sym: str, unit: Unit) -> None:
         """接管的持仓若无有效止损，补挂兜底止损，杜绝裸仓。"""
@@ -639,6 +833,7 @@ class AutoPositionManager:
             unit.stop_coid = stop.client_order_id.value
             self._coid_index[unit.stop_coid] = (sym, "stop")
             self._host.submit_order(stop)
+            self._journal_map_coid(unit.stop_coid, unit.proposal_id)
             self._host.log.warning(
                 f"[Reconcile] {sym}: ⛑️ 接管持仓无止损 → 补挂兜底止损 @ {unit.hard_stop_px}"
             )
@@ -661,10 +856,16 @@ class AutoPositionManager:
                 return u
         return None
 
-    def _fa_tags(self) -> Optional[list[str]]:
-        if not self._cfg.fa_group:
+    def _fa_tags(self, oca_group: Optional[str] = None) -> Optional[list[str]]:
+        payload: dict = {}
+        if self._cfg.fa_group:
+            payload["faGroup"] = self._cfg.fa_group
+            payload["faMethod"] = self._cfg.fa_method
+        if oca_group:
+            payload["ocaGroup"] = oca_group
+            payload["ocaType"] = 1  # One-Cancels-All（官方 OCA 模式）
+        if not payload:
             return None
-        payload = {"faGroup": self._cfg.fa_group, "faMethod": self._cfg.fa_method}
         return [f"IBOrderTags:{json.dumps(payload)}"]
 
     def _sync_position_redis(self, sym: Optional[str]) -> None:

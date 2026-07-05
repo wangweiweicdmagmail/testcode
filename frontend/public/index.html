@@ -1775,6 +1775,7 @@
   </div><!-- /main-area -->
   <div class="modal-backdrop" id="open-modal" style="display:none!important"></div>
 
+  <script src="/shared/api-auth.js"></script>
   <script src="/shared/alpha-copy.js"></script>
   <script src="/shared/approval-modal.js"></script>
   <script>
@@ -2860,6 +2861,16 @@
               speak(`${SYMBOL} 已批准${live ? '实盘' : '观察'}，Agent已开启`, true);
               showToast(`📋 ${SYMBOL} 已批准${live ? '实盘' : '观察'} · 下一根 M1 可执行`, live ? 'warn' : 'tip');
               syncAgentExecUi(live ? 'live' : 'observe');
+            } else if (ev.event === 'executing' && ev.symbol === SYMBOL) {
+              speak(`${SYMBOL} 报单中`, true);
+              showToast(`⏳ ${SYMBOL} Agent 报单中…`, 'tip');
+            } else if (ev.event === 'submit_failed' && ev.symbol === SYMBOL) {
+              speak(`${SYMBOL} 报单失败`, true);
+              showToast(`⚠️ ${SYMBOL} 报单失败 · ${ev.reason || '待下一根 M1 重试'}`, 'warn');
+            } else if (ev.event === 'executed' && ev.symbol === SYMBOL) {
+              const label = window.AlphaCopy?.execResultLabel(ev.result || 'executed') || (ev.result || 'executed');
+              speak(`${SYMBOL} ${label}`, true);
+              showToast(`✅ ${SYMBOL} ${label}`, ev.result === 'risk_rejected' ? 'warn' : 'tip');
             } else if (ev.event && ev.event !== 'executed' && ev.symbol) {
               const sym = ev.symbol;
               if (!SYMBOL || sym === SYMBOL) {
@@ -3451,6 +3462,7 @@
 
     // 进入开仓模式
     function enterOrderMode() {
+      if (blockManualOpen('开仓')) return;
       // accountInfo 已由 updateAccountPanel（Redis SSE）实时维护，无需重新 HTTP fetch
 
       // 初始止损价：优先用 ST 值；如无则按当前价 ±1% 作为初始占位
@@ -3577,7 +3589,8 @@
         }
 
         exitModifyMode();  // 拖动结束，药丸立即消失
-        fetch(`/api/modify-stop/${SYMBOL}`, {
+        const authFetch = window.NautilusAuth?.authFetch || fetch;
+        authFetch(`/api/modify-stop/${SYMBOL}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ price: newPrice }),
@@ -3815,6 +3828,7 @@
 
     // ─── 进入 / 退出限价模式 ──────────────────────────────────────────────
     function enterLimitMode() {
+        if (blockManualOpen('限价开仓')) return;
         // 如果市价单模式开着，先退出
         if (orderMode) exitOrderMode();
         limitMode = true;
@@ -3900,8 +3914,7 @@
 
     // ─── 「限价单」按钮 ─────────────────────────────────────────────────
     document.getElementById('btn-limit-open').addEventListener('click', () => {
-        if (blockIfHalted('限价开仓')) return;
-        if (blockIfAutoLive('限价开仓')) return;
+        if (blockManualOpen('限价开仓')) return;
         if (limitMode) { exitLimitMode(); return; }
         // 已有持仓时禁止加仓
         if (currentPosition) {
@@ -4015,6 +4028,7 @@
 
     // ─── 确认下限价单 ─────────────────────────────────────────────────
     document.getElementById('lop-confirm').addEventListener('click', async () => {
+        if (blockManualOpen('限价开仓')) return;
         const calc = updateLimitCalc();
         if (!calc || !lpPrice) {
             showToast('⚠️ 参数不完整，无法下单', 'warn'); return;
@@ -4071,8 +4085,7 @@
     // ─── 开仓按钮 → 进入止损拖动开仓模式 ─────────────────────────────────
     // 开仓按钮 → 进入止损拖动开仓模式
     document.getElementById('btn-open').addEventListener('click', () => {
-      if (blockIfHalted('开仓')) return;
-      if (blockIfAutoLive('开仓')) return;
+      if (blockManualOpen('开仓')) return;
       // 已有持仓时禁止加仓，弹窗提示
       if (currentPosition) {
         const side = currentPosition.side === 'SHORT' ? '空' : '多';
@@ -4094,6 +4107,7 @@
 
     // 确认开仓 —— 实际调用引擎 API
     document.getElementById('op-confirm').addEventListener('click', async () => {
+      if (blockManualOpen('开仓')) return;
       const sl = parseFloat(opSlInput.value);
       const entry = latestClose || 0;
       const maxLoss = parseFloat(opMaxLoss.value) || 100;
@@ -4140,8 +4154,30 @@
     // 平仓按钮
     document.getElementById('btn-close').addEventListener('click', async () => {
       if (!confirm('确认平仓？')) return;
-      await fetch(`/api/position/${SYMBOL}`, { method: 'DELETE' });
-      location.reload();
+      try {
+        const authFetch = window.NautilusAuth?.authFetch || fetch;
+        const resp = await authFetch(`/api/position/${SYMBOL}`, { method: 'DELETE' });
+        const result = await resp.json();
+        if (!resp.ok) {
+          speak(`${SYMBOL} 平仓失败`, true);
+          showToast(`⚠️ ${result.error || '平仓失败'}${result.hint ? ' · ' + result.hint : ''}`, 'warn');
+          return;
+        }
+        if (result.engine?.error) {
+          speak(`${SYMBOL} 平仓可能未成功`, true);
+          showToast(`⚠️ ${result.engine.error}`, 'warn');
+        } else {
+          speak(`${SYMBOL} 平仓已提交`, true);
+          if (result.routed === 'auto_pm') {
+            showToast(`✅ ${SYMBOL} 已路由 AutoPM，等待成交确认`, 'ok');
+          } else {
+            location.reload();
+          }
+        }
+      } catch (e) {
+        speak('网络错误，平仓失败', true);
+        showToast(`网络错误: ${e.message}`, 'warn');
+      }
     });
 
     // ─── 止盈跟踪下拉（trail_mode: 0=关 1=M1-ST 2=M5-ST 3=EMA）─────────
@@ -4233,6 +4269,11 @@
       autoSel.value = mode;
       applyAutoStyle(mode);
     }
+    function blockManualOpen(actionLabel) {
+      showToast(`系统禁止手动开仓，请走 Alpha 审批流程`, 'warn');
+      speak('禁止手动开仓', true);
+      return true;
+    }
     function blockIfAutoLive(actionLabel) {
       if (autoStrategyMode !== 'live' && openingBreakoutMode !== 'live') return false;
       const which = openingBreakoutMode === 'live' ? '开盘突破' : '自动策略';
@@ -4247,13 +4288,13 @@
       return true;
     }
     function updateTradeButtonsState() {
-      const blocked = riskHalted || autoStrategyMode === 'live' || openingBreakoutMode === 'live';
       for (const id of ['btn-open', 'btn-limit-open']) {
         const btn = document.getElementById(id);
         if (!btn) continue;
-        btn.disabled = blocked;
-        btn.style.opacity = blocked ? '0.45' : '';
-        btn.style.cursor = blocked ? 'not-allowed' : '';
+        btn.disabled = true;
+        btn.style.opacity = '0.45';
+        btn.style.cursor = 'not-allowed';
+        btn.title = '系统禁止手动开仓，请走 Alpha 审批';
       }
     }
     autoSel.addEventListener('change', async () => {
@@ -4530,7 +4571,10 @@
           return (b.created_at || 0) - (a.created_at || 0);
         });
         const approvedItems = (approvedData.proposals || [])
-          .filter(p => p.execution_phase === 'approved_wait' || p.execution_phase === 'ready_to_execute')
+          .filter(p => {
+            const ph = p.execution_phase;
+            return ph === 'approved_wait' || ph === 'ready_to_execute' || ph === 'executing';
+          })
           .filter(p => p.symbol === SYMBOL)
           .sort((a, b) => (b.decided_at || 0) - (a.decided_at || 0));
         const parts = [];

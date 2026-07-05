@@ -173,6 +173,20 @@
             outline-offset: -2px;
         }
 
+        .cell.cell-alpha-executing {
+            outline: 2px solid rgba(240, 185, 11, .65);
+            outline-offset: -2px;
+            box-shadow: inset 0 0 0 1px rgba(240, 185, 11, .25);
+            animation: exec-pulse 1.2s ease-in-out infinite;
+        }
+
+        @keyframes exec-pulse {
+            0%, 100% { box-shadow: inset 0 0 0 1px rgba(240, 185, 11, .2); }
+            50% { box-shadow: inset 0 0 12px rgba(240, 185, 11, .35); }
+        }
+
+        .astep.active-executing { color: #f0b90b; font-weight: 700; }
+
         .cell.cell-has-position {
             box-shadow: inset 3px 0 0 #2196f3;
         }
@@ -226,6 +240,7 @@
         .pill-pending { background: rgba(239,83,80,.2); color: #ef5350; }
         .pill-wait { background: rgba(41,98,255,.2); color: #2962ff; }
         .pill-ready { background: rgba(38,166,154,.2); color: #26a69a; }
+        .pill-executing { background: rgba(240,185,11,.22); color: #f0b90b; }
         .pill-none { background: #2a2e39; color: #787b86; }
 
         .c-body {
@@ -1052,7 +1067,7 @@
             });
             DEFAULT_SYMBOLS.forEach((sym) => {
                 updateAlphaPill(sym);
-                drawProposalTriggerLine(sym);
+                drawProposalPriceLines(sym);
                 updateSysPanel(sym);
             });
         }
@@ -1118,7 +1133,7 @@
         window.onAlphaUpdated = () => {
             DEFAULT_SYMBOLS.forEach((sym) => {
                 updateAlphaPill(sym);
-                drawProposalTriggerLine(sym);
+                drawProposalPriceLines(sym);
             });
         };
 
@@ -1126,11 +1141,15 @@
             const phase = e.detail?.phase || 'pending';
             const sym = window.AlphaCell?.firstSymbolForPhase(phase);
             if (!sym) {
-                showToast(phase === 'pending' ? '暂无待审批标的' : '暂无待执行标的', 'tip');
+                const msg = phase === 'pending' ? '暂无待审批标的'
+                  : (phase === 'active' || phase === 'ready' || phase === 'wait')
+                    ? '暂无待执行/等待回踩标的' : '暂无标的';
+                showToast(msg, 'tip');
                 return;
             }
-            const proposal = window.AlphaCell?.phaseForSymbol(sym)?.proposal;
-            focusApprovalCell(sym, phase === 'pending' ? proposal : null);
+            const { phase: cellPhase, proposal } = AlphaCell.phaseForSymbol(sym);
+            focusApprovalCell(sym, cellPhase === 'pending' ? proposal : null);
+            if (cellPhase !== 'pending') focusCell(sym);
         });
 
         window.addEventListener('nautilus:focus-pending', (e) => {
@@ -1990,7 +2009,7 @@
                 }
                 if (m1.length) state[symbol].lastM1Time = m1[m1.length - 1].time;
                 updateSysPanel(symbol);
-                drawProposalTriggerLine(symbol);
+                drawProposalPriceLines(symbol);
                 addOpeningRange(symbol, m5);
                 addPositionLines(symbol, position);
                 updateHeader(symbol, m1_bars);
@@ -2134,15 +2153,16 @@
         function bindEvents(symbol) {
             const s = state[symbol];
 
-            // 开仓按钮 → 进入止损拖动模式
-            document.getElementById(`btn-open-${symbol}`).addEventListener('click', () => {
-                if (s.autoMode === 'live') {
-                    speak(`${symbol} 自动策略实盘中，禁止手动开仓`, true);
-                    showToast(`⚠️ ${symbol} 自动策略实盘中`, 'warn');
-                    return;
-                }
-                if (!s.ctx) return;
-                enterOrderMode(s.ctx);
+            // 开仓按钮（已禁用：仅 Agent 审批后可自动开仓）
+            const openBtn = document.getElementById(`btn-open-${symbol}`);
+            openBtn.disabled = true;
+            openBtn.style.opacity = '0.45';
+            openBtn.style.cursor = 'not-allowed';
+            openBtn.title = '系统禁止手动开仓，请走 Alpha 审批';
+            openBtn.addEventListener('click', () => {
+                showToast('系统禁止手动开仓，请走 Alpha 审批', 'warn');
+                speak('禁止手动开仓', true);
+                return;
             });
 
             // 平仓
@@ -2152,18 +2172,20 @@
                 btn.disabled = true;
                 btn.textContent = '平仓中…';
                 try {
-                    const resp = await fetch(`/api/position/${symbol}`, { method: 'DELETE' });
+                    const authFetch = window.NautilusAuth?.authFetch || fetch;
+                    const resp = await authFetch(`/api/position/${symbol}`, { method: 'DELETE' });
                     const result = await resp.json();
-                    if (result.warning) {
-                        speak(`${symbol} 平仓警告，请在 TWS 检查仓位`, true);
-                        alert(`⚠️ ${result.warning}`);
-                        location.reload();
+                    if (!resp.ok) {
+                        speak(`${symbol} 平仓失败`, true);
+                        showToast(`⚠️ ${result.error || '平仓失败'}${result.hint ? ' · ' + result.hint : ''}`, 'warn');
                     } else if (result.engine?.error) {
                         speak(`${symbol} 平仓失败`, true);
                         alert(`❌ 平仓失败: ${result.engine.error}`);
                     } else {
                         speak(`${symbol} 平仓指令已发出`, true);
-                        // 不刷新页面，等 WebSocket position:update 事件自动清空 UI
+                        if (result.routed === 'auto_pm') {
+                            showToast(`✅ ${symbol} 已路由 AutoPM，等待成交确认`, 'ok');
+                        }
                     }
                 } catch (e) {
                     alert(`网络错误: ${e.message}`);
@@ -2273,7 +2295,8 @@
                 }
                 const newPrice = ctx.slPrice;
                 exitModifyMode(ctx);  // 药丸立即消失
-                fetch(`/api/modify-stop/${ctx.sym}`, {
+                const authFetch = window.NautilusAuth?.authFetch || fetch;
+                authFetch(`/api/modify-stop/${ctx.sym}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ price: newPrice }),
@@ -2365,35 +2388,8 @@
 
         // 进入开仓模式（异步获取真实账户余额）
         async function enterOrderMode(ctx) {
-            try {
-                const resp = await fetch('/api/account');
-                const data = await resp.json();
-                ctx.accountInfo = { ...data, engine_online: !data.engine_offline };
-            } catch (e) {
-                ctx.accountInfo = { total_equity: 0, available_cash: 0, engine_online: false };
-            }
-
-            const initSL = ctx.latestST
-                ? ctx.latestST
-                : (ctx.latestClose ? ctx.latestClose * 0.99 : 0);
-            ctx.slPrice = parseFloat(initSL.toFixed(2));
-            ctx.slPriceLine = ctx.cs.createPriceLine({
-                price: ctx.slPrice, color: '#ef5350', lineWidth: 1,
-                lineStyle: LightweightCharts.LineStyle.Dashed,
-                axisLabelVisible: true, title: `止损 ${ctx.slPrice.toFixed(2)}`,
-            });
-            ctx.orderMode = true;
-            ctx.handleEl.classList.add('active');
-            ctx.panelEl.classList.add('active');
-            // 显示遮罩层
-            const overlay = document.getElementById('orderPanelOverlay');
-            if (overlay) {
-                overlay.classList.add('active');
-                overlay.onclick = () => exitOrderMode(ctx);
-            }
-            updateHandlePriceLabel(ctx);
-            updateOrderPanel(ctx);
-            snapHandle(ctx);
+            showToast('系统禁止手动开仓，请走 Alpha 审批', 'warn');
+            speak('禁止手动开仓', true);
         }
 
         // 退出开仓模式
@@ -2490,10 +2486,36 @@
                         }
 
                         if (!DEFAULT_SYMBOLS.includes(sym)) return;
-                        if (ev.event === 'executed') {
+                        if (ev.event === 'executing') {
+                            if (window.AlphaCell) AlphaCell.setExecuting(sym, ev.proposal_id);
+                            showToast(`⏳ ${sym} Agent 报单中…`, 'tip');
+                        } else if (ev.event === 'submit_failed') {
+                            if (window.AlphaCell) AlphaCell.clearExecuting(sym);
+                            speak(`${sym} 报单失败`, true);
+                            showToast(`⚠️ ${sym} 报单失败 · ${ev.reason || '待下一根 M1 重试'}`, 'warn');
+                        } else if (ev.event === 'executed') {
+                            if (window.AlphaCell) AlphaCell.clearExecuting(sym);
                             if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
-                            speak(`${sym} 建议已执行`, true);
-                            showToast(`✅ ${sym} 建议已执行`, 'tip');
+                            clearProposalPriceLines(sym);
+                            const result = ev.result || 'executed';
+                            const label = window.AlphaCopy?.execResultLabel(result) || result;
+                            speak(`${sym} ${label}`, true);
+                            showToast(`✅ ${sym} ${label}`, result === 'risk_rejected' ? 'warn' : 'tip');
+                        } else if (ev.event === 'reclaim_ready') {
+                            speak(`${sym} 回踩完成，待执行`, true);
+                            showToast(`📋 ${sym} 回踩完成 · 待执行`, 'tip');
+                            focusCell(sym);
+                        } else if (ev.event === 'reclaim_failed') {
+                            if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
+                            clearProposalPriceLines(sym);
+                            speak(`${sym} 回踩失败`, true);
+                            showToast(`❌ ${sym} 回踩失败 · ${ev.reason || '条件未满足'}`, 'warn');
+                        } else if (ev.event === 'cancelled') {
+                            if (window.AlphaCell) AlphaCell.clearExecuting(sym);
+                            if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
+                            clearProposalPriceLines(sym);
+                            speak(`${sym} 已取消批准`, true);
+                            showToast(`📋 ${sym} 已取消批准`, 'tip');
                         } else if (ev.event === 'approved_live' || ev.event === 'approved_observe') {
                             if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
                             const live = ev.event === 'approved_live';
@@ -2510,6 +2532,7 @@
                                 sel.style.color = live ? '#ef5350' : '#f0b90b';
                                 if (state[sym]) state[sym].autoMode = mode;
                             }
+                            focusCell(sym);
                         } else if (ev.event === 'rejected') {
                             if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
                             showToast(`❌ ${sym} 建议已驳回`, 'tip');
@@ -2537,10 +2560,25 @@
                                 speak(`${sym} 观察：应开${sideZh}`, true);
                                 showToast(`👁 ${sym} 观察信号 应开${sideZh}`, 'tip');
                                 break;
-                            case 'open':
-                                speak(`${sym} 自动开仓 ${sideZh}`, true);
-                                showToast(`🤖 ${sym} 自动开仓 ${sideZh}`, 'warn');
+                            case 'open': {
+                                const prop = window.AlphaCell?.phaseForSymbol(sym)?.proposal;
+                                if (window.AlphaCell && prop) AlphaCell.setExecuting(sym, prop.proposal_id);
+                                const pid = sig.proposal_id || prop?.proposal_id;
+                                const tag = pid ? ` #${String(pid).slice(-6)}` : '';
+                                speak(`${sym} Agent开仓 ${sideZh}`, true);
+                                showToast(`🤖 ${sym} Agent 开仓 ${sideZh}${tag}`, 'warn');
+                                focusCell(sym);
                                 break;
+                            }
+                            case 'rejected': {
+                                if (window.AlphaCell) AlphaCell.clearExecuting(sym);
+                                const reason = sig.reason || '风控/条件拒绝';
+                                const pid = sig.proposal_id ? ` #${String(sig.proposal_id).slice(-6)}` : '';
+                                speak(`${sym} Agent拒绝 ${reason}`, true);
+                                showToast(`⛔ ${sym} Agent 未执行${pid} · ${reason}`, 'warn');
+                                refreshAlphaPanels();
+                                break;
+                            }
                             case 'reversal':
                                 speak(`${sym} 自动反转平仓`, true);
                                 showToast(`🔄 ${sym} 反转全平`, 'warn');
@@ -2604,8 +2642,13 @@
                                     speak(`${sym} 平仓成交，成交价 ${o.last_px}`, true);
                                     showToast(`✅ ${sym} 平仓成交 @${o.last_px} x${o.last_qty}`, 'ok');
                                 } else {
+                                    const wasAgent = window.AlphaCell?.isExecuting(fillSym);
+                                    if (wasAgent) {
+                                        window.AlphaCell.clearExecuting(fillSym);
+                                        clearProposalPriceLines(fillSym);
+                                    }
                                     speak(`${sym} ${side}订单成交，成交价 ${o.last_px}`, true);
-                                    showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}`, 'ok');
+                                    showToast(`✅ ${sym} ${side}成交 @${o.last_px} x${o.last_qty}${wasAgent ? ' · Agent' : ''}`, 'ok');
                                 }
 
                                 // 成交标记
@@ -2777,23 +2820,62 @@
             ws.onclose = () => setTimeout(connectWS, 3000);
         }
 
-        function drawProposalTriggerLine(symbol) {
+        function clearProposalPriceLines(symbol) {
             const s = state[symbol];
             if (!s?.candleSeries) return;
-            if (s.triggerPriceLine) {
-                try { s.candleSeries.removePriceLine(s.triggerPriceLine); } catch (_) {}
-                s.triggerPriceLine = null;
+            const lines = s.proposalPriceLines || {};
+            for (const key of ['trigger', 'stop', 'tp']) {
+                if (lines[key]) {
+                    try { s.candleSeries.removePriceLine(lines[key]); } catch (_) {}
+                    lines[key] = null;
+                }
             }
+            s.proposalPriceLines = lines;
+            if (s.triggerPriceLine) s.triggerPriceLine = null;
+        }
+
+        function drawProposalPriceLines(symbol) {
+            const s = state[symbol];
+            if (!s?.candleSeries) return;
+            clearProposalPriceLines(symbol);
             const prop = window.AlphaCell?.phaseForSymbol(symbol)?.proposal;
-            if (!prop?.trigger_level) return;
-            s.triggerPriceLine = s.candleSeries.createPriceLine({
-                price: Number(prop.trigger_level),
-                color: '#2962ff',
-                lineWidth: 1,
-                lineStyle: LightweightCharts.LineStyle.Dotted,
-                axisLabelVisible: true,
-                title: `触发 ${prop.trigger_level}`,
-            });
+            if (!prop) return;
+            const lines = {};
+            const trigger = Number(prop.trigger_level);
+            const stop = Number(prop.stop_price);
+            const tp = Number(prop.tp_half_price ?? prop.tp_price);
+            if (trigger && !Number.isNaN(trigger)) {
+                lines.trigger = s.candleSeries.createPriceLine({
+                    price: trigger,
+                    color: '#2962ff',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dotted,
+                    axisLabelVisible: true,
+                    title: `触发 ${trigger}`,
+                });
+            }
+            if (stop && !Number.isNaN(stop)) {
+                lines.stop = s.candleSeries.createPriceLine({
+                    price: stop,
+                    color: '#ef5350',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `止损 ${stop}`,
+                });
+            }
+            if (tp && !Number.isNaN(tp)) {
+                lines.tp = s.candleSeries.createPriceLine({
+                    price: tp,
+                    color: '#26a69a',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `TP½ ${tp}`,
+                });
+            }
+            s.proposalPriceLines = lines;
+            s.triggerPriceLine = lines.trigger || null;
         }
 
         // ── 启动 ────────────────────────────────────────────────
@@ -2814,7 +2896,7 @@
         Promise.all(DEFAULT_SYMBOLS.map(sym => loadSymbol(sym))).then(() => {
             chartsReady = true;
             playPostReloadAlert();
-            DEFAULT_SYMBOLS.forEach(drawProposalTriggerLine);
+            DEFAULT_SYMBOLS.forEach(drawProposalPriceLines);
             const focusSym = new URLSearchParams(location.search).get('focus')?.toUpperCase();
             if (focusSym && DEFAULT_SYMBOLS.includes(focusSym)) {
                 setTimeout(() => {

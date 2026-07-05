@@ -93,7 +93,6 @@ def _check_singleton():
 _check_singleton()
 
 from nautilus_trader.adapters.interactive_brokers.common import IB
-from nautilus_trader.adapters.interactive_brokers.config import IBMarketDataTypeEnum
 from nautilus_trader.adapters.interactive_brokers.config import InteractiveBrokersDataClientConfig
 from nautilus_trader.adapters.interactive_brokers.config import InteractiveBrokersExecClientConfig
 from nautilus_trader.adapters.interactive_brokers.config import (
@@ -235,7 +234,9 @@ GATEWAY_INSTRUMENTS = list({
     *GATEWAY_INSTRUMENTS_EXTRA,
 })
 
-MARKET_DATA_TYPE = IBMarketDataTypeEnum.REALTIME
+from portfolio.market_data import ib_market_data_type
+
+MARKET_DATA_TYPE = ib_market_data_type()
 
 # ============================================================
 # 合约提供者配置
@@ -329,12 +330,31 @@ exit_manager = ExitManager(config=ExitManagerConfig())
 # 策略 4：全自动量化策略 Actor（SuperTrend + DEMA，M5）
 # 人在某标的上启动开关（settings:{sym}.auto_strategy）后自动开仓/止损/止盈/加仓
 # ============================================================
+from portfolio.trading_env import (
+    allow_fixed_qty,
+    live_orders_allowed,
+    production_safety_warnings,
+    trading_env,
+)
+
+_AUTO_FIXED_QTY = max(0, int(os.environ.get("AUTO_FIXED_QTY", "0")))
+if _AUTO_FIXED_QTY > 0 and not allow_fixed_qty(_AUTO_FIXED_QTY):
+    if live_orders_allowed() and not IS_BACKTEST:
+        raise SystemExit(
+            f"拒绝启动: AUTO_FIXED_QTY={_AUTO_FIXED_QTY} 会跳过以损定量；"
+            "live 模式请设 ALLOW_FIXED_QTY=1 或改 AUTO_FIXED_QTY=0"
+        )
+    print(
+        f"⚠️  AUTO_FIXED_QTY={_AUTO_FIXED_QTY} 未 ALLOW_FIXED_QTY=1，已降级为动态 sizing"
+    )
+    _AUTO_FIXED_QTY = 0
+
 auto_strategy = AutoRunner(
     config=AutoRunnerConfig(
         instrument_ids=tuple(GATEWAY_INSTRUMENTS),
         fa_group=FA_GROUP,
         fa_method=FA_METHOD,
-        fixed_qty=max(0, int(os.environ.get("AUTO_FIXED_QTY", "0"))),
+        fixed_qty=_AUTO_FIXED_QTY,
     )
 )
 
@@ -367,6 +387,10 @@ if __name__ == "__main__":
         print(f"  K线合约: {BAR_INSTRUMENT_ID} | 账户: {ACCOUNT_ID}")
         if not IS_BACKTEST:
             print(f"  下单网关: http://localhost:8888/order")
+            te = trading_env()
+            print(f"  TRADING_ENV: {te}" + (" (实盘报单已启用)" if live_orders_allowed() else " (仅观察，不提交自动单)"))
+            for w in production_safety_warnings():
+                print(f"  ⚠️  生产安全: {w}")
         print("  按 Ctrl+C 停止...")
         print("=" * 60)
         _print_success_banner(

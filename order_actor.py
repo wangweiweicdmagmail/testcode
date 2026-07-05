@@ -36,7 +36,6 @@ try:
 except ImportError:
     _REDIS_AVAILABLE = False
 
-from nautilus_trader.adapters.interactive_brokers.common import IBOrderTags
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.message import Event
 from nautilus_trader.core.uuid import UUID4
@@ -44,12 +43,13 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import OrderListId
-from nautilus_trader.model.orders.list import OrderList
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
 from events import STTrailSettingsEvent, EMATrailSettingsEvent, TERMINAL_STATUS
 from portfolio.sessions import et_session_date, et_minute_now
+from portfolio.trading_env import live_orders_allowed
+from portfolio.ib_orders import build_marketable_order
+from portfolio.fa_validate import validate_fa_group
 
 # 订单终态集合（全局复用，来自 events.py）
 TERMINAL = TERMINAL_STATUS
@@ -155,28 +155,15 @@ class OrderGatewayActor(Strategy):
         super().__init__(config)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._http_server: HTTPServer | None = None
-        self._sl_tasks: list[asyncio.Task] = []  # 保存 task 引用，避免被 GC 或引擎停止时静默取消
         self._redis: "_redis_lib.Redis | None" = None  # Redis 推送客户端
-        # 待提交的止损单：{entry_client_order_id: (sl_order, sl_tasks_params)}
-        # 入场单成交后在 on_order_filled 里提交
-        self._pending_sl: dict = {}
         # FA Group 专属账户查询线程控制
         self._fa_accounts_running: bool = False
+        self._fa_validated: bool = False
         # 心跳线程控制（在 __init__ 初始化，防止 on_stop 在 on_start 前被调用时 AttributeError）
         self._heartbeat_running: bool = False
         # 跟踪止损开关状态（sym -> bool）
         self._st_trail_active: dict[str, bool] = {}
         self._ema_trail_active: dict[str, bool] = {}
-        # ── LIMIT_BRACKET 止盈/止盈联动字典 ──────────────────────
-        # tp_coid -> (sl_coid, entry_price, instrument, sl_remaining_qty)
-        # 止盈单成交时：修改 SL 单（数量减半 + 止损移至入场价）
-        self._pending_tp: dict[str, tuple] = {}
-        # sl_coid -> tp_coid（止损单成交时：反向取消止盈单）
-        self._sl_to_tp:   dict[str, str]   = {}
-        # FA Group 拆单累计器：{entry_coid: accumulated_filled_qty}
-        # IBKR FA Group 每个子账户成交都触发一次 on_order_filled，
-        # 需要累计到达委托量后才真正创建 SL/TP
-        self._fill_accumulator: dict[str, int] = {}
 
 
     # ------------------------------------------------------------------
@@ -236,6 +223,11 @@ class OrderGatewayActor(Strategy):
                 f"[Gateway] OrderGatewayActor 就绪 | "
                 f"HTTP: http://{self.config.http_host}:{self.config.http_port}/order"
             )
+            if live_orders_allowed() and not os.environ.get("ORDER_GATEWAY_SECRET", "").strip():
+                self.log.error(
+                    "[Gateway] ⛔ TRADING_ENV=live 但未设置 ORDER_GATEWAY_SECRET — "
+                    "8888 下单网关对局域网开放且无 Token"
+                )
         except Exception as e:
             self.log.error(f"[Gateway] OrderGatewayActor 启动失败: {e}")
             import traceback
@@ -278,13 +270,6 @@ class OrderGatewayActor(Strategy):
         self.msgbus.unsubscribe(topic="settings.st_trail",  handler=self._on_st_trail_change)
         self.msgbus.unsubscribe(topic="settings.ema_trail", handler=self._on_ema_trail_change)
         self.msgbus.unsubscribe(topic="bar.collected",      handler=self._on_bar_collected_trail)
-
-        # 取消未完成的止损修改计划
-        for t in self._sl_tasks:
-            if not t.done():
-                t.cancel()
-                self.log.warning(f"[Gateway] 止损修改 task 已取消: {t}")
-        self._sl_tasks.clear()
 
         # 停止心跳 & FA Group 账户查询
         self._heartbeat_running = False
@@ -547,6 +532,14 @@ class OrderGatewayActor(Strategy):
         # 使用高编号 client_id 避免与主引擎冲突（DataClient=2, ExecClient=3, FAQuery=102）
         aux_client_id = int(_os.environ.get("IBG_CLIENT_ID", "2")) + 100
         fa_group = self.config.fa_group or "dt_test"
+
+        if fa_group and not self._fa_validated:
+            ok, msg = validate_fa_group(ibg_host, ibg_port, aux_client_id + 1, fa_group)
+            if ok:
+                self.log.info(f"[Account-FA] 启动校验 ✓ {msg}")
+            else:
+                self.log.error(f"[Account-FA] ⚠️ FA Group 校验失败: {msg}")
+            self._fa_validated = True
 
         # 查询间隔：3 分钟（与 IBKR 推送频率对齐，分段 sleep 支持快速停止）
         POLL_INTERVAL = 180
@@ -1063,218 +1056,21 @@ class OrderGatewayActor(Strategy):
                     pass
                 return
 
-        # ── 有待审批/待执行建议时，拒绝人工开仓（与 server.js 一致）──
         sym = event.instrument_id.split('.')[0]
-        if self._redis and event.order_type in ("BRACKET", "MKT", "MARKET", "LMT", "LIMIT", "LIMIT_BRACKET"):
-            if self._has_active_alpha_proposal(sym):
-                self.log.error(f"[Alpha] {sym} 存在活跃建议，拒绝人工下单")
-                try:
-                    self._redis.publish('order:update', json.dumps({
-                        'status': 'DENIED',
-                        'reason': f'{sym} 有待审批/待执行建议，请走审批流程',
-                        'symbol': sym,
-                        'ts': int(time.time()),
-                    }))
-                except Exception:
-                    pass
-                return
 
-        # ── 全自动策略接管时，拒绝人工下单（避免与 AutoStrategy 冲突）──
+        # ── 禁止人工开仓（Agent/AutoPM 经 submit_order 路径，不经此外部 HTTP 网关）──
+        self.log.error(f"[Order] 拒绝人工开仓: {sym} type={event.order_type}")
         if self._redis:
             try:
-                raw = self._redis.get(f"settings:{sym}")
-                if raw and json.loads(raw).get("auto_strategy"):
-                    self.log.error(f"[Auto] {sym} 自动策略实盘中，拒绝人工下单")
-                    self._redis.publish('order:update', json.dumps({
-                        'status': 'DENIED',
-                        'reason': f'{sym} 自动策略实盘中，请先关闭自动策略',
-                        'symbol': sym,
-                        'ts': int(time.time()),
-                    }))
-                    return
+                self._redis.publish('order:update', json.dumps({
+                    'status': 'DENIED',
+                    'reason': '系统禁止手动开仓，请走 Alpha 审批流程',
+                    'symbol': sym,
+                    'ts': int(time.time()),
+                }))
             except Exception:
                 pass
-
-        self.log.info(
-            f"[Order] ⬇ 收到下单指令  "
-            f"类型={event.order_type}  "
-            f"{'买入' if event.side == 'BUY' else '卖出'}  "
-            f"qty={event.qty}  "
-            f"symbol={event.instrument_id}  "
-            f"{'price=' + str(event.price) + '  ' if event.price else ''}"
-            f"{'stop_loss=' + str(event.stop_loss) + '  ' if event.stop_loss else ''}"
-            f"{'sl_steps=' + str(event.sl_steps) if event.sl_steps else ''}"
-        )
-
-        # 解析合约
-        instrument_id = InstrumentId.from_str(event.instrument_id)
-        instrument = self.cache.instrument(instrument_id)
-        if instrument is None:
-            self.log.error(
-                f"[Gateway] 合约 {instrument_id} 未加载，"
-                f"请将其加入 load_ids 后重启"
-            )
-            return
-
-        order_side = OrderSide.BUY if event.side == "BUY" else OrderSide.SELL
-        quantity = instrument.make_qty(Decimal(event.qty))
-
-        if event.order_type == "MARKET":
-            order = self.order_factory.market(
-                instrument_id=instrument_id,
-                order_side=order_side,
-                quantity=quantity,
-                time_in_force=TimeInForce.DAY,  # M2: IBKR 市价单不接受 GTC
-                tags=self._fa_tags(),
-            )
-            self.log.info(
-                f"[Order] → submit MARKET  "
-                f"{'买入' if order_side == OrderSide.BUY else '卖出'}  "
-                f"qty={quantity}  {instrument_id}  "
-                f"ClientOrderId={order.client_order_id}"
-            )
-            self.submit_order(order)
-            self._log_submitted(event, order.client_order_id.value)
-
-
-        elif event.order_type == "LIMIT":
-            if event.price is None:
-                self.log.error("[Gateway] LIMIT 单必须提供 price")
-                return
-            order = self.order_factory.limit(
-                instrument_id=instrument_id,
-                order_side=order_side,
-                quantity=quantity,
-                price=instrument.make_price(Decimal(str(event.price))),
-                time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(),
-            )
-            self.log.info(
-                f"[Order] → submit LIMIT  "
-                f"{'买入' if order_side == OrderSide.BUY else '卖出'}  "
-                f"qty={quantity}  price={event.price}  {instrument_id}  "
-                f"ClientOrderId={order.client_order_id}"
-            )
-            self.submit_order(order)
-            self._log_submitted(event, order.client_order_id.value)
-
-        elif event.order_type == "BRACKET":
-            # 正确的 BRACKET 实现：
-            # 1. 只提交入场单（市价）
-            # 2. 入场单成交后（on_order_filled）再提交止损单
-            # OCA 方案不可用：入场单成交会触发 OCA 取消止损单
-            if event.stop_loss is None:
-                self.log.error("[Gateway] BRACKET 单必须提供 stop_loss")
-                return
-
-            # 入场单（市价）：FA 分配 tags
-            entry_order = self.order_factory.market(
-                instrument_id=instrument_id,
-                order_side=order_side,
-                quantity=quantity,
-                time_in_force=TimeInForce.DAY,
-                tags=self._fa_tags(),
-            )
-
-            # 止损单参数：暂不提交，存入 _pending_sl 等入场单成交后提交
-            sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
-            sl_price = instrument.make_price(Decimal(str(event.stop_loss)))
-            sl_order = self.order_factory.stop_market(
-                instrument_id=instrument_id,
-                order_side=sl_side,
-                quantity=quantity,
-                trigger_price=sl_price,
-                time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(),
-            )
-
-            # 存入待提交字典，键为入场单的 client_order_id
-            self._pending_sl[entry_order.client_order_id.value] = (
-                sl_order,
-                list(event.sl_steps),
-                event.sl_step_secs,
-                instrument,
-            )
-
-            # 只提交入场单
-            self.submit_order(entry_order)
-
-            self.log.info(
-                f"[Gateway] BRACKET 入场单已提交 | "
-                f"Entry={entry_order.client_order_id} {order_side.name} qty={quantity} {instrument_id} | "
-                f"止损待入场单成交后提交 @ {event.stop_loss}"
-            )
-
-        elif event.order_type == "LIMIT_BRACKET":
-            # 限价入场 + 全仓止损 + 半仓止盈
-            # 入场单成交后才依次提交 SL/TP，避免挑价单与止损单互刻
-            if event.price is None:
-                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 price")
-                return
-            if event.stop_loss is None:
-                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 stop_loss")
-                return
-            if event.tp_price is None or event.tp_qty is None:
-                self.log.error("[Gateway] LIMIT_BRACKET 单必须提供 tp_price 和 tp_qty")
-                return
-
-            # 入场单（LIMIT，GTC）
-            entry_order = self.order_factory.limit(
-                instrument_id=instrument_id,
-                order_side=order_side,
-                quantity=quantity,
-                price=instrument.make_price(Decimal(str(event.price))),
-                time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(),
-            )
-
-            # 止损单（全仓 STOP_MARKET）
-            sl_side = OrderSide.SELL if order_side == OrderSide.BUY else OrderSide.BUY
-            sl_order = self.order_factory.stop_market(
-                instrument_id=instrument_id,
-                order_side=sl_side,
-                quantity=quantity,
-                trigger_price=instrument.make_price(Decimal(str(event.stop_loss))),
-                time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(),
-            )
-
-            # 止盈单（半仓 LIMIT）
-            tp_side = sl_side  # 平仓方向和止损相同
-            tp_qty  = instrument.make_qty(Decimal(event.tp_qty))
-            tp_order = self.order_factory.limit(
-                instrument_id=instrument_id,
-                order_side=tp_side,
-                quantity=tp_qty,
-                price=instrument.make_price(Decimal(str(event.tp_price))),
-                time_in_force=TimeInForce.GTC,
-                tags=self._fa_tags(),
-            )
-
-            entry_price = event.entry_price or event.price  # 备忘入场价，止盈触发后用于保本
-            # 将 SL + TP + entry_price 存入待提交字典
-            self._pending_sl[entry_order.client_order_id.value] = (
-                sl_order,
-                tp_order,
-                entry_price,
-                instrument,
-                'LIMIT_BRACKET',  # 类型标记，用于 on_order_filled 中區分 BRACKET vs LIMIT_BRACKET
-            )
-
-            # 只提交入场单
-            self.submit_order(entry_order)
-            self.log.info(
-                f"[Gateway] LIMIT_BRACKET 入场单已提交 | "
-                f"Entry={entry_order.client_order_id} LIMIT {order_side.name} qty={quantity} "
-                f"price={event.price} {instrument_id} | "
-                f"止损={event.stop_loss} | 止盈={event.tp_price}x{event.tp_qty} | "
-                f"入场单成交后自动提交 SL/TP"
-            )
-
-        else:
-            self.log.error(f"[Gateway] 不支持的订单类型: {event.order_type}")
-            return
-
+        return
 
     def _log_submitted(self, event: "ExternalOrderCommand", client_order_id: str) -> None:
         """统一打印单笔订单提交成功日志"""
@@ -1406,24 +1202,6 @@ class OrderGatewayActor(Strategy):
             )
         self._pub_order("ACCEPTED", event)
 
-
-    def _find_active_stop_order(self, instrument_id):
-        """
-        在 cache 中查找该标的当前活跃的 STOP_MARKET 止损单。
-        用于加仓场景：如已有止损单，直接修改数量，不再新建。
-        返回 order 对象；若不存在返回 None。
-        """
-        for order in self.cache.orders():
-            if order.instrument_id != instrument_id:
-                continue
-            status_name = getattr(order.status,     "name", "")
-            type_name   = getattr(order.order_type, "name", "")
-            if status_name in TERMINAL:
-                continue
-            if type_name == "STOP_MARKET":
-                return order
-        return None
-
     def _persist_stop_order(self, sym: str, client_order_id: str, trigger_price) -> None:
         """将止损单 ID 写入 Redis order:stop:{sym}，供引擎重启后恢复。"""
         if not self._redis:
@@ -1515,6 +1293,14 @@ class OrderGatewayActor(Strategy):
         )
         self._pub_order("FILLED", event)
 
+        # 任意成交后：若 broker 侧该标的已无持仓 → 清 Redis（避免报单即删造成 UI 假平仓）
+        try:
+            order = self.cache.order(event.client_order_id)
+            if order is not None:
+                self._clear_position_redis_if_flat(order.instrument_id)
+        except Exception as e:
+            self.log.warning(f"[Close] 成交后检查平仓 Redis 失败: {e}")
+
         # 止损单成交（被触发平仓）→ 清除 Redis 止损单记录 + 仓位记录 + 推送平仓事件
         # ★ 双保险：不依赖 on_position_closed（FA Group 场景下 NautilusTrader 可能不触发该回调）
         try:
@@ -1535,213 +1321,6 @@ class OrderGatewayActor(Strategy):
                     self.log.info(f"[SL] 仓位已清除 Redis 并推送 position:update closed=True: {sym}")
         except Exception as e:
             self.log.warning(f"[SL] on_order_filled 清除止损/仓位记录失败: {e}")
-
-        # BRACKET 或 LIMIT_BRACKET：入场单成交后自动提交止损单
-        # ★ FA Group 累计器：IBKR 每个子账户成交都触发 on_order_filled，
-        #   必须累计到达委托量才创建 SL/TP，防止首笔小额成交就建错误数量的止损/止盈
-        coid = event.client_order_id.value
-        if coid in self._pending_sl:
-            # 累积本次成交量
-            self._fill_accumulator[coid] = self._fill_accumulator.get(coid, 0) + int(event.last_qty)
-            total_filled = self._fill_accumulator[coid]
-            # 取委托总量（用于判断是否完全成交）
-            _entry_order = self.cache.order(event.client_order_id)
-            requested_qty = int(_entry_order.quantity) if _entry_order else total_filled
-
-            if total_filled < requested_qty:
-                # 尚未全量成交，等待后续成交报告
-                self.log.info(
-                    f"[BRACKET] 入场单 {coid} 部分成交 {total_filled}/{requested_qty}股，等待全量成交..."
-                )
-                return  # 不 pop，继续等待
-
-            # 全量成交，清理累计器并继续
-            self._fill_accumulator.pop(coid, None)
-            actual_qty = total_filled
-            pending = self._pending_sl.pop(coid)
-
-            if len(pending) == 5 and pending[4] == 'LIMIT_BRACKET':
-                # ── LIMIT_BRACKET：(sl_order, tp_order, entry_price, instrument, 'LIMIT_BRACKET') ──
-                sl_order, tp_order, entry_price, instrument, _ = pending
-
-                half_qty    = actual_qty // 2
-                sl_qty_new  = instrument.make_qty(Decimal(str(actual_qty)))
-                tp_qty_new  = instrument.make_qty(Decimal(str(half_qty)))
-
-                # 重建止损单（保留原有 trigger_price 和 side）
-                sl_order_new = self.order_factory.stop_market(
-                    instrument_id=sl_order.instrument_id,
-                    order_side=sl_order.side,
-                    quantity=sl_qty_new,
-                    trigger_price=sl_order.trigger_price,
-                    time_in_force=TimeInForce.GTC,
-                    tags=self._fa_tags(),
-                )
-                # 重建止盈单（保留原有 price 和 side）
-                tp_order_new = self.order_factory.limit(
-                    instrument_id=tp_order.instrument_id,
-                    order_side=tp_order.side,
-                    quantity=tp_qty_new,
-                    price=tp_order.price,
-                    time_in_force=TimeInForce.GTC,
-                    tags=self._fa_tags(),
-                )
-
-                self.log.info(
-                    f"[SL/TP] LIMIT_BRACKET 入场单 {coid} 全量成交={actual_qty}股，"
-                    f"提交止损={sl_order_new.client_order_id} SL@{sl_order_new.trigger_price}x{actual_qty} "
-                    f"止盈={tp_order_new.client_order_id} TP@{tp_order_new.price}x{half_qty}"
-                )
-                self.submit_order(sl_order_new)
-                self.submit_order(tp_order_new)
-                # 双向关联：止盈单 coid ↔ 止损单 coid
-                sl_coid = sl_order_new.client_order_id.value
-                tp_coid = tp_order_new.client_order_id.value
-                self._pending_tp[tp_coid] = (sl_coid, entry_price, instrument, sl_order_new.quantity)
-                self._sl_to_tp[sl_coid]   = tp_coid
-                self.log.info(
-                    f"[SL/TP] 双向关联已建立: SL={sl_coid} ↔ TP={tp_coid}  入场价={entry_price}"
-                )
-            else:
-                # ── 标准 BRACKET：(sl_order, sl_steps, sl_step_secs, instrument) ──
-                sl_order, sl_steps, sl_step_secs, instrument = pending
-
-                # ── 加仓检测：若该标的已有活跃止损单，直接修改数量，保持止损价不变 ──
-                existing_sl = self._find_active_stop_order(sl_order.instrument_id)
-                if existing_sl is not None:
-                    # 加仓场景：累加新成交量到已有止损单
-                    old_qty    = int(existing_sl.quantity)
-                    new_total  = old_qty + actual_qty
-                    new_sl_qty = instrument.make_qty(Decimal(str(new_total)))
-                    self.log.info(
-                        f"[SL] 加仓检测：已有活跃止损单 {existing_sl.client_order_id}  "
-                        f"trigger_price={existing_sl.trigger_price}  "
-                        f"数量 {old_qty} → {new_total}（本次加仓 {actual_qty}股）"
-                    )
-                    self.modify_order(
-                        order=existing_sl,
-                        quantity=new_sl_qty,
-                        trigger_price=existing_sl.trigger_price,  # 保持原止损价
-                    )
-                    # 同步 Redis order:stop 中的数量（trigger_price 不变）
-                    sym = existing_sl.instrument_id.symbol.value
-                    if self._redis:
-                        try:
-                            stored = self._redis.get(f"order:stop:{sym}")
-                            if stored:
-                                data = json.loads(stored)
-                                # trigger_price 不覆盖，仅更新 qty 备注
-                                data["quantity"] = str(new_total)
-                                self._redis.set(f"order:stop:{sym}", json.dumps(data))
-                        except Exception:
-                            pass
-                    self.log.info(
-                        f"[SL] ✓ 加仓止损单修改完成  "
-                        f"{existing_sl.client_order_id} qty={new_total} "
-                        f"@ {existing_sl.trigger_price}"
-                    )
-                else:
-                    # 首次开仓：创建新止损单（原有逻辑）
-                    sl_qty_new = instrument.make_qty(Decimal(str(actual_qty)))
-                    sl_order_new = self.order_factory.stop_market(
-                        instrument_id=sl_order.instrument_id,
-                        order_side=sl_order.side,
-                        quantity=sl_qty_new,
-                        trigger_price=sl_order.trigger_price,
-                        time_in_force=TimeInForce.GTC,
-                        tags=self._fa_tags(),
-                    )
-
-                    self.log.info(
-                        f"[SL] BRACKET 入场单 {coid} 全量成交={actual_qty}股（原定{sl_order.quantity}股），"
-                        f"提交止损单 {sl_order_new.client_order_id} "
-                        f"@ trigger_price={sl_order_new.trigger_price}"
-                    )
-                    self.submit_order(sl_order_new)
-                    self.log.info(f"[SL] submit_order 已调用，止损单={sl_order_new.client_order_id}")
-                    # 止损价定时修改任务
-                    for i, new_sl in enumerate(sl_steps):
-                        delay = sl_step_secs * (i + 1)
-                        self.log.info(f"[SL] 计划第 {i+1} 步止损修改: {new_sl} 延迟 {delay}s")
-                        task = asyncio.ensure_future(
-                            self._schedule_sl_modify(
-                                sl_order_id=sl_order_new.client_order_id.value,
-                                instrument=instrument,
-                                new_trigger_price=Decimal(str(new_sl)),
-                                delay_secs=delay,
-                                step_index=i + 1,
-                            )
-                        )
-                        self._sl_tasks.append(task)
-        else:
-            # 检查是否是 LIMIT_BRACKET 的止盈单成交
-            coid_str = coid
-
-            # ─── 情况A：止损单成交（止损触发）→ 反向取消止盈单 ─────────────────
-            if coid_str in self._sl_to_tp:
-                tp_coid_to_cancel = self._sl_to_tp.pop(coid_str)
-                self._pending_tp.pop(tp_coid_to_cancel, None)  # 清除止盈记录
-                tp_order_to_cancel = self.cache.order(ClientOrderId(tp_coid_to_cancel))
-                if tp_order_to_cancel and tp_order_to_cancel.is_open:
-                    try:
-                        self.cancel_order(tp_order_to_cancel)
-                        self.log.info(
-                            f"[SL/TP] 止损已触发，自动取消止盈单 {tp_coid_to_cancel}"
-                        )
-                    except Exception as e:
-                        self.log.error(f"[SL/TP] 取消止盈单失败: {e}")
-                else:
-                    self.log.info(
-                        f"[SL/TP] 止损触发，止盈单 {tp_coid_to_cancel} 已不活跃（可能已成交或撤销）"
-                    )
-
-            # ─── 情况B：止盈单成交 → 修改 SL（减半 + 保本）────────────
-            elif coid_str in self._pending_tp:
-                sl_coid, entry_price, instrument, orig_sl_qty = self._pending_tp.pop(coid_str)
-                self._sl_to_tp.pop(sl_coid, None)  # 清除止损单反向映射
-                sl_order = self.cache.order(ClientOrderId(sl_coid))
-                if sl_order and sl_order.is_open:
-                    try:
-                        # 数量减半（剩余半仓）
-                        half_qty = instrument.make_qty(
-                            Decimal(str(int(orig_sl_qty) // 2))
-                        )
-                        # 止损价移至入场价（保本）
-                        breakeven_price = instrument.make_price(
-                            Decimal(str(entry_price))
-                        )
-                        self.modify_order(
-                            order=sl_order,
-                            quantity=half_qty,
-                            trigger_price=breakeven_price,
-                        )
-                        self.log.info(
-                            f"[SL/TP] 半仓止盈已触发，止损单已修改: "
-                            f"数量 {orig_sl_qty} → {half_qty}，"
-                            f"止损价 → 保本价 {breakeven_price}"
-                        )
-                        # 同步更新 Redis order:stop 记录中的价格
-                        sym = sl_order.instrument_id.symbol.value
-                        if self._redis:
-                            try:
-                                stored = self._redis.get(f"order:stop:{sym}")
-                                if stored:
-                                    data = json.loads(stored)
-                                    data["trigger_price"] = str(entry_price)
-                                    self._redis.set(f"order:stop:{sym}", json.dumps(data))
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        self.log.error(
-                            f"[SL/TP] 半仓止盈后修改 SL 失败: {e}  sl_coid={sl_coid}"
-                        )
-                else:
-                    self.log.warning(
-                        f"[SL/TP] 止盈已触发，但止损单 {sl_coid} 已不活跃，跳过保本修改"
-                    )
-            else:
-                self.log.info(f"[SL] 成交单 {coid} 不在 _pending_sl 中（非 BRACKET 入场单或已处理）")
-
 
     def on_order_partially_filled(self, event) -> None:
         """订单部分成交"""
@@ -1870,43 +1449,6 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.warning(f"[Position] on_position_closed 处理异常: {e}")
 
-    async def _schedule_sl_modify(
-        self,
-        sl_order_id: str,
-        instrument,
-        new_trigger_price: Decimal,
-        delay_secs: int,
-        step_index: int,
-    ) -> None:
-        """定时修改止损单触发价（实现止损价定时移动）"""
-        self.log.info(
-            f"[Gateway] 止损修改 Step {step_index} —— "
-            f"将在 {delay_secs}s 后把止损价改为 {new_trigger_price}"
-        )
-        await asyncio.sleep(delay_secs)
-
-        order = self.cache.order(ClientOrderId(sl_order_id))
-        if order is None:
-            self.log.error(f"[Gateway] 止损单 {sl_order_id} 不在缓存中，跳过修改")
-            return
-        if not order.is_open:
-            self.log.warning(
-                f"[Gateway] 止损单 {sl_order_id} 已不活跃（可能已触发或被取消），跳过修改"
-            )
-            return
-
-        price_obj = instrument.make_price(new_trigger_price)
-        self.log.info(
-            f"[Gateway] ✅ 止损价移动 Step {step_index}: "
-            f"{sl_order_id} → trigger_price={price_obj}"
-        )
-        self.modify_order(
-            order=order,
-            quantity=order.quantity,
-            trigger_price=price_obj,
-        )
-
-
     # ------------------------------------------------------------------
     # HTTP Server + 跨线程桥接到 MessageBus
     # ------------------------------------------------------------------
@@ -1958,6 +1500,26 @@ class OrderGatewayActor(Strategy):
                 self.log.warning(f"[Gateway] 未知设置类型: {data}")
         except Exception as e:
             self.log.error(f"[Gateway] 设置发布失败: {e}")
+
+    def _clear_position_redis_if_flat(self, instrument_id) -> None:
+        """broker 侧该标的已无持仓时，清除 Redis 仓位/auto:units 并推送 closed。"""
+        if not self._redis:
+            return
+        try:
+            sym = instrument_id.symbol.value
+            for pos in self.cache.positions_open():
+                if pos.instrument_id.symbol.value == sym:
+                    return
+            sym_u = sym.upper()
+            self._redis.delete(f"auto:units:{sym_u}")
+            self._redis.delete(f"position:{sym_u}")
+            self._redis.publish("position:update", json.dumps({
+                "symbol": sym_u,
+                "closed": True,
+            }))
+            self.log.info(f"[Close] 仓位已平，Redis 已清除: {sym_u}")
+        except Exception as e:
+            self.log.warning(f"[Close] _clear_position_redis_if_flat 失败: {e}")
 
     async def _async_close_all(self) -> dict:
         """
@@ -2044,23 +1606,25 @@ class OrderGatewayActor(Strategy):
                     self.cancel_order(order)
                     canceled_count += 1
 
-            # 清理 LIMIT_BRACKET 内部映射表（避免内存泄漏）
-            sym_upper = symbol.upper()
-            for tp_coid in list(self._pending_tp.keys()):
-                tp_order_obj = self.cache.order(ClientOrderId(tp_coid))
-                if tp_order_obj and tp_order_obj.instrument_id.symbol.value == sym_upper:
-                    entry = self._pending_tp.pop(tp_coid)
-                    sl_coid = entry[0]
-                    self._sl_to_tp.pop(sl_coid, None)
-                    self.log.info(f"[Close] 清理 _pending_tp 映射 TP={tp_coid} SL={sl_coid}")
-
-            # 2. 提交反向市价单
-            close_order = self.order_factory.market(
+            # 2. 提交反向平仓单（延迟行情用 marketable LIMIT）
+            ref_px = float(target_pos.avg_px_open)
+            if self._redis:
+                try:
+                    bar_raw = self._redis.get(f"bars:1m:{symbol.upper()}:last")
+                    if bar_raw:
+                        bar = json.loads(bar_raw)
+                        ref_px = float(bar.get("close", ref_px) or ref_px)
+                except Exception:
+                    pass
+            close_order, decision = build_marketable_order(
+                self.order_factory,
+                instrument=instrument,
                 instrument_id=instrument_id,
-                order_side=close_side,
-                quantity=quantity,
-                time_in_force=TimeInForce.DAY,
+                side=close_side,
+                qty=int(quantity),
+                ref_price=ref_px,
                 tags=self._fa_tags(),
+                log_fn=lambda m: self.log.info(f"[Close] {symbol}: {m}"),
             )
             self.submit_order(close_order)
 
@@ -2068,6 +1632,7 @@ class OrderGatewayActor(Strategy):
                 f"[Close] ✅ 平仓单已提交  "
                 f"ClientOrderId={close_order.client_order_id}  "
                 f"side={side_str}  qty={quantity}  {instrument_id}  "
+                f"{'LMT' if decision.use_limit else 'MKT'}  "
                 f"已取消订单数量={canceled_count}"
             )
             return {
@@ -2077,13 +1642,14 @@ class OrderGatewayActor(Strategy):
                 "qty": str(quantity),
                 "client_order_id": str(close_order.client_order_id),
                 "canceled_stop_orders": canceled_count,
+                "note": "平仓单已提交，Redis 仓位将在成交确认后清除",
             }
         except Exception as e:
             self.log.error(f"[Close] 平仓失败: {e}")
             return {"error": str(e)}
 
     async def _async_cancel_entry(self, symbol: str, client_order_id: str) -> dict:
-        """取消挂单中的限价入场单，并清理对应的 SL/TP 草稿（_pending_sl）。"""
+        """取消挂单中的限价入场单。"""
         try:
             from nautilus_trader.model.identifiers import ClientOrderId
             coid_obj = ClientOrderId(client_order_id)
@@ -2096,10 +1662,6 @@ class OrderGatewayActor(Strategy):
             # 取消入场单
             self.cancel_order(order)
             self.log.info(f"[Entry] 取消限价入场单 {client_order_id} ({symbol})")
-            # 清理 _pending_sl 中的 SL/TP 草稿
-            if client_order_id in self._pending_sl:
-                self._pending_sl.pop(client_order_id)
-                self.log.info(f"[Entry] 已清理 _pending_sl 草稿 {client_order_id}")
             return {"status": "canceled", "client_order_id": client_order_id}
         except Exception as e:
             self.log.error(f"[Entry] 取消入场单失败: {e}")
@@ -2372,27 +1934,10 @@ class OrderGatewayActor(Strategy):
                 if self.path != "/order":
                     self._send(404, {"error": "请使用 POST /order"})
                     return
-                try:
-                    n = int(self.headers.get("Content-Length", 0))
-                    data = json.loads(self.rfile.read(n))
-                except Exception as e:
-                    self._send(400, {"error": f"JSON 解析失败: {e}"})
-                    return
-
-                for f in ("instrument_id", "side", "qty"):
-                    if f not in data:
-                        self._send(400, {"error": f"缺少字段: {f}"})
-                        return
-
-                # 跨线程安全：将协程调度到引擎事件循环
-                asyncio.run_coroutine_threadsafe(publish_fn(data), loop)
-                print(
-                    f"[HTTP] ← POST /order  {data.get('side')} {data.get('qty')} "
-                    f"{data.get('instrument_id')}  type={data.get('order_type','MARKET')}  "
-                    f"stop_loss={data.get('stop_loss')}",
-                    flush=True,
-                )
-                self._send(200, {"status": "accepted", "message": str(data)})
+                self._send(403, {
+                    "error": "系统禁止手动开仓",
+                    "hint": "请通过 Alpha 审批流程，由 Agent 自动执行",
+                })
 
             def _send(self, code: int, body: dict) -> None:
                 payload = json.dumps(body, ensure_ascii=False).encode()

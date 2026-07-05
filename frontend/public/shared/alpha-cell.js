@@ -5,15 +5,45 @@
   const Copy = () => global.AlphaCopy;
 
   let cache = { pending: {}, wait: {}, ready: {}, bySymbol: {} };
+  const executing = {}; // sym → { proposal_id, since }
+
+  function setExecuting(symbol, proposalId) {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym) return;
+    executing[sym] = { proposal_id: proposalId || '', since: Date.now() };
+    renderPanel(sym);
+  }
+
+  function clearExecuting(symbol) {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym || !executing[sym]) return;
+    delete executing[sym];
+    renderPanel(sym);
+  }
+
+  function isExecuting(symbol) {
+    return !!executing[String(symbol || '').toUpperCase()];
+  }
 
   function ingestProposals(pendingList, waitList, approvedList) {
     cache.pending = {};
     cache.wait = {};
     cache.ready = {};
-    (pendingList || []).forEach((p) => { cache.pending[p.symbol] = p; });
-    (waitList || []).forEach((p) => { cache.wait[p.symbol] = p; });
+    (pendingList || []).forEach((p) => {
+      const sym = String(p.symbol || '').toUpperCase();
+      if (sym) cache.pending[sym] = p;
+    });
+    (waitList || []).forEach((p) => {
+      const sym = String(p.symbol || '').toUpperCase();
+      if (sym) cache.wait[sym] = p;
+    });
     (approvedList || []).forEach((p) => {
-      if (p.execution_phase === 'ready_to_execute') cache.ready[p.symbol] = p;
+      const sym = String(p.symbol || '').toUpperCase();
+      if (!sym) return;
+      const phase = String(p.execution_phase || '');
+      if (phase === 'ready_to_execute' || phase === 'executing') {
+        cache.ready[sym] = p;
+      }
     });
     cache.bySymbol = {};
     for (const sym of new Set([
@@ -36,14 +66,26 @@
   }
 
   function phaseForSymbol(symbol) {
-    if (cache.pending[symbol]) return { phase: 'pending', proposal: cache.pending[symbol] };
-    if (cache.wait[symbol]) return { phase: 'wait', proposal: cache.wait[symbol] };
-    if (cache.ready[symbol]) return { phase: 'ready', proposal: cache.ready[symbol] };
+    const sym = String(symbol || '').toUpperCase();
+    const readyP = cache.ready[sym];
+    if (readyP && String(readyP.execution_phase || '') === 'executing') {
+      return { phase: 'executing', proposal: readyP };
+    }
+    if (executing[sym]) {
+      const proposal = cache.ready[sym] || cache.wait[sym] || cache.bySymbol[sym];
+      return { phase: 'executing', proposal: proposal || null };
+    }
+    if (cache.pending[sym]) return { phase: 'pending', proposal: cache.pending[sym] };
+    if (cache.wait[sym]) return { phase: 'wait', proposal: cache.wait[sym] };
+    if (cache.ready[sym]) return { phase: 'ready', proposal: cache.ready[sym] };
     return { phase: 'none', proposal: null };
   }
 
   function pillForSymbol(symbol) {
     const { phase, proposal } = phaseForSymbol(symbol);
+    if (phase === 'executing') {
+      return Copy()?.pillForPhase('executing') || { cls: 'pill-executing', text: '执行中' };
+    }
     if (Copy() && proposal) {
       if (phase === 'pending') return Copy().pillForPhase('pending');
       if (phase === 'ready') return Copy().pillForPhase('ready');
@@ -73,7 +115,7 @@
       let cls = 'astep';
       if (s.state === 'done') cls += ' done';
       if (s.state === 'active') {
-        cls += phase === 'pending' ? ' active-pending' : ' active';
+        cls += (phase === 'pending' ? ' active-pending' : phase === 'executing' ? ' active-executing' : ' active');
       }
       return `<span class="${cls}">${s.label}</span>`;
     }).join('');
@@ -119,11 +161,16 @@
         if (global.AlphaWorkflow) {
           global.AlphaWorkflow.updateRibbon(symbol, proposal);
         }
-      } else if (phase === 'wait' && proposal && Copy()?.showObserveApprove(proposal)) {
-        actionsEl.innerHTML = `<button class="c-btn-alpha cancel" data-id="${proposal.proposal_id}">取消批准</button>`;
+      } else if ((phase === 'wait' || phase === 'ready') && proposal) {
+        const hint = phase === 'ready'
+          ? (Copy()?.postApproveHint(proposal) || '待执行')
+          : (Copy()?.phaseLabel(proposal, 'approved_wait') || '等待回踩');
+        actionsEl.innerHTML = `
+          <span style="font-size:11px;color:${phase === 'ready' ? '#26a69a' : '#787b86'}">${hint}</span>
+          <button class="c-btn-alpha cancel" data-id="${proposal.proposal_id}">取消批准</button>`;
         actionsEl.querySelector('button').onclick = (e) => cancelApproved(proposal.proposal_id, symbol, e.target);
-      } else if (phase === 'ready' && proposal) {
-        actionsEl.innerHTML = `<span style="font-size:11px;color:#26a69a">${Copy()?.postApproveHint(proposal) || '待执行'}</span>`;
+      } else if (phase === 'executing' && proposal) {
+        actionsEl.innerHTML = `<span style="font-size:11px;color:#f0b90b">Agent 报单中…</span>`;
       } else {
         actionsEl.innerHTML = '';
       }
@@ -131,10 +178,11 @@
 
     const cell = document.getElementById(`cell-${symbol}`);
     if (cell) {
-      cell.classList.remove('cell-alpha-pending', 'cell-alpha-wait', 'cell-alpha-ready');
+      cell.classList.remove('cell-alpha-pending', 'cell-alpha-wait', 'cell-alpha-ready', 'cell-alpha-executing');
       if (phase === 'pending') cell.classList.add('cell-alpha-pending');
       else if (phase === 'wait') cell.classList.add('cell-alpha-wait');
       else if (phase === 'ready') cell.classList.add('cell-alpha-ready');
+      else if (phase === 'executing') cell.classList.add('cell-alpha-executing');
     }
   }
 
@@ -147,7 +195,18 @@
   }
 
   function firstSymbolForPhase(phase) {
-    const map = phase === 'pending' ? cache.pending : phase === 'wait' ? cache.wait : cache.ready;
+    if (phase === 'wait' || phase === 'active' || phase === 'ready') {
+      const readyList = Object.values(cache.ready).sort(
+        (a, b) => (Number(b.decided_at) || 0) - (Number(a.decided_at) || 0),
+      );
+      if (readyList.length) return readyList[0].symbol;
+      const waitList = Object.values(cache.wait).sort(
+        (a, b) => (Number(b.decided_at) || 0) - (Number(a.decided_at) || 0),
+      );
+      if (waitList.length) return waitList[0].symbol;
+      return null;
+    }
+    const map = phase === 'pending' ? cache.pending : cache.ready;
     const list = Object.values(map);
     if (list.length) {
       list.sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
@@ -245,6 +304,7 @@
       }
       if (global.onAlphaUpdated) global.onAlphaUpdated();
       if (global.AlphaWorkflow) global.AlphaWorkflow.onApprovalResolved(symbol);
+      clearExecuting(symbol);
     } catch (e) {
       if (global.showToast) global.showToast('❌ ' + e.message);
       if (btn) btn.disabled = false;
@@ -275,6 +335,9 @@
     pillForSymbol,
     firstSymbolForPhase,
     listPending,
+    setExecuting,
+    clearExecuting,
+    isExecuting,
     getCache: () => cache,
   };
 })(window);

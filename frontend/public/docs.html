@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>系统文档 · Docs</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #131722; color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh; line-height: 1.55;
+    }
+    .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
+    .wrap { padding: 14px 20px 64px; max-width: 920px; display: flex; flex-direction: column; gap: 16px; }
+
+    .panel {
+      background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden;
+    }
+    .panel-hd {
+      padding: 10px 14px; font-size: 12px; font-weight: 600; color: #787b86;
+      border-bottom: 1px solid #2a2e39; letter-spacing: .3px;
+    }
+    .panel-bd { padding: 14px 16px; font-size: 13px; }
+    .panel-bd h3 { font-size: 14px; color: #e0e3eb; margin: 16px 0 8px; }
+    .panel-bd h3:first-child { margin-top: 0; }
+    .panel-bd p { margin-bottom: 10px; color: #b0b8c8; }
+    .panel-bd ul, .panel-bd ol { margin: 0 0 12px 20px; color: #b0b8c8; }
+    .panel-bd li { margin-bottom: 6px; }
+    .panel-bd a { color: #5b9cf5; text-decoration: none; }
+    .panel-bd a:hover { text-decoration: underline; }
+
+    code {
+      background: #131722; padding: 2px 6px; border-radius: 3px;
+      font-size: 12px; color: #80cbc4;
+    }
+    pre {
+      background: #131722; border: 1px solid #2a2e39; border-radius: 6px;
+      padding: 12px 14px; font-size: 11px; overflow-x: auto; color: #b0bec5;
+      margin: 10px 0; line-height: 1.45;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #252932; vertical-align: top; }
+    th { color: #787b86; font-weight: 500; width: 28%; }
+    td { color: #d1d4dc; }
+
+    .flow {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      margin: 12px 0; font-size: 12px;
+    }
+    .flow span {
+      background: #252932; border: 1px solid #363a45; border-radius: 4px;
+      padding: 4px 10px; color: #d1d4dc;
+    }
+    .flow .arrow { background: none; border: none; color: #787b86; padding: 0 2px; }
+
+    .tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 3px; margin-right: 4px; }
+    .tag-live { background: #1b3a2f; color: #80cbc4; }
+    .tag-paper { background: #3e2723; color: #ffcc80; }
+    .tag-warn { background: #4a1c1c; color: #ef9a9a; }
+
+    .toc { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+    .toc a {
+      font-size: 12px; padding: 4px 10px; background: #252932; border-radius: 4px;
+      color: #90caf9; border: 1px solid #363a45;
+    }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <div class="page-subtitle">系统架构与关键使用说明 · 与仓库 <code>README.md</code> / <code>docs/SCOPE_FIXED.md</code> 同步</div>
+
+  <div class="wrap">
+    <div class="panel">
+      <div class="panel-hd">目录</div>
+      <div class="panel-bd">
+        <nav class="toc">
+          <a href="#arch">架构</a>
+          <a href="#data">数据链路</a>
+          <a href="#alpha">Alpha 流程</a>
+          <a href="#start">启动</a>
+          <a href="#pages">页面</a>
+          <a href="#safety">护栏</a>
+          <a href="#daily">日常</a>
+          <a href="#repo">仓库文档</a>
+        </nav>
+      </div>
+    </div>
+
+    <div class="panel" id="arch">
+      <div class="panel-hd">系统架构</div>
+      <div class="panel-bd">
+        <p>三层解耦：<strong>引擎（Python）</strong>、<strong>Redis 总线</strong>、<strong>前端（Node + 浏览器）</strong>。任意一层可独立重启，共享状态仅在 Redis。</p>
+
+        <h3>引擎内模块（<code>python main.py</code>）</h3>
+        <table>
+          <tr><th>模块</th><td>职责</td></tr>
+          <tr><th><code>strategy.py</code></th><td>IBKR K 线、SuperTrend/EMA/VWAP → Redis</td></tr>
+          <tr><th><code>signal_detector.py</code></th><td>M1 触线 → st_super 信号 → 提案池</td></tr>
+          <tr><th><code>reclaim_watcher.py</code></th><td>条件单：approved_wait → ready_to_execute</td></tr>
+          <tr><th><code>auto_runner.py</code></th><td>Alpha → RiskGate → AutoPM 编排；消费 <code>auto:close</code></td></tr>
+          <tr><th><code>execution/auto_pm.py</code></th><td>仓位单元、OCA 止损/止盈、对账、IBKR 报单</td></tr>
+          <tr><th><code>order_actor.py</code></th><td>HTTP :8888 网关（平仓/trail；开仓已禁）</td></tr>
+          <tr><th><code>exit_manager.py</code></th><td>手动 trail 止盈、非 auto 标的 EOD 15:45</td></tr>
+        </table>
+
+        <h3>实盘开仓唯一路径</h3>
+        <div class="flow">
+          <span>触线 / MCP 扫信号</span><span class="arrow">→</span>
+          <span>pending 提案</span><span class="arrow">→</span>
+          <span>审批 approved_live</span><span class="arrow">→</span>
+          <span>AutoRunner</span><span class="arrow">→</span>
+          <span>RiskGate 定量</span><span class="arrow">→</span>
+          <span>AutoPM → IBKR</span>
+        </div>
+        <p>手动 Bracket / HTTP <code>/order</code> 已禁止（403）。FA 分配由 <code>IB_FA_GROUP</code> / <code>IB_FA_METHOD</code> 在引擎注入，上层不传 account。</p>
+
+        <h3>平仓两条路径</h3>
+        <table>
+          <tr><th>AutoPM 接管</th><td><code>auto_strategy</code> 或 <code>opening_breakout_live</code> → UI <code>DELETE /api/position</code> → Redis <code>auto:close:{sym}</code> → AutoPM <code>close_all</code></td></tr>
+          <tr><th>手动 / trail</th><td>同上 API → <code>order_actor</code> <code>POST /close</code> → IBKR</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" id="data">
+      <div class="panel-hd">数据链路</div>
+      <div class="panel-bd">
+        <table>
+          <tr><th>实时 K 线</th><td>IBKR → strategy → Redis PUBLISH → server.js WebSocket → 浏览器</td></tr>
+          <tr><th>指标排行</th><td>浏览器每 30s → <code>GET /api/indicators</code> → Redis</td></tr>
+          <tr><th>订单 / 仓位</th><td>AutoPM / order_actor → Redis <code>order:update</code> / <code>position:update</code> → WebSocket → 语音 / Toast</td></tr>
+          <tr><th>账户</th><td>IBKR reqAccountSummary → Redis <code>account:funds</code>（FA Group 子账户约 3 分钟刷新）</td></tr>
+          <tr><th>审计</th><td>Redis 事件 → <code>.run/journal.jsonl</code> → <a href="/audit.html">审计页</a></td></tr>
+        </table>
+        <p>图表时间轴使用 <strong>ET fake-UTC</strong>（与 Redis bar 的 <code>time</code> 字段一致）。RTH 展示 09:30–16:00 ET。</p>
+      </div>
+    </div>
+
+    <div class="panel" id="alpha">
+      <div class="panel-hd">Alpha 审批与执行</div>
+      <div class="panel-bd">
+        <h3>超级信号（st_super）</h3>
+        <ol>
+          <li>引擎检测 M1 触线 → 写入 <code>proposal:pending:*</code></li>
+          <li>四宫格 / 历史页 / 飞书卡片 <strong>批准实盘</strong>（<code>approved_live</code>）</li>
+          <li>前端自动开启该标的 <code>auto_strategy=live</code>（Agent 执行）</li>
+          <li>超级信号审批后即为 <code>ready_to_execute</code>，下一根 M1 由 AutoRunner 报单</li>
+          <li>成交后 AutoPM 挂 OCA 止损 + 半仓止盈；提案状态 → <code>executed</code></li>
+        </ol>
+
+        <h3>条件 reclaim（非 super）</h3>
+        <p>审批后为 <code>approved_wait</code>，<code>reclaim_watcher</code> 在 M1 收回触发线后设为 <code>ready_to_execute</code>，再执行。</p>
+
+        <h3>Cursor / MCP</h3>
+        <p>聊天输入 <code>alpha</code> 或「扫信号」→ MCP <code>run_alpha_scan</code>。详见仓库 <code>docs/MCP_ALPHA.md</code>。</p>
+      </div>
+    </div>
+
+    <div class="panel" id="start">
+      <div class="panel-hd">启动顺序</div>
+      <div class="panel-bd">
+        <h3>1. 基础设施</h3>
+        <pre>TWS / IB Gateway 开启 API
+redis-server          # 或 brew services start redis
+cp env.example .env   # 配置 TRADING_ENV、IB 端口、FA Group 等</pre>
+
+        <h3>2. 引擎 + 前端</h3>
+        <pre>python main.py                 # 交易引擎（:8888 网关随引擎启动）
+node frontend/server.js      # Web UI :3000
+
+# 或一键
+bash scripts/start-stack.sh</pre>
+
+        <h3>3. 常用 URL</h3>
+        <table>
+          <tr><th>四宫格 + 审批</th><td><a href="/multi.html">/multi.html</a></td></tr>
+          <tr><th>单图</th><td><a href="/">/</a> 或 <code>/?symbol=QQQ</code></td></tr>
+          <tr><th>配置（只读）</th><td><a href="/settings.html">/settings.html</a></td></tr>
+          <tr><th>收盘审计</th><td><a href="/audit.html">/audit.html</a></td></tr>
+        </table>
+
+        <p>状态栏 <span class="tag tag-live">引擎</span> 绿点 = Redis 心跳正常；离线时图表仍可读 Redis 历史，但审批执行 / 平仓需先启动引擎。</p>
+      </div>
+    </div>
+
+    <div class="panel" id="pages">
+      <div class="panel-hd">前端页面说明</div>
+      <div class="panel-bd">
+        <table>
+          <tr><th>单图</th><td>K 线 + 指标面板 + 提案卡片；手动开仓已禁用</td></tr>
+          <tr><th>四宫格</th><td>多标的联动；待审批 / 待执行队列；批准实盘</td></tr>
+          <tr><th>指标</th><td>M1/M5 ST、EMA 偏离、日内新高排行</td></tr>
+          <tr><th>历史</th><td>提案全生命周期列表</td></tr>
+          <tr><th>决策</th><td>Agent 决策日志视图</td></tr>
+          <tr><th>审计</th><td>按 ET 日查看 journal 时间线</td></tr>
+          <tr><th>配置</th><td><code>.env</code> + 引擎 <code>config:auto</code> + 启动对账</td></tr>
+          <tr><th>文档</th><td>本页</td></tr>
+        </table>
+        <p>顶栏 <strong>⏻ 全平</strong>：所有持仓反向平仓并激活当日熔断（<code>risk:halt</code>），慎用。</p>
+      </div>
+    </div>
+
+    <div class="panel" id="safety">
+      <div class="panel-hd">生产护栏</div>
+      <div class="panel-bd">
+        <table>
+          <tr><th><code>TRADING_ENV</code></th><td><span class="tag tag-paper">paper</span> 禁止批准实盘、AutoRunner 不报 IBKR；<span class="tag tag-live">live</span> 才允许真实报单</td></tr>
+          <tr><th><code>ORDER_GATEWAY_SECRET</code></th><td>live 模式下 HTTP 8888 / 前端敏感 API 需 Token</td></tr>
+          <tr><th><code>AUTO_FIXED_QTY</code></th><td>&gt;0 时跳过以损定量；实盘前建议设为 0</td></tr>
+          <tr><th>日熔断</th><td>日亏超 1% 自动全平 + 当日禁止开仓</td></tr>
+          <tr><th>尾盘</th><td>15:45 ET auto 标的由 AutoRunner EOD；手动 trail 由 ExitManager</td></tr>
+        </table>
+        <p>修改 <code>.env</code> 后必须<strong>重启</strong> <code>main.py</code>。Web 配置页只读，不支持热改。</p>
+      </div>
+    </div>
+
+    <div class="panel" id="daily">
+      <div class="panel-hd">日常操作（收盘后）</div>
+      <div class="panel-bd">
+        <pre># 审计：浏览器打开 audit.html，或 API
+GET /api/journal/day?date=YYYY-MM-DD
+
+# touch 信号 outcome 回填（7 日龄+，依赖 Redis bars）
+python scripts/check_signal_outcomes.py
+
+# 规格 / 单测验收
+python scripts/verify_scope.py
+pytest scripts/test_risk_gate.py scripts/test_order_policy.py -q</pre>
+      </div>
+    </div>
+
+    <div class="panel" id="repo">
+      <div class="panel-hd">仓库文档（详细）</div>
+      <div class="panel-bd">
+        <table>
+          <tr><th>SCOPE_FIXED</th><td>冻结需求边界（审计、outcome、对账、OrderPolicy、上层路由）</td></tr>
+          <tr><th>UNRELEASED</th><td>功能变更记录</td></tr>
+          <tr><th>MCP_ALPHA / ALPHA_AGENT</th><td>Agent 与 MCP 配置</td></tr>
+          <tr><th>SIGNAL_SPEC</th><td>Redis 键与指标规格</td></tr>
+          <tr><th>README.md</th><td>完整安装、API、FAQ</td></tr>
+        </table>
+        <p>需求变更须先更新 <code>docs/SCOPE_FIXED.md</code> 再改代码。</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="/shared/api-auth.js"></script>
+  <script src="/shared/status-bar.js"></script>
+  <script>StatusBar.mount('status-bar-root', 'docs');</script>
+</body>
+</html>

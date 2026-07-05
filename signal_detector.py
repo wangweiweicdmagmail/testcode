@@ -192,6 +192,11 @@ class SignalDetector(Strategy):
                 pipe.publish("signal:touch", json.dumps(payload, ensure_ascii=False))
             pipe.execute()
             self._append_marker(touch, payload)
+            try:
+                from measurement.signal_store import record_touch
+                record_touch(payload)
+            except Exception as e:
+                self.log.debug(f"[SignalDetector] signal_store: {e}")
             self.log.info(
                 f"[SignalDetector] {touch.symbol} {touch.signal_type} "
                 f"{touch.side} @ {touch.touch_time} level={touch.trigger_level:.2f}"

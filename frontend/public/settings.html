@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>系统配置 · Settings</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #131722; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+    .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
+    .wrap { padding: 14px 20px 48px; display: flex; flex-direction: column; gap: 16px; max-width: 960px; }
+    .panel { background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden; }
+    .panel-hd { padding: 10px 14px; font-size: 12px; font-weight: 600; color: #787b86; border-bottom: 1px solid #2a2e39; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #252932; }
+    th { color: #787b86; font-weight: 500; width: 42%; }
+    .live { color: #26a69a; font-weight: 600; }
+    .paper { color: #ffb74d; font-weight: 600; }
+    .warn { color: #ef5350; }
+    .note { padding: 12px 14px; font-size: 12px; color: #787b86; line-height: 1.5; }
+    code { background: #131722; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+    pre { padding: 12px 14px; font-size: 11px; overflow: auto; color: #b0bec5; }
+  </style>
+</head>
+<body>
+  <div id="status-bar-root"></div>
+  <div class="page-subtitle">只读查看 <b>.env</b> 与引擎写入 Redis 的生效配置；修改后需重启 <code>main.py</code></div>
+  <div class="wrap">
+    <div class="panel">
+      <div class="panel-hd">环境 / 护栏</div>
+      <table id="env-table"><tbody><tr><td colspan="2">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="panel">
+      <div class="panel-hd">AutoRunner 风控（config:auto）</div>
+      <table id="engine-table"><tbody><tr><td colspan="2">等待引擎心跳…</td></tr></tbody></table>
+    </div>
+    <div class="panel">
+      <div class="panel-hd">最近启动对账</div>
+      <pre id="recon-json">—</pre>
+    </div>
+    <div class="panel">
+      <div class="panel-hd">测量 / Outcome</div>
+      <div class="note">
+        系统架构与使用说明见 <a href="/docs.html" style="color:#5b9cf5">文档页</a><br>
+        信号 SQLite：<code>.run/signals.db</code>（touch + auto:signal）<br>
+        收盘后回填：<code>python scripts/check_signal_outcomes.py</code><br>
+        审计 JSONL：<code>.run/journal.jsonl</code> → <a href="/audit.html" style="color:#2962ff">审计页</a>
+      </div>
+    </div>
+  </div>
+  <script src="/shared/api-auth.js"></script>
+  <script src="/shared/status-bar.js"></script>
+  <script>
+    StatusBar.mount('status-bar-root', 'settings');
+
+    const LABEL = {
+      trading_env: 'TRADING_ENV',
+      live_trading_allowed: '允许实盘报单',
+      market_data_delayed: '延迟行情 (MARKET_DATA_DELAYED)',
+      ib_fa_group: 'IB_FA_GROUP (引擎)',
+      ib_fa_method: 'IB_FA_METHOD (引擎)',
+      market_data_mode: '行情模式 (MARKET_DATA_MODE)',
+      auto_fixed_qty: 'AUTO_FIXED_QTY',
+      allow_fixed_qty: 'ALLOW_FIXED_QTY',
+      alpha_super_only: 'ALPHA_SUPER_ONLY',
+      fixed_qty: 'fixed_qty (引擎)',
+      risk_pct: '单笔风险 risk_pct',
+      max_position_pct: '单仓上限',
+      max_portfolio_positions: '组合最大持仓数',
+      max_trades_per_sym_per_day: '每标的日交易上限',
+      rth_open_blackout_min: '开盘 blackout (分)',
+      pre_eod_blackout_min: '尾盘 blackout (分)',
+      cooldown_bars_after_stop: '止损后冷却 (M5 bars)',
+      min_qty: '最小股数',
+      atr_mult: 'ATR 止损倍数',
+      tp_rr: '止盈 R 倍数',
+      max_units: '最大加仓单元',
+      ts: '写入时间',
+    };
+
+    function row(k, v) {
+      const label = LABEL[k] || k;
+      let val = v;
+      if (k === 'trading_env') {
+        val = `<span class="${v === 'live' ? 'live' : 'paper'}">${v}</span>`;
+      } else if (typeof v === 'boolean') {
+        val = v ? '是' : '否';
+      } else if (k === 'ts' && v) {
+        val = new Date(v * 1000).toLocaleString('zh-CN');
+      }
+      return `<tr><th>${label}</th><td>${val ?? '—'}</td></tr>`;
+    }
+
+    function fillTable(id, obj, skip = new Set()) {
+      const keys = Object.keys(obj || {}).filter((k) => !skip.has(k));
+      document.querySelector(`#${id} tbody`).innerHTML =
+        keys.length ? keys.map((k) => row(k, obj[k])).join('') : '<tr><td colspan="2">无数据</td></tr>';
+    }
+
+    async function load() {
+      try {
+        const res = await fetch('/api/config/settings');
+        const data = await res.json();
+        fillTable('env-table', data.env || {});
+        fillTable('engine-table', data.engine || {}, new Set(['live_orders_allowed', 'trading_env']));
+        document.getElementById('recon-json').textContent =
+          data.last_startup_reconcile
+            ? JSON.stringify(data.last_startup_reconcile, null, 2)
+            : '引擎启动后写入 reconcile:startup';
+        if (data.note) {
+          /* shown in subtitle */
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>

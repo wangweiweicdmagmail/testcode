@@ -15,6 +15,8 @@ const PORT = parseInt(process.env.NAUTILUS_PORT || "3000", 10);
 const HOST = process.env.NAUTILUS_BIND_HOST || "127.0.0.1";
 const NAUTILUS_API_SECRET = process.env.NAUTILUS_API_SECRET || "";
 const ORDER_GATEWAY_SECRET = process.env.ORDER_GATEWAY_SECRET || "";
+const TRADING_ENV = (process.env.TRADING_ENV || "paper").trim().toLowerCase();
+const LIVE_TRADING_ALLOWED = TRADING_ENV === "live";
 const DEFAULT_ALPHA_SYMBOLS = (process.env.ALPHA_SYMBOLS || "NVDA,TSLA,AAPL")
     .split(",")
     .map((s) => s.trim().toUpperCase())
@@ -72,7 +74,7 @@ async function hasActiveProposalForSymbol(symbol) {
             if (st === "pending") return true;
             if (p.executed_at) continue;
             const phase = String(p.execution_phase || "");
-            if (phase === "approved_wait" || phase === "ready_to_execute") {
+            if (phase === "approved_wait" || phase === "ready_to_execute" || phase === "executing") {
                 const exp = parseInt(p.expires_at || "0", 10);
                 if (!exp || now <= exp) return true;
             }
@@ -312,11 +314,60 @@ function parseEngineHeartbeat(raw) {
 
 // GET /api/config/public — 前端公开配置（不含密钥）
 app.get("/api/config/public", (req, res) => {
+    const warnings = [];
+    if (LIVE_TRADING_ALLOWED) {
+        if (!NAUTILUS_API_SECRET) {
+            warnings.push("TRADING_ENV=live 但未配置 NAUTILUS_API_SECRET");
+        }
+        if (!ORDER_GATEWAY_SECRET) {
+            warnings.push("TRADING_ENV=live 但未配置 ORDER_GATEWAY_SECRET");
+        }
+    }
+    if (HOST === "0.0.0.0" || HOST === "::") {
+        warnings.push(`NAUTILUS_BIND_HOST=${HOST} — API 暴露于所有网卡`);
+    }
     res.json({
         api_auth_required: Boolean(NAUTILUS_API_SECRET),
         alpha_symbols: DEFAULT_ALPHA_SYMBOLS,
         bind_host: HOST,
+        trading_env: TRADING_ENV,
+        live_trading_allowed: LIVE_TRADING_ALLOWED,
+        production_warnings: warnings,
     });
+});
+
+// GET /api/config/settings — 引擎生效配置（Redis config:auto + 环境变量只读）
+app.get("/api/config/settings", async (req, res) => {
+    try {
+        const raw = await redis.get("config:auto");
+        let engine = {};
+        if (raw) {
+            try { engine = JSON.parse(raw); } catch (_) { /* ignore */ }
+        }
+        const rawRecon = await redis.get("reconcile:startup");
+        let lastReconcile = null;
+        if (rawRecon) {
+            try { lastReconcile = JSON.parse(rawRecon); } catch (_) { /* ignore */ }
+        }
+        res.json({
+            env: {
+                trading_env: TRADING_ENV,
+                live_trading_allowed: LIVE_TRADING_ALLOWED,
+                market_data_delayed: (process.env.MARKET_DATA_DELAYED || "0").trim(),
+                market_data_mode: (process.env.MARKET_DATA_MODE || "realtime").trim(),
+                auto_fixed_qty: parseInt(process.env.AUTO_FIXED_QTY || "0", 10) || 0,
+                allow_fixed_qty: ["1", "true", "yes"].includes(
+                    (process.env.ALLOW_FIXED_QTY || "").trim().toLowerCase(),
+                ),
+                alpha_super_only: (process.env.ALPHA_SUPER_ONLY || "1").trim(),
+            },
+            engine,
+            last_startup_reconcile: lastReconcile,
+            note: "修改 TRADING_ENV / MARKET_DATA_DELAYED / MARKET_DATA_MODE 等需改 .env 并重启引擎；risk 参数来自 AutoRunner 启动写入",
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // GET /api/engine-status — 引擎心跳（ts 与当前时间差判定在线）
@@ -639,60 +690,23 @@ app.get("/api/indicators", async (req, res) => {
 });
 
 
-// POST /api/position/:symbol — 开仓（写入 Redis）
-app.post("/api/position/:symbol", async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
-    const { entry_price, stop_loss, quantity, entry_time } = req.body;
-    if (!entry_price || !stop_loss || !quantity) {
-        return res.status(400).json({ error: "entry_price / stop_loss / quantity required" });
+// ── AutoPM 路由（SCOPE_FIXED §7）──────────────────────────────────────────
+async function usesAutoPm(symbol) {
+    try {
+        const raw = await redis.get(`settings:${symbol}`);
+        if (!raw) return false;
+        const s = JSON.parse(raw);
+        return !!(s.auto_strategy || s.opening_breakout_live);
+    } catch {
+        return false;
     }
-    // P3: entry_time 使用 ET fake-UTC（与 K 线时间戳格式统一）
-    // ET fake-UTC = 真实 UTC - UTC偏移量（EST=-5h, EDT=-4h）
-    // 简化处理：取当前月份判断夏/冬令时（3-11月 EDT=-4h，其他 EST=-5h）
-    const nowUtc = Math.floor(Date.now() / 1000);
-    const month = new Date().getUTCMonth() + 1; // 1-12
-    const etOffset = (month >= 3 && month <= 11) ? -4 * 3600 : -5 * 3600;
-    const etFakeUtc = entry_time || (nowUtc + etOffset);
+}
 
-    const pos = {
-        symbol,
-        entry_price: parseFloat(entry_price),
-        stop_loss: parseFloat(stop_loss),
-        quantity: parseInt(quantity),
-        entry_time: etFakeUtc,          // ET fake-UTC，与 K 线时间戳一致
-        current_price: 0, pnl: 0, pnl_pct: 0,
-    };
-    await redis.set(`position:${symbol}`, JSON.stringify(pos));
-    res.json({ ok: true, position: pos });
-});
-
-// DELETE /api/position/:symbol — 平仓（先调引擎 POST /close，成功后再删 Redis 仓位记录）
-app.delete("/api/position/:symbol", async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
-    const instrumentId = SYMBOL_MAP[symbol];
-
-    // 1. 调引擎平仓（反向市价单 + 取消止损单）
-    let engineResult = null;
-    if (instrumentId) {
-        engineResult = await proxyToEngine('POST', '/close', { symbol }, { engine_offline: true });
-    }
-
-    if (engineResult && !engineResult.engine_offline && !engineResult.error) {
-        // 引擎平仓成功 → 删 Redis 仓位记录
-        await redis.del(`position:${symbol}`);
-        console.log(`✅ 平仓成功 [${symbol}]: ${JSON.stringify(engineResult)}`);
-        res.json({ ok: true, engine: engineResult });
-    } else {
-        // 引擎离线或失败 → 仅删 Redis，提示用户
-        await redis.del(`position:${symbol}`);
-        const reason = engineResult?.error || '引擎未启动或未持仓';
-        console.warn(`⚠️  平仓降级 [${symbol}]: ${reason}，仅删除 Redis 记录`);
-        res.json({
-            ok: true,
-            warning: `引擎平仓失败（${reason}），已清除 Redis 仓位记录，请在 TWS 手动平仓`,
-        });
-    }
-});
+async function routeAutoPmClose(symbol, reason = 'ui_close') {
+    const payload = JSON.stringify({ reason, ts: Math.floor(Date.now() / 1000) });
+    await redis.set(`auto:close:${symbol}`, payload, 'EX', 300);
+    await redis.publish('auto:close', JSON.stringify({ symbol, reason }));
+}
 
 
 
@@ -747,6 +761,68 @@ function proxyToEngine(method, path, body, fallback) {
         req.end();
     });
 }
+
+// POST /api/position/:symbol — 禁止幽灵仓位（SCOPE_FIXED §7）
+app.post("/api/position/:symbol", requireApiSecret, async (req, res) => {
+    return res.status(403).json({
+        error: '禁止手动写入 position Redis',
+        hint: '仓位仅由引擎成交后写入；请走 Alpha 审批或 TWS',
+    });
+});
+
+// DELETE /api/position/:symbol — 平仓（AutoPM 路由 或 order_actor /close）
+app.delete("/api/position/:symbol", requireApiSecret, async (req, res) => {
+    const symbol = req.params.symbol.toUpperCase();
+
+    if (await usesAutoPm(symbol)) {
+        await routeAutoPmClose(symbol, 'ui_close');
+        console.log(`✅ 平仓路由 AutoPM [${symbol}]`);
+        return res.json({
+            ok: true,
+            routed: 'auto_pm',
+            note: '已路由 AutoPM.close_all，下一根 M1 内提交；UI 随成交确认更新',
+        });
+    }
+
+    const instrumentId = SYMBOL_MAP[symbol];
+    let engineResult = null;
+    if (instrumentId) {
+        engineResult = await proxyToEngine('POST', '/close', { symbol }, { engine_offline: true });
+    }
+
+    if (engineResult?.engine_offline) {
+        console.warn(`⚠️  平仓失败 [${symbol}]: 引擎离线`);
+        return res.status(503).json({
+            ok: false,
+            error: '引擎离线，无法平仓',
+            hint: '请启动引擎 (python main.py) 或在 TWS 手动平仓',
+        });
+    }
+
+    if (engineResult?.error) {
+        console.warn(`⚠️  平仓失败 [${symbol}]: ${engineResult.error}`);
+        return res.status(400).json({
+            ok: false,
+            error: engineResult.error,
+            hint: 'IBKR 可能无该标的持仓，请核对 TWS',
+        });
+    }
+
+    if (engineResult && instrumentId) {
+        console.log(`✅ 平仓已提交 [${symbol}]: ${JSON.stringify(engineResult)}`);
+        return res.json({
+            ok: true,
+            routed: 'order_actor',
+            engine: engineResult,
+            note: '平仓单已提交，UI 将在成交确认后清除仓位线',
+        });
+    }
+
+    return res.status(400).json({
+        ok: false,
+        error: '未知标的或未配置 instrument_id',
+    });
+});
 
 // GET /api/account — 真实账户余额（优先从 Redis account:funds 读取，引擎离线时 fallback 到 order_actor）
 app.get('/api/account', async (req, res) => {
@@ -811,50 +887,43 @@ app.get('/api/auto-config', async (req, res) => {
 
 // POST /api/close-all — 一键全平所有持仓（kill switch，代理引擎 /close-all）
 // 注意：引擎侧会同时触发当日熔断（禁止再开仓），这是预期的紧急行为
-app.post('/api/close-all', async (req, res) => {
+app.post('/api/close-all', requireApiSecret, async (req, res) => {
     const result = await proxyToEngine('POST', '/close-all', {}, { engine_offline: true });
-    if (result && (result.engine_offline || result.error)) {
-        return res.json({ ok: false, error: result.error || '引擎未启动' });
-    }
-    res.json({ ok: true, engine: result });
-});
-
-// POST /api/order/:symbol — 下单代理
-app.post('/api/order/:symbol', requireApiSecret, async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
-    const instrumentId = SYMBOL_MAP[symbol];
-    if (!instrumentId) {
-        return res.status(400).json({ error: `未知标的: ${symbol}，支持: ${Object.keys(SYMBOL_MAP).join(', ')}` });
-    }
-    if (await hasActiveProposalForSymbol(symbol) && !req.body?.manual_override) {
-        return res.status(403).json({
-            error: "该标的有待审批或待执行建议，禁止手动开仓",
-            hint: "请先处理 Alpha 建议，或设置 manual_override=true（需 API 鉴权）",
+    if (result?.engine_offline) {
+        return res.status(503).json({
+            ok: false,
+            error: '引擎离线，无法全平',
+            hint: '请启动引擎 (python main.py) 或在 TWS 手动平仓',
         });
     }
-    const { side, qty, stop_loss, order_type = 'BRACKET', price, tp_price, tp_qty, entry_price } = req.body;
-    if (!side || !qty) {
-        return res.status(400).json({ error: 'side 和 qty 必填' });
+    if (result?.error) {
+        return res.status(400).json({ ok: false, error: result.error });
     }
-    const payload = { instrument_id: instrumentId, side, qty: parseInt(qty), order_type };
-    if (stop_loss  != null) payload.stop_loss   = parseFloat(stop_loss);
-    // LIMIT / LIMIT_BRACKET 额外参数透传
-    if (price      != null) payload.price        = parseFloat(price);
-    if (tp_price   != null) payload.tp_price     = parseFloat(tp_price);
-    if (tp_qty     != null) payload.tp_qty       = parseInt(tp_qty);
-    if (entry_price != null) payload.entry_price = parseFloat(entry_price);
+    res.json({ ok: true, engine: result, note: '全平单已提交，熔断已激活；Redis 仓位随成交确认更新' });
+});
 
-    console.log(`📤 下单代理 → ${instrumentId} ${side} x${qty} SL=${stop_loss} TP=${tp_price}x${tp_qty} type=${order_type}`);
-    const data = await proxyToEngine('POST', '/order', payload, { error: '引擎未启动', engine_offline: true });
-    res.json(data);
+// POST /api/order/:symbol — 禁止手动开仓（仅 Agent 审批后可由 AutoRunner 下单）
+app.post('/api/order/:symbol', requireApiSecret, async (req, res) => {
+    return res.status(403).json({
+        error: '系统禁止手动开仓',
+        hint: '请通过 Alpha 建议审批流程，批准实盘后由 Agent 自动执行',
+    });
 });
 
 // POST /api/modify-stop/:symbol — 修改止损价（代理引擎 + 更新 Redis position）
-app.post('/api/modify-stop/:symbol', async (req, res) => {
+app.post('/api/modify-stop/:symbol', requireApiSecret, async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     const { price } = req.body;
     if (price == null) {
         return res.status(400).json({ error: 'price 必填' });
+    }
+
+    if (await usesAutoPm(symbol)) {
+        return res.status(409).json({
+            ok: false,
+            error: 'AutoPM 接管标的禁止 HTTP 改止损',
+            hint: '请关闭 Agent 执行，或仅用 trail_mode 管理手动仓位',
+        });
     }
 
     // 1. 调引擎修改止损单触发价
@@ -882,7 +951,7 @@ app.post('/api/modify-stop/:symbol', async (req, res) => {
 });
 
 // POST /api/cancel-entry/:symbol — 取消挂单中的限价入场单
-app.post('/api/cancel-entry/:symbol', async (req, res) => {
+app.post('/api/cancel-entry/:symbol', requireApiSecret, async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     const { client_order_id } = req.body;
     if (!client_order_id) {
@@ -1057,6 +1126,13 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
             err.statusCode = 503;
             throw err;
         }
+    }
+    if (decision === "approved_live" && !LIVE_TRADING_ALLOWED) {
+        const err = new Error(
+            `TRADING_ENV=${TRADING_ENV}，禁止批准实盘。请在 .env 设置 TRADING_ENV=live 并重启引擎`
+        );
+        err.statusCode = 403;
+        throw err;
     }
     const keyPending = `proposal:pending:${id}`;
     const proposal = await parseProposalHash(keyPending);
@@ -1395,6 +1471,38 @@ app.get("/api/journal/proposals", (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/journal/timeline?proposal_id=&symbol=&limit= — 单提案全链路时间线
+app.get("/api/journal/timeline", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || "500", 10) || 500, 5000);
+    try {
+        res.json(journal.getTimeline({
+            proposal_id: req.query.proposal_id || null,
+            symbol: req.query.symbol || null,
+            limit,
+        }));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/day?date=YYYY-MM-DD — 按 ET 交易日审计（默认今日）
+app.get("/api/journal/day", (req, res) => {
+    try { res.json(journal.getDayAudit(req.query.date || null)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/orders?limit= — 最近订单事件
+app.get("/api/journal/orders", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || "200", 10) || 200, 2000);
+    try { res.json(journal.getOrders(limit)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/journal/signals?limit= — 最近信号事件
+app.get("/api/journal/signals", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || "200", 10) || 200, 2000);
+    try { res.json(journal.getSignals(limit)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Redis 推送设置——防止连接丢失导致进程崩溃
 const REDIS_OPTS = {
     host: "localhost",
@@ -1438,11 +1546,26 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
     try {
         const parsed = JSON.parse(message);
 
-        // auto:signal → 包装为 channel 字段，与 order:update 等一致
+        // auto:signal → 落库 + 前端广播
         if (channel === 'auto:signal') {
+            try { journal.recordAutoSignal(parsed); } catch (e) { console.error(`[journal] auto:signal: ${e.message}`); }
             const autoPayload = JSON.stringify({ channel: 'auto:signal', data: parsed });
             wss.clients.forEach(c => c.readyState === 1 && c.send(autoPayload));
             return;
+        }
+
+        // order:update → 落库（Redis 归因 proposal_id）+ 默认广播
+        if (channel === 'order:update') {
+            void (async () => {
+                try {
+                    const coid = parsed.client_order_id;
+                    if (coid && !parsed.proposal_id) {
+                        const pid = await redis.get(`journal:coid:${coid}`);
+                        if (pid) parsed.proposal_id = pid;
+                    }
+                    journal.recordOrderUpdate(parsed);
+                } catch (e) { console.error(`[journal] order:update: ${e.message}`); }
+            })();
         }
 
         // risk:update → 日亏损熔断通知
@@ -1466,8 +1589,9 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
             // 不 return：仍走默认广播逻辑推给前端
         }
 
-        // signal:touch / signal:touch:backfill → 回踩触线图表标记
+        // signal:touch / signal:touch:backfill → 落库 + 图表标记
         if (channel === 'signal:touch' || channel === 'signal:touch:backfill') {
+            try { journal.recordSignalTouch(parsed, channel); } catch (e) { console.error(`[journal] signal:touch: ${e.message}`); }
             const touchPayload = JSON.stringify({ channel, data: parsed });
             wss.clients.forEach(c => c.readyState === 1 && c.send(touchPayload));
             return;

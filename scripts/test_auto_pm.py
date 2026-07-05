@@ -232,6 +232,7 @@ def test_reconcile_adopt_naked():
 def test_partial_entry_terminal():
     print("[#9] 入场部分成交后被取消 → 平残仓")
     h = FakeHost(); pm = make_pm(h)
+    pm.set_last_bar("NVDA", 100.0, 0)
     entry = FakeOrder("EN9", OrderSide.BUY, 100, "MARKET"); entry.instrument_id = InstrumentId("NVDA")
     h.cache.add(entry)
     u = Unit(sym="NVDA", seq=0, side=OrderSide.BUY, state=UnitState.PENDING_ENTRY,
@@ -240,9 +241,13 @@ def test_partial_entry_terminal():
     h.portfolio.net["NVDA"] = 40.0  # 已成交 40 股
     ev = types.SimpleNamespace(client_order_id=ClientOrderId("EN9"))
     pm.on_order_terminal(ev, "CANCELED")
-    closes = [o for o in h.submitted if o.order_type.name == "MARKET" and o.order_side == OrderSide.SELL]
-    check("平残仓市价单已提交(SELL 40)", len(closes) == 1 and int(closes[0].quantity) == 40)
-    check("单元已关闭", u.state == UnitState.CLOSED)
+    closes = [o for o in h.submitted if o.order_side == OrderSide.SELL]
+    check("平残仓单已提交(SELL 40)", len(closes) == 1 and int(closes[0].quantity) == 40)
+    check("单元 PENDING_CLOSE（等成交确认）", u.state == UnitState.PENDING_CLOSE)
+    close_coid = closes[0].client_order_id.value
+    pm.on_order_filled(types.SimpleNamespace(
+        client_order_id=ClientOrderId(close_coid), last_qty=40, last_px=100.0))
+    check("平仓成交后单元关闭", u.state == UnitState.CLOSED)
 
 
 # ── #10: 小仓全量止盈成交 → 撤残留止损，单元了结 ──────────────────────────

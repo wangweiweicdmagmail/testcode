@@ -105,19 +105,22 @@ def list_approved_wait(
     return out
 
 
-def _save_approved(r: _redis.Redis, payload: dict[str, Any], *, event: str) -> None:
+def _save_approved(r: _redis.Redis, payload: dict[str, Any], *, event: str, extra: Optional[dict[str, Any]] = None) -> None:
     pid = str(payload["proposal_id"])
     pipe = r.pipeline()
     pipe.hset(_key("approved", pid), mapping={
         k: json.dumps(v, ensure_ascii=False) for k, v in payload.items()
     })
     pipe.expire(_key("approved", pid), PROPOSAL_REDIS_RETENTION_SECONDS)
-    pipe.publish("proposal:update", json.dumps({
+    pub: dict[str, Any] = {
         "event": event,
         "proposal_id": pid,
         "symbol": payload.get("symbol"),
         "execution_phase": payload.get("execution_phase"),
-    }, ensure_ascii=False))
+    }
+    if extra:
+        pub.update(extra)
+    pipe.publish("proposal:update", json.dumps(pub, ensure_ascii=False))
     pipe.execute()
 
 
@@ -268,7 +271,7 @@ def pop_approved_for_symbol(
         if p.get("executed_at"):
             continue
         phase = str(p.get("execution_phase") or "")
-        if phase in ("approved_wait", "pending"):
+        if phase in ("approved_wait", "pending", "executing"):
             continue
         if str(p.get("execution_mode") or "") == "conditional_reclaim" and phase != "ready_to_execute":
             continue
@@ -277,6 +280,42 @@ def pop_approved_for_symbol(
             continue
         matched.append(p)
     return matched
+
+
+def mark_executing(
+    r: _redis.Redis,
+    proposal: dict[str, Any],
+    *,
+    meta: Optional[dict[str, Any]] = None,
+) -> None:
+    """实盘报单已提交、待成交 — 仍保留在 approved。"""
+    payload = dict(proposal)
+    payload["execution_phase"] = "executing"
+    payload["executing_at"] = int(time.time())
+    if meta:
+        payload["exec_meta"] = meta
+    _save_approved(r, payload, event="executing")
+
+
+def mark_submit_failed(
+    r: _redis.Redis,
+    proposal: dict[str, Any],
+    *,
+    reason: str,
+    meta: Optional[dict[str, Any]] = None,
+) -> None:
+    """入场失败/被拒 — 释放 claim，恢复 ready_to_execute 供下一根 M1 重试。"""
+    pid = str(proposal["proposal_id"])
+    payload = dict(proposal)
+    payload["execution_phase"] = "ready_to_execute"
+    payload["last_submit_fail_reason"] = reason
+    payload["last_submit_fail_at"] = int(time.time())
+    if meta:
+        payload["last_submit_fail_meta"] = meta
+    for k in ("executing_at",):
+        payload.pop(k, None)
+    release_execution_claim(r, pid)
+    _save_approved(r, payload, event="submit_failed", extra={"reason": reason})
 
 
 def mark_executed(

@@ -9,6 +9,9 @@
     { href: '/proposals.html', label: '历史', key: 'proposals' },
     { href: '/performance.html', label: '绩效', key: 'performance' },
     { href: '/decisions.html', label: '决策', key: 'decisions' },
+    { href: '/audit.html', label: '审计', key: 'audit' },
+    { href: '/settings.html', label: '配置', key: 'settings' },
+    { href: '/docs.html', label: '文档', key: 'docs' },
   ];
 
   let voiceEnabled = true;
@@ -37,7 +40,7 @@
             <span class="sb-chip" id="sb-engine"><span class="dot"></span>引擎</span>
             <span class="sb-chip" id="sb-redis"><span class="dot"></span>Redis</span>
             <span class="sb-chip info clickable" id="sb-pending" title="点击定位待审批格子">待审批 <b id="sb-pending-n">—</b></span>
-            <span class="sb-chip info clickable" id="sb-wait" title="点击定位待执行格子">待执行 <b id="sb-wait-n">—</b></span>
+            <span class="sb-chip info clickable" id="sb-wait" title="点击定位待执行/等待回踩格子（含 ready_to_execute）">待执行 <b id="sb-wait-n">—</b></span>
             <span class="sb-chip clickable" id="sb-pos" title="点击定位持仓格子">持仓 <b id="sb-pos-n">—</b></span>
             <span class="sb-chip" id="sb-pnl">日PnL <b id="sb-pnl-v">—</b></span>
             <span class="sb-chip" id="sb-risk">距熔断 <b id="sb-risk-v">—</b></span>
@@ -49,6 +52,8 @@
           </div>
         </div>
         <div id="sb-engine-banner">⚠️ 引擎离线 — 图表仍可用 Redis 数据；下单/审批后执行需启动引擎</div>
+        <div id="sb-paper-banner">ℹ️ 模拟环境（TRADING_ENV=<b>paper</b>）— 禁止批准实盘，AutoRunner 不会向 IBKR 提交自动订单</div>
+        <div id="sb-prod-banner">⛔ 生产安全配置不完整 — 见控制台 /api/config/public</div>
         <div id="sb-fixedqty-banner">⚠️ 固定股数模式（AUTO_FIXED_QTY=<b id="sb-fq-n">?</b>）— 自动/提案下单已<b>跳过以损定量</b>，实盘前请将 AUTO_FIXED_QTY 设为 0</div>
         <div id="sb-pending-queue" aria-label="待审批队列"></div>
       </div>`;
@@ -87,7 +92,7 @@
       e.stopPropagation();
     });
     document.getElementById('sb-wait')?.addEventListener('click', () => {
-      global.dispatchEvent(new CustomEvent('nautilus:focus-alpha', { detail: { phase: 'wait' } }));
+      global.dispatchEvent(new CustomEvent('nautilus:focus-alpha', { detail: { phase: 'active' } }));
     });
     document.getElementById('sb-pos')?.addEventListener('click', () => {
       global.dispatchEvent(new CustomEvent('nautilus:focus-position'));
@@ -106,7 +111,11 @@
     if (!confirm('⏻ 确认【一键全平】所有持仓？\n\n将立即市价平掉全部仓位，并触发当日熔断（停止再开仓）。')) return;
     if (btn) btn.disabled = true;
     try {
-      const res = await fetch('/api/close-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const authFetch = global.NautilusAuth?.authFetch || fetch;
+      const res = await authFetch('/api/close-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || '全平失败');
       notify('⏻ 已发出全平指令，请在 TWS 核对仓位');
@@ -152,7 +161,7 @@
   async function refresh() {
     const slotSymbols = global.__ALPHA_SYMBOL_LIST || ['QQQ', 'AAPL', 'NVDA', 'TSLA'];
     // 一次性拉取 approved 全量；wait（approved_wait）从中本地筛出，避免重复请求
-    const [engine, stack, pending, approved, positions, risk, autoCfg] = await Promise.all([
+    const [engine, stack, pending, approved, positions, risk, autoCfg, pubCfg] = await Promise.all([
       fetchJson('/api/engine-status'),
       fetchJson('/api/stack-health'),
       fetchJson('/api/proposals?status=pending&limit=200'),
@@ -160,11 +169,16 @@
       fetchJson('/api/positions'),
       fetchJson('/api/risk'),
       fetchJson('/api/auto-config'),
+      fetchJson('/api/config/public'),
     ]);
 
     const approvedList = approved?.proposals || [];
     const waitList = approvedList.filter((p) => p.execution_phase === 'approved_wait');
-    const wait = { count: waitList.length, proposals: waitList };
+    const readyList = approvedList.filter((p) => {
+      const ph = p.execution_phase;
+      return ph === 'ready_to_execute' || ph === 'executing';
+    });
+    const activeCount = waitList.length + readyList.length;
 
     const engineOk = engine?.engine_online === true;
     lastSnapshot.engineOk = engineOk;
@@ -183,13 +197,29 @@
     }
     lastSnapshot.fixedQty = fq;
 
+    const paperMode = pubCfg?.live_trading_allowed === false
+      || (autoCfg?.live_orders_allowed === false);
+    const paperBanner = document.getElementById('sb-paper-banner');
+    if (paperBanner) paperBanner.classList.toggle('visible', paperMode);
+
+    const prodWarns = pubCfg?.production_warnings || [];
+    const prodBanner = document.getElementById('sb-prod-banner');
+    if (prodBanner) {
+      prodBanner.classList.toggle('visible', prodWarns.length > 0);
+      if (prodWarns.length) {
+        prodBanner.innerHTML = `⛔ 生产安全: ${prodWarns.map((w) => `<span>${w}</span>`).join(' · ')}`;
+      }
+    }
+
     const redisOk = stack?.checks?.redis?.ok !== false;
     setChip('sb-redis', redisOk, redisOk ? 'Redis●' : 'Redis●异常');
 
     const pn = pending?.count ?? 0;
-    const wn = wait?.count ?? 0;
+    const wn = activeCount;
     lastSnapshot.pending = pn;
     lastSnapshot.wait = wn;
+    lastSnapshot.readyCount = readyList.length;
+    lastSnapshot.waitOnlyCount = waitList.length;
     lastSnapshot.pendingList = pending?.proposals || [];
 
     renderPendingQueue(lastSnapshot.pendingList);
@@ -268,10 +298,12 @@
     const snapshot = {
       engineOk,
       pending: pending?.proposals || [],
-      wait: wait.proposals,
+      wait: waitList,
+      ready: readyList,
       approved: approvedList,
       pendingCount: pn,
       waitCount: wn,
+      readyCount: readyList.length,
       positions: positions || [],
       positionsBySymbol,
       posCount,

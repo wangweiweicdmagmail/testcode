@@ -1,11 +1,9 @@
 """
 外部下单测试脚本 (order_sender.py)
 
-向 OrderGatewayActor 的 HTTP 接口发送下单指令。
-
-使用方法：
-  python order_sender.py           # 普通市价单
-  python order_sender.py --bracket # 括号单（市价+止损，定时移动止损）
+⚠️ 系统已禁止手动开仓（POST /order 返回 403）。
+开仓请走 Alpha 审批 → Agent 自动执行路径。
+本脚本仅保留供引擎连通性调试参考。
 """
 import json
 import sys

@@ -61,6 +61,8 @@
 
 | 文档 | 说明 |
 |------|------|
+| **[前端文档页](http://localhost:3000/docs.html)** | **系统架构 + 关键使用说明**（浏览器内查阅） |
+| [docs/SCOPE_FIXED.md](docs/SCOPE_FIXED.md) | **需求边界（冻结）**：审计、outcome、对账、OrderPolicy、CI、配置 UI |
 | [docs/UNRELEASED.md](docs/UNRELEASED.md) | **未提交功能总结**（st_super、审批、四宫格、MCP） |
 | [docs/MCP_ALPHA.md](docs/MCP_ALPHA.md) | Cursor MCP Alpha 配置 |
 | [docs/ALPHA_AGENT.md](docs/ALPHA_AGENT.md) | 信号 Agent 架构与命令 |
@@ -83,16 +85,20 @@ nautilus_ibkr_helloworld/
 ├── approval/            # Alpha 扫描与建议 Redis 读写
 ├── signals/             # st_super、回踩检测
 ├── execution/           # AutoPM 仓位单元
-├── portfolio/           # RiskGate
+├── portfolio/           # RiskGate、OrderPolicy
+├── measurement/         # signal_store（SCOPE §1.2）
 ├── feishu/              # 飞书卡片与 notifier
 ├── nautilus_mcp/        # Cursor MCP Server
-├── scripts/             # scan / approve / health_check 等 CLI
+├── scripts/             # scan / approve / health_check / verify_scope 等 CLI
 ├── env.example          # 环境变量模板
 └── frontend/
     ├── server.js        # WebSocket + HTTP API（:3000）
     └── public/
         ├── multi.html           # 四宫格 + 超级信号 + Alpha 审批
         ├── proposals.html       # 建议列表
+        ├── audit.html           # 收盘审计（SCOPE §1.1）
+        ├── settings.html        # 只读配置（SCOPE §1.6）
+        ├── docs.html            # 系统架构与使用说明（Web）
         ├── index.html           # 单图 Dashboard
         └── shared/              # alpha-cell, status-bar, api-auth
 ```
@@ -175,6 +181,7 @@ node frontend/server.js
 # 单图：    http://localhost:3000/?symbol=QQQ
 # 指标排行：http://localhost:3000/indicators.html
 # 四图总览：http://localhost:3000/multi.html
+# 系统文档：http://localhost:3000/docs.html
 ```
 
 > **模式对比**

@@ -36,6 +36,19 @@ def main() -> int:
         result["ok"] = False
         result["checks"]["frontend"] = {"ok": False, "error": str(e)}
 
+    # SCOPE_FIXED 只读 API（前端在线时）
+    scope_paths = ("/api/config/settings", "/api/journal/day")
+    scope: dict = {}
+    for path in scope_paths:
+        try:
+            with urllib.request.urlopen(f"{API}{path}", timeout=5) as resp:
+                scope[path] = {"ok": resp.status == 200}
+        except Exception as e:
+            scope[path] = {"ok": False, "error": str(e)}
+            if result["checks"].get("frontend", {}).get("ok"):
+                result["ok"] = False
+    result["checks"]["scope_api"] = scope
+
     result["checked_at"] = int(time.time())
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
