@@ -85,11 +85,18 @@
     });
   }
 
+  function findAlphaCell(sym) {
+    const s = String(sym || '').toUpperCase();
+    if (!s) return null;
+    return document.querySelector(`.cell[data-symbol="${s}"]`)
+      || document.getElementById(`cell-${s}`);
+  }
+
   function setApprovalFocus(sym, proposal) {
     if (!sym) return;
     clearApprovalFocus();
     _focusSym = sym;
-    const cell = document.getElementById(`cell-${sym}`);
+    const cell = findAlphaCell(sym);
     const grid = document.getElementById('grid');
     if (grid) grid.classList.add('grid-approval-mode');
     if (cell) {

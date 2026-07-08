@@ -2,11 +2,14 @@
  * 全局 Status Bar — multi / indicators / proposals 共用
  */
 (function (global) {
-  const NAV = [
+  const NAV_PRIMARY = [
     { href: '/', label: '单图', key: 'index' },
     { href: '/multi.html', label: '四宫格', key: 'multi' },
     { href: '/indicators.html', label: '指标', key: 'indicators' },
     { href: '/proposals.html', label: '历史', key: 'proposals' },
+  ];
+
+  const NAV_MORE = [
     { href: '/performance.html', label: '绩效', key: 'performance' },
     { href: '/decisions.html', label: '决策', key: 'decisions' },
     { href: '/audit.html', label: '审计', key: 'audit' },
@@ -14,36 +17,78 @@
     { href: '/docs.html', label: '文档', key: 'docs' },
   ];
 
+  const NAV = [...NAV_PRIMARY, ...NAV_MORE];
+
   let voiceEnabled = true;
   let lastSnapshot = { engineOk: null, pending: 0, wait: 0 };
   let onRefreshCb = null;
   let pollTimer = null;
 
   function navHtml(activeKey) {
-    return NAV.map((n) => {
+    const primary = NAV_PRIMARY.map((n) => {
       const cls = n.key === activeKey ? ' class="active"' : '';
       const badge = n.key === 'proposals'
         ? `<span id="sb-pending-badge" class="sb-badge hidden">0</span>`
         : '';
       return `<a href="${n.href}"${cls}>${n.label}${badge}</a>`;
     }).join('');
+
+    const moreActive = NAV_MORE.some((n) => n.key === activeKey);
+    const moreItems = NAV_MORE.map((n) => {
+      const cls = n.key === activeKey ? ' class="active"' : '';
+      return `<a href="${n.href}"${cls}>${n.label}</a>`;
+    }).join('');
+
+    const moreBtnCls = moreActive ? 'sb-nav-more-btn active' : 'sb-nav-more-btn';
+    const more = `<div class="sb-nav-more" id="sb-nav-more">
+      <button type="button" class="${moreBtnCls}" aria-expanded="false" aria-haspopup="true">更多 ▾</button>
+      <div class="sb-nav-dropdown" role="menu">${moreItems}</div>
+    </div>`;
+
+    return primary + more;
   }
 
-  function mount(rootId, activeKey) {
+  function bindNavMore() {
+    const wrap = document.getElementById('sb-nav-more');
+    if (!wrap || wrap.dataset.bound) return;
+    wrap.dataset.bound = '1';
+    const btn = wrap.querySelector('.sb-nav-more-btn');
+    btn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = wrap.classList.toggle('open');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    document.addEventListener('click', () => {
+      wrap.classList.remove('open');
+      btn?.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function mount(rootId, activeKey, opts) {
+    const slim = opts && opts.slim === true;
     const root = document.getElementById(rootId);
     if (!root) return;
-    root.innerHTML = `
-      <div id="status-bar-wrap">
-        <div id="status-bar">
-          <div class="sb-left">
-            <span class="sb-title">📈 Nautilus</span>
+
+    const chipsHtml = slim ? `
+            <span class="sb-chip" id="sb-engine"><span class="dot"></span>引擎</span>
+            <span class="sb-chip info clickable" id="sb-pending" title="打开建议抽屉">待审批 <b id="sb-pending-n">—</b></span>
+            <span class="sb-chip" id="sb-pnl">日PnL <b id="sb-pnl-v">—</b></span>` : `
             <span class="sb-chip" id="sb-engine"><span class="dot"></span>引擎</span>
             <span class="sb-chip" id="sb-redis"><span class="dot"></span>Redis</span>
             <span class="sb-chip info clickable" id="sb-pending" title="点击定位待审批格子">待审批 <b id="sb-pending-n">—</b></span>
             <span class="sb-chip info clickable" id="sb-wait" title="点击定位待执行/等待回踩格子（含 ready_to_execute）">待执行 <b id="sb-wait-n">—</b></span>
             <span class="sb-chip clickable" id="sb-pos" title="点击定位持仓格子">持仓 <b id="sb-pos-n">—</b></span>
             <span class="sb-chip" id="sb-pnl">日PnL <b id="sb-pnl-v">—</b></span>
-            <span class="sb-chip" id="sb-risk">距熔断 <b id="sb-risk-v">—</b></span>
+            <span class="sb-chip" id="sb-risk">距熔断 <b id="sb-risk-v">—</b></span>`;
+
+    const pendingQueueHtml = slim ? '' : '<div id="sb-pending-queue" aria-label="待审批队列"></div>';
+
+    root.innerHTML = `
+      <div id="status-bar-wrap">
+        <div id="status-bar"${slim ? ' class="slim"' : ''}>
+          <div class="sb-left">
+            <span class="sb-title">📈 Nautilus</span>
+            ${chipsHtml}
           </div>
           <div class="sb-nav">
             ${navHtml(activeKey)}
@@ -53,10 +98,13 @@
         </div>
         <div id="sb-engine-banner">⚠️ 引擎离线 — 图表仍可用 Redis 数据；下单/审批后执行需启动引擎</div>
         <div id="sb-paper-banner">ℹ️ 模拟环境（TRADING_ENV=<b>paper</b>）— 禁止批准实盘，AutoRunner 不会向 IBKR 提交自动订单</div>
+        <div id="sb-engine-env-banner">⚠️ 前端已为实盘（TRADING_ENV=<b>live</b>），但引擎 Redis 仍为 paper — 请重启 <code>python main.py</code> 后才会向 IBKR 报单</div>
         <div id="sb-prod-banner">⛔ 生产安全配置不完整 — 见控制台 /api/config/public</div>
         <div id="sb-fixedqty-banner">⚠️ 固定股数模式（AUTO_FIXED_QTY=<b id="sb-fq-n">?</b>）— 自动/提案下单已<b>跳过以损定量</b>，实盘前请将 AUTO_FIXED_QTY 设为 0</div>
-        <div id="sb-pending-queue" aria-label="待审批队列"></div>
+        ${pendingQueueHtml}
       </div>`;
+
+    bindNavMore();
 
     const voiceBtn = document.getElementById('sb-voice-toggle');
     if (voiceBtn) {
@@ -68,6 +116,12 @@
     }
 
     document.getElementById('sb-pending')?.addEventListener('click', (e) => {
+      if (slim) {
+        e.preventDefault();
+        e.stopPropagation();
+        global.dispatchEvent(new CustomEvent('nautilus:open-proposals'));
+        return;
+      }
       e.stopPropagation();
       const q = document.getElementById('sb-pending-queue');
       const list = lastSnapshot.pendingList || [];
@@ -197,10 +251,23 @@
     }
     lastSnapshot.fixedQty = fq;
 
-    const paperMode = pubCfg?.live_trading_allowed === false
-      || (autoCfg?.live_orders_allowed === false);
+    const serverLive = pubCfg?.live_trading_allowed === true;
+    const tradingEnv = String(pubCfg?.trading_env || 'paper').toLowerCase();
+
     const paperBanner = document.getElementById('sb-paper-banner');
-    if (paperBanner) paperBanner.classList.toggle('visible', paperMode);
+    if (paperBanner) {
+      paperBanner.classList.toggle('visible', !serverLive);
+      if (!serverLive) {
+        paperBanner.innerHTML = `ℹ️ 模拟环境（TRADING_ENV=<b>${tradingEnv}</b>）— 禁止批准实盘，AutoRunner 不会向 IBKR 提交自动订单`;
+      }
+    }
+
+    const engineEnvBanner = document.getElementById('sb-engine-env-banner');
+    if (engineEnvBanner) {
+      const engineSaysPaper = autoCfg?.live_orders_allowed === false;
+      const showMismatch = serverLive && engineOk && engineSaysPaper;
+      engineEnvBanner.classList.toggle('visible', showMismatch);
+    }
 
     const prodWarns = pubCfg?.production_warnings || [];
     const prodBanner = document.getElementById('sb-prod-banner');

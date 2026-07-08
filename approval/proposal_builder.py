@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any, Optional
 
@@ -22,6 +23,7 @@ POSITION_PLAN = "half_tp_then_trail"
 PROPOSAL_CHANNEL = "proposal:update"
 DEFAULT_TTL = int(__import__("os").environ.get("ALPHA_PROPOSAL_TTL_SECONDS", 30 * 60))
 
+log = logging.getLogger(__name__)
 
 def proposal_id(symbol: str, signal_type: str, side: str, touch_time: int) -> str:
     raw = f"{symbol}|{signal_type}|{side}|{touch_time}"
@@ -167,6 +169,7 @@ def store_pending(r: _redis.Redis, payload: dict[str, Any]) -> tuple[bool, str]:
     pid = str(payload["proposal_id"])
     dedup_key = f"proposal:dedup:{pid}"
     if not r.set(dedup_key, "1", nx=True, ex=2 * 24 * 3600):
+        log.info("[Proposal] 跳过重复 pending id=%s symbol=%s", pid, payload.get("symbol"))
         return False, f"duplicate proposal_id={pid}"
 
     key = f"proposal:pending:{pid}"
@@ -178,4 +181,9 @@ def store_pending(r: _redis.Redis, payload: dict[str, Any]) -> tuple[bool, str]:
     notify = {**payload, "event": "created"}
     pipe.publish(PROPOSAL_CHANNEL, json.dumps(notify, ensure_ascii=False))
     pipe.execute()
+    log.info(
+        "[Proposal] ✓ pending %s %s %s entry=%s stop=%s",
+        payload.get("symbol"), payload.get("side"), pid,
+        payload.get("entry_price"), payload.get("stop_price"),
+    )
     return True, pid

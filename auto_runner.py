@@ -29,9 +29,10 @@ from approval.proposal_store import (
     pop_approved_for_symbol,
     try_claim_execution,
 )
+from events import AgentExecuteNowEvent
 from execution.auto_pm import AutoPositionManager
 from portfolio.config import ExecutionConfig, PortfolioRiskConfig
-from portfolio.risk_gate import RiskGate
+from portfolio.risk_gate import RiskGate, stop_on_wrong_side
 from portfolio.trading_env import live_orders_allowed, trading_env
 from signals.base import BarContext, IntentAction, TradeIntent
 from signals.opening_breakout import OpeningBreakoutConfig, OpeningBreakoutEngine
@@ -86,6 +87,7 @@ class AutoRunner(Strategy):
         self._pm: Optional[AutoPositionManager] = None
         self._eod_closed_dates: set[str] = set()
         self._pending_proposals: dict[str, dict] = {}
+        self._last_agent_off_warn: dict[str, float] = {}
 
     def on_start(self) -> None:
         try:
@@ -200,6 +202,7 @@ class AutoRunner(Strategy):
 
         self.msgbus.subscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
         self.msgbus.subscribe(topic="bar.collected", handler=self._on_m1_bar)
+        self.msgbus.subscribe(topic=AgentExecuteNowEvent.TOPIC, handler=self._on_execute_now)
         threading.Timer(25.0, self._recover).start()
         self.log.info(
             f"[Runner] 已启动 | {len(self._iid_map)} 标的 | "
@@ -211,6 +214,7 @@ class AutoRunner(Strategy):
         try:
             self.msgbus.unsubscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
             self.msgbus.unsubscribe(topic="bar.collected", handler=self._on_m1_bar)
+            self.msgbus.unsubscribe(topic=AgentExecuteNowEvent.TOPIC, handler=self._on_execute_now)
         except Exception:
             pass
         if self._redis:
@@ -330,6 +334,20 @@ class AutoRunner(Strategy):
             return
         mode = self._mode(sym)
         if mode == "off":
+            if self._redis:
+                pending = pop_approved_for_symbol(
+                    self._redis, sym, decision="approved_live",
+                ) + pop_approved_for_symbol(
+                    self._redis, sym, decision="approved_observe",
+                )
+                if pending:
+                    now = time.time()
+                    if now - self._last_agent_off_warn.get(sym, 0) >= 300:
+                        self._last_agent_off_warn[sym] = now
+                        self.log.warning(
+                            f"[Runner][Agent] {sym} 有 {len(pending)} 条已批准待执行，"
+                            "但 Agent执行=off（请批准实盘/观察或手动开启 auto_strategy）"
+                        )
             return
         self._consume_agent_proposals(sym, bar, bar_time, et_min, mode)
 
@@ -421,6 +439,74 @@ class AutoRunner(Strategy):
         except Exception:
             return False
 
+    def _load_latest_m1_bar(self, sym: str) -> Optional[dict]:
+        if not self._redis:
+            return None
+        try:
+            raw = self._redis.lindex(f"bars:1m:{sym.upper()}", -1)
+            if raw:
+                return json.loads(raw)
+            raw = self._redis.get(f"bars:1m:{sym.upper()}:last")
+            if raw:
+                return json.loads(raw)
+        except Exception as e:
+            self.log.warning(f"[Runner] 读取最新 M1 bar 失败 {sym}: {e}")
+        return None
+
+    def _on_execute_now(self, event: AgentExecuteNowEvent) -> None:
+        """审批通过后立即执行（不等下一根 M1）。"""
+        sym = str(event.symbol).upper()
+        if sym not in self._iid_map or not self._pm or not self._risk:
+            return
+        mode = self._mode(sym)
+        if mode == "off":
+            self.log.warning(
+                f"[Runner][Agent] 立即执行跳过 {sym}: Agent执行=off"
+            )
+            return
+        bar = self._load_latest_m1_bar(sym)
+        if not bar:
+            self.log.warning(f"[Runner][Agent] 立即执行跳过 {sym}: 无 M1 bar")
+            return
+        bar_time = int(bar.get("time", 0))
+        et_min = (bar_time % 86400) // 60
+        try:
+            c = float(bar["close"])
+            self._pm.set_last_bar(sym, c, bar_time)
+        except (KeyError, TypeError, ValueError):
+            pass
+        if et_min >= EOD_CLOSE_ET_MINUTE:
+            return
+
+        live = self._effective_live(mode)
+        decision = "approved_live" if mode == "live" else "approved_observe"
+        pid_filter = str(getattr(event, "proposal_id", "") or "")
+        if pid_filter:
+            p = get_proposal(self._redis, "approved", pid_filter) if self._redis else None
+            proposals = [p] if p else []
+        else:
+            proposals = (
+                pop_approved_for_symbol(self._redis, sym, decision=decision)
+                if self._redis else []
+            )
+        if not proposals:
+            self.log.info(f"[Runner][Agent] 立即执行 {sym}: 无可执行建议")
+            return
+
+        pos_ctx = self._pm.position_context(sym)
+        if not pos_ctx.open_units and not self._risk.is_entry_window(et_min):
+            self.log.info(
+                f"[Runner][Agent] 立即执行 {sym} 跳过: 非入场窗口 et_min={et_min}"
+            )
+            return
+
+        self.log.info(
+            f"[Runner][Agent] 立即执行 {sym} {len(proposals)} 条建议 "
+            f"mode={mode} effective_live={live}"
+        )
+        for p in proposals:
+            self._execute_one_proposal(sym, p, bar, bar_time, et_min, mode, live)
+
     def _consume_agent_proposals(
         self, sym: str, bar: dict, bar_time: int, et_min: int, mode: str,
     ) -> None:
@@ -432,54 +518,116 @@ class AutoRunner(Strategy):
         if not proposals:
             return
 
+        try:
+            bar_close = float(bar.get("close") or 0)
+        except (TypeError, ValueError):
+            bar_close = 0.0
+
         pos_ctx = self._pm.position_context(sym)
         if not pos_ctx.open_units and not self._risk.is_entry_window(et_min):
+            self.log.info(
+                f"[Runner][Agent] {sym} 跳过 {len(proposals)} 条建议: 非入场窗口 et_min={et_min}"
+            )
             return
 
+        self.log.info(
+            f"[Runner][Agent] {sym} 消费 {len(proposals)} 条已批准建议 "
+            f"mode={mode} effective_live={live} bar_close={bar_close:.2f}"
+        )
+
         for p in proposals:
-            pid = str(p.get("proposal_id") or "")
-            if not pid or not try_claim_execution(self._redis, pid):
-                continue
-            intent = self._proposal_to_intent(p, bar_time)
-            if not intent:
-                mark_executed(self._redis, p, result="invalid_intent")
-                continue
-            if c > 0:
-                intent = replace(intent, ref_price=c)
-            verdict = self._risk.check_enter(
-                intent, self.config.atr_mult, self.config.max_units, live,
+            self._execute_one_proposal(sym, p, bar, bar_time, et_min, mode, live)
+
+    def _execute_one_proposal(
+        self,
+        sym: str,
+        p: dict,
+        bar: dict,
+        bar_time: int,
+        et_min: int,
+        mode: str,
+        live: bool,
+    ) -> None:
+        pid = str(p.get("proposal_id") or "")
+        if not pid:
+            self.log.warning(f"[Runner][Agent] {sym} 建议缺少 proposal_id，跳过")
+            return
+        if not try_claim_execution(self._redis, pid):
+            self.log.info(f"[Runner][Agent] {sym} {pid} 执行权已被抢占，跳过")
+            return
+        intent = self._proposal_to_intent(p, bar_time)
+        if not intent:
+            self.log.warning(f"[Runner][Agent] {sym} {pid} invalid_intent，标记 executed")
+            mark_executed(self._redis, p, result="invalid_intent")
+            return
+        try:
+            bar_close = float(bar.get("close") or 0)
+        except (TypeError, ValueError):
+            bar_close = 0.0
+        if bar_close > 0:
+            intent = replace(intent, ref_price=bar_close)
+
+        # 信号有效性校验：审批延迟期间价格可能已穿过原止损线。
+        # 此时入场即触发止损（即时亏损）或被 IBKR 拒单（裸仓）→ 放弃，不重试、不消耗日限额。
+        if intent.stop_px and stop_on_wrong_side(
+            intent.side, float(intent.ref_price), float(intent.stop_px)
+        ):
+            self._publish_signal(sym, "rejected", mode, {
+                "reason": "stop_side_breached",
+                "proposal_id": pid,
+                "ref_price": bar_close,
+                "stop_price": float(intent.stop_px),
+            })
+            mark_executed(self._redis, p, result="signal_stale", meta={
+                "reason": "stop_side_breached",
+                "ref_price": bar_close,
+                "stop_price": float(intent.stop_px),
+            })
+            self.log.info(
+                f"[Runner][Agent] {sym} {pid} 信号失效: 最新价 {bar_close:.2f} "
+                f"已穿过止损 {intent.stop_px:.2f}，放弃执行"
             )
-            if not verdict.allowed:
-                self._publish_signal(sym, "rejected", mode, {
-                    "reason": verdict.reason,
-                    "proposal_id": p.get("proposal_id"),
-                    **(verdict.meta or {}),
-                })
-                mark_executed(self._redis, p, result="risk_rejected", meta={"reason": verdict.reason})
-                continue
-            if live:
-                self._risk.record_daily_trade(sym, bar_time)
-            self._pending_proposals[pid] = dict(p)
-            if live:
-                mark_executing(
-                    self._redis, p,
-                    meta={"qty": verdict.qty, "live": True},
-                )
-                self._pm.execute_enter(intent, verdict.qty, mode, live)
-                self.log.info(
-                    f"[Runner][Agent] 已报单待成交 {pid} {sym} {p.get('side')} qty={verdict.qty}"
-                )
-            else:
-                self._pm.execute_enter(intent, verdict.qty, mode, live)
-                mark_executed(
-                    self._redis, p,
-                    result="observed",
-                    meta={"qty": verdict.qty, "live": False},
-                )
-                self._pending_proposals.pop(pid, None)
-                self.log.info(
-                    f"[Runner][Agent] 已观察建议 {pid} {sym} {p.get('side')} qty={verdict.qty}"
-                )
+            return
+
+        verdict = self._risk.check_enter(
+            intent, self.config.atr_mult, self.config.max_units, live,
+        )
+        if not verdict.allowed:
+            self.log.info(
+                f"[Runner][Agent] {sym} {pid} 风控拒绝: {verdict.reason}"
+                + (f" meta={verdict.meta}" if verdict.meta else "")
+            )
+            self._publish_signal(sym, "rejected", mode, {
+                "reason": verdict.reason,
+                "proposal_id": p.get("proposal_id"),
+                **(verdict.meta or {}),
+            })
+            mark_executed(self._redis, p, result="risk_rejected", meta={"reason": verdict.reason})
+            return
+        if live:
+            self._risk.record_daily_trade(sym, bar_time)
+        self._pending_proposals[pid] = dict(p)
+        if live:
+            mark_executing(
+                self._redis, p,
+                meta={"qty": verdict.qty, "live": True},
+            )
+            self._pm.execute_enter(intent, verdict.qty, mode, live)
+            self.log.info(
+                f"[Runner][Agent] ✓ 已报单待成交 {pid} {sym} {p.get('side')} "
+                f"qty={verdict.qty} ref≈{intent.ref_price:.2f}"
+            )
+        else:
+            self._pm.execute_enter(intent, verdict.qty, mode, live)
+            mark_executed(
+                self._redis, p,
+                result="observed",
+                meta={"qty": verdict.qty, "live": False},
+            )
+            self._pending_proposals.pop(pid, None)
+            self.log.info(
+                f"[Runner][Agent] ✓ 观察模式记录 {pid} {sym} {p.get('side')} qty={verdict.qty}"
+            )
 
     def _proposal_to_intent(self, p: dict, bar_time: int) -> Optional[TradeIntent]:
         try:

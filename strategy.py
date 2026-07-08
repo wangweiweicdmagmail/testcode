@@ -47,8 +47,8 @@ from events import BarCollectedEvent, BarCollectedM5Event, BarsHistoryFlushedEve
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 MAX_BARS   = 500   # Redis 每个 key 保留最大根数
-# 图表展示：盘前最后 30 分钟（09:00–09:30 ET）+ RTH（09:30–16:00）
-PREMARKET_CHART_START_ET_SEC = 9 * 3600
+# 图表展示：盘前最后 60 分钟（08:30–09:30 ET）+ RTH（09:30–16:00）
+PREMARKET_CHART_START_ET_SEC = 8 * 3600 + 30 * 60  # 08:30 ET
 RTH_OPEN_ET_SEC = 9 * 3600 + 30 * 60
 
 # FA 子账户 ID（如 "DU123456"），留空则使用 FA 主账户聚合数据
@@ -88,9 +88,9 @@ class _STState:
         self._atr.update_raw(h, lo, c)
 
         if not self._atr.initialized:
-            # ATR 尚未预热完成，暂返回占位值，方向维持多头
+            # ATR 尚未预热完成，暂返回占位值，方向未定（0=无方向，预热期不输出假信号）
             self._prev_close = c
-            return 0.0, 1, 0.0, 0.0
+            return 0.0, 0, 0.0, 0.0
 
         atr = self._atr.value
         hl2 = (h + lo) / 2
@@ -398,6 +398,57 @@ class BarLoggerStrategy(Strategy):
         self._premarket_last_m1: dict[str, dict] = {}
         self._premarket_last_m5: dict[str, dict] = {}
         self._premarket_ref_date: dict[str, str] = {}
+        # 1m ST 对外发布快照（每 M5 桶收盘刷新，桶内 M1 复用）
+        self._m1_st_published: dict[str, dict] = {}
+
+    @staticmethod
+    def _bucket5m(et_fake_utc: int) -> int:
+        return int(et_fake_utc) - (int(et_fake_utc) % 300)
+
+    def _refresh_m1_st_publish(
+        self,
+        sym: str,
+        *,
+        st_val: float,
+        st_dir: int,
+        st_up: float,
+        st_lo: float,
+        et: int,
+        close: float,
+        o: float,
+        h: float,
+        lo: float,
+        bucket_closed: bool,
+    ) -> dict:
+        """1m ST 每根 M1 内部计算，仅在 M5 桶收盘时刷新对外字段。"""
+        if bucket_closed or sym not in self._m1_st_published:
+            self._m1_st_published[sym] = {
+                "st_value": st_val,
+                "st_dir": st_dir,
+                "st_upper": st_up,
+                "st_lower": st_lo,
+                "m1_bar_time": et,
+                "m1_close": close,
+                "m1_open": o,
+                "m1_high": h,
+                "m1_low": lo,
+            }
+        return self._m1_st_published[sym]
+
+    def _attach_m1_snap_to_m5(self, sym: str, m5_bar: dict) -> dict:
+        snap = self._m1_st_published.get(sym)
+        if not snap:
+            return m5_bar
+        return {
+            **m5_bar,
+            "m1_st_value": snap.get("st_value"),
+            "m1_st_dir": snap.get("st_dir"),
+            "m1_bar_time": snap.get("m1_bar_time"),
+            "m1_close": snap.get("m1_close"),
+            "m1_open": snap.get("m1_open"),
+            "m1_high": snap.get("m1_high"),
+            "m1_low": snap.get("m1_low"),
+        }
 
     # ── 解析所有订阅合约 ────────────────────────────────────────────────
     def _all_instrument_ids(self) -> list[InstrumentId]:
@@ -431,7 +482,7 @@ class BarLoggerStrategy(Strategy):
 
     @staticmethod
     def _is_premarket_chart_et(et_fake_utc: int) -> bool:
-        """盘前图表窗口：开盘前 30 分钟（09:00–09:30 ET）。"""
+        """盘前图表窗口：开盘前 60 分钟（08:30–09:30 ET）。"""
         if BarLoggerStrategy._is_rth(et_fake_utc):
             return False
         from datetime import timezone as _tz
@@ -940,11 +991,10 @@ class BarLoggerStrategy(Strategy):
         # M1 指标计算
         st_val, st_dir, st_up, st_lo = self._st_m1[sym].update(o, h, lo, c)
         ema21 = self._ema_m1[sym].update(c)
-        # 更新 M1 ATR（供动量窗口使用）
         if sym in self._atr_m1:
             self._atr_m1[sym].update_raw(h, lo, c)
 
-        bar_dict = {
+        bar_internal = {
             "time":     et,
             "open":     round(o, 4),
             "high":     round(h, 4),
@@ -956,6 +1006,20 @@ class BarLoggerStrategy(Strategy):
             "st_dir":   st_dir,
             "st_upper": st_up,
             "st_lower": st_lo,
+        }
+        m5_out = self._m5_bucket[sym].push(bar_internal) if sym in self._m5_bucket else None
+        pub = self._refresh_m1_st_publish(
+            sym,
+            st_val=st_val, st_dir=st_dir, st_up=st_up, st_lo=st_lo,
+            et=et, close=c, o=o, h=h, lo=lo,
+            bucket_closed=m5_out is not None,
+        )
+        bar_dict = {
+            **bar_internal,
+            "st_value": pub["st_value"],
+            "st_dir": pub["st_dir"],
+            "st_upper": pub["st_upper"],
+            "st_lower": pub["st_lower"],
         }
         if self._is_rth(et):
             self._apply_session_vwap(sym, bar_dict)
@@ -974,7 +1038,6 @@ class BarLoggerStrategy(Strategy):
             )
 
         # M5 聚合（历史预热：仅内存，flush 时批量写 Redis）
-        m5_out = self._m5_bucket[sym].push(bar_dict)
         if m5_out:
             m5_bar = self._process_m5_bar(
                 sym, m5_out, publish=False, write_redis=False, update_active=True,
@@ -1016,13 +1079,13 @@ class BarLoggerStrategy(Strategy):
             if not self._redis:
                 self.log.warning(f"[FLUSH] {sym}: ⚠ Redis 不可用，跳过写入")
             else:
-                # ── 步骤1：写入 M1 历史 K 线（盘前30分 + RTH）────
+                # ── 步骤1：写入 M1 历史 K 线（盘前60分 + RTH）────
                 chart_m1 = [b for b in bars if self._is_chart_et(b["time"])]
                 pm_chart_n = sum(1 for b in chart_m1 if self._is_premarket_chart_et(b["time"]))
                 rth_n = len(chart_m1) - pm_chart_n
                 self.log.info(
                     f"[FLUSH] {sym}: 过滤图表时段  "
-                    f"总缓冲={len(bars)} 根  盘前30分={pm_chart_n}  RTH={rth_n}  "
+                    f"总缓冲={len(bars)} 根  盘前60分={pm_chart_n}  RTH={rth_n}  "
                     f"更早盘前={len(bars)-len(chart_m1)} 根（仅指标预热）"
                 )
                 try:
@@ -1074,7 +1137,7 @@ class BarLoggerStrategy(Strategy):
                     })
                     self.log.info(f"[FLUSH] {sym}: 补刷未完成 M5 bucket（仅展示）  C={c5:.2f}  EMA21={ema21_5}")
 
-                # ── 步骤3：整体覆盖写入 M5 历史 K 线（盘前30分 + RTH）────────────
+                # ── 步骤3：整体覆盖写入 M5 历史 K 线（盘前60分 + RTH）────────────
                 chart_m5 = [b for b in m5_bars if self._is_chart_et(b["time"])]
                 key_m5 = f"bars:5m:{sym}"
                 written_m5 = []
@@ -1135,7 +1198,7 @@ class BarLoggerStrategy(Strategy):
         self._schedule_poll(sym)
 
     def _inc_update_redis(self, sym: str, bar_dict: dict) -> None:
-        """增量更新 Redis（去重优先 → 再算指标 → M1 写入 + M5 聚合），盘前30分 + RTH。"""
+        """增量更新 Redis（去重优先 → 再算指标 → M1 写入 + M5 聚合），盘前60分 + RTH。"""
         if not self._redis:
             return
         et = int(bar_dict["time"])
@@ -1222,7 +1285,7 @@ class BarLoggerStrategy(Strategy):
                 return
 
         # ─ RTH / 盘前图表 过滤 ───────────────────────────────────────────
-        # 04:00–09:00：仅指标预热；09:00–09:30：写入 Redis 并展示；≥16:00：忽略
+        # 04:00–08:30：仅指标预热；08:30–09:30：写入 Redis 并展示；≥16:00：忽略
         is_rth       = self._is_rth(et)
         is_pm_chart  = self._is_premarket_chart_et(et)
         is_premarket = self._is_premarket_et(et)
@@ -1249,19 +1312,23 @@ class BarLoggerStrategy(Strategy):
         if sym in self._atr_m1:
             self._atr_m1[sym].update_raw(h, lo, c)
 
-        # 更早盘前（04:00–09:00）：只预热指标，不写 Redis
+        bar_internal = {
+            "time": et,
+            "open": round(o, 4),
+            "high": round(h, 4),
+            "low": round(lo, 4),
+            "close": round(c, 4),
+            "volume": v,
+            "ema21": ema21,
+            "st_value": st_val,
+            "st_dir": st_dir,
+            "st_upper": st_up,
+            "st_lower": st_lo,
+        }
+
+        # 更早盘前（04:00–08:30）：只预热指标，不写 Redis
         if is_premarket and not is_pm_chart:
-            pre_dict = {
-                "time": et,
-                "open": round(o, 4),
-                "high": round(h, 4),
-                "low": round(lo, 4),
-                "close": round(c, 4),
-                "volume": v,
-                "ema21": ema21,
-                "st_value": st_val,
-                "st_dir": st_dir,
-            }
+            pre_dict = dict(bar_internal)
             self._premarket_last_m1[sym] = pre_dict
             if sym in self._m5_bucket:
                 m5_out = self._m5_bucket[sym].push(pre_dict)
@@ -1271,9 +1338,20 @@ class BarLoggerStrategy(Strategy):
                         self._premarket_last_m5[sym] = m5_bar
             self._cur_bar[sym] = None
             self.log.debug(
-                f"[BAR] {sym}: 盘前预热（<09:00，不写 Redis）  C={c:.2f}  ST={st_val:.2f}"
+                f"[BAR] {sym}: 盘前预热（<08:30，不写 Redis）  C={c:.2f}  ST={st_val:.2f}"
             )
             return
+
+        m5_out = None
+        if sym in self._m5_bucket:
+            m5_out = self._m5_bucket[sym].push(bar_internal)
+
+        pub = self._refresh_m1_st_publish(
+            sym,
+            st_val=st_val, st_dir=st_dir, st_up=st_up, st_lo=st_lo,
+            et=et, close=c, o=o, h=h, lo=lo,
+            bucket_closed=m5_out is not None,
+        )
 
         if is_rth:
             session_date = self._session_date_from_et(et)
@@ -1281,18 +1359,12 @@ class BarLoggerStrategy(Strategy):
                 self._write_premarket_ref(sym, session_date)
 
         bar_dict = {
-            "symbol":   sym,
-            "time":     et,
-            "open":     round(o, 4),
-            "high":     round(h, 4),
-            "low":      round(lo, 4),
-            "close":    round(c, 4),
-            "volume":   v,
-            "ema21":    ema21,
-            "st_value": st_val,
-            "st_dir":   st_dir,
-            "st_upper": st_up,
-            "st_lower": st_lo,
+            "symbol": sym,
+            **bar_internal,
+            "st_value": pub["st_value"],
+            "st_dir": pub["st_dir"],
+            "st_upper": pub["st_upper"],
+            "st_lower": pub["st_lower"],
         }
         if is_rth:
             self._apply_session_vwap(sym, bar_dict)
@@ -1319,16 +1391,14 @@ class BarLoggerStrategy(Strategy):
 
         self._cur_bar[sym] = None
 
-        if sym in self._m5_bucket:
-            m5_out = self._m5_bucket[sym].push(bar_dict)
-            if m5_out:
-                self.log.info(
-                    f"[BAR→M5] {sym}: M5 bucket 输出  "
-                    f"time={m5_out['time']}  O={m5_out['open']:.2f} C={m5_out['close']:.2f}"
-                )
-                m5_bar = self._process_m5_bar(sym, m5_out, publish=True)
-                if m5_bar and is_pm_chart:
-                    self._premarket_last_m5[sym] = m5_bar
+        if m5_out:
+            self.log.info(
+                f"[BAR→M5] {sym}: M5 bucket 输出  "
+                f"time={m5_out['time']}  O={m5_out['open']:.2f} C={m5_out['close']:.2f}"
+            )
+            m5_bar = self._process_m5_bar(sym, m5_out, publish=True)
+            if m5_bar and is_pm_chart:
+                self._premarket_last_m5[sym] = m5_bar
 
         if not self._redis:
             self.log.warning(f"[BAR] {sym}: Redis 不可用，跳过写入")
@@ -1450,9 +1520,10 @@ class BarLoggerStrategy(Strategy):
         if publish:
             bar_type = self._bar_types.get(sym)
             iid_str = str(bar_type.instrument_id) if bar_type else ""
+            m5_pub = self._attach_m1_snap_to_m5(sym, {**m5_bar, "instrument_id": iid_str})
             self.msgbus.publish(
                 "bar.collected.m5",
-                BarCollectedM5Event(sym, {**m5_bar, "instrument_id": iid_str}),
+                BarCollectedM5Event(sym, m5_pub),
             )
 
         if not write_redis:
@@ -1475,7 +1546,7 @@ class BarLoggerStrategy(Strategy):
             else:
                 self._redis.rpush(key, json.dumps(m5_bar))
             if publish:
-                self._redis.publish(ch, json.dumps(m5_bar))
+                self._redis.publish(ch, json.dumps(self._attach_m1_snap_to_m5(sym, m5_bar)))
             self.log.debug(
                 f"[M5] {sym}: ✓ Redis RPUSH bars:5m"
                 + (f" + PUBLISH {ch}" if publish else "")

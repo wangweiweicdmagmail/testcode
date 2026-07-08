@@ -4,6 +4,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# 始终以 .env 为准，避免 shell 残留 export 与文件不一致
+_ALWAYS_FROM_FILE = frozenset({"TRADING_ENV", "AUTO_STRATEGY_MODE"})
+
 
 def load_dotenv(path: Path | None = None) -> Path:
     root = Path(__file__).resolve().parents[1]
@@ -16,6 +19,8 @@ def load_dotenv(path: Path | None = None) -> Path:
             continue
         key, _, val = line.partition("=")
         key, val = key.strip(), val.strip().strip("'\"")
-        if key and key not in os.environ:
+        if not key:
+            continue
+        if key in _ALWAYS_FROM_FILE or key not in os.environ:
             os.environ[key] = val
     return env_path

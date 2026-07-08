@@ -67,6 +67,19 @@ class BarsHistoryFlushedEvent(Event):
         self.session_date = session_date
 
 
+class AgentExecuteNowEvent(Event):
+    """审批通过后立即触发 Agent 执行（不等下一根 M1）。"""
+    TOPIC = "agent.execute.now"
+
+    def __init__(self, symbol: str, proposal_id: str = "") -> None:
+        self._ts_event = time.time_ns()
+        self._ts_init = time.time_ns()
+        self._id = UUID4()
+
+        self.symbol = str(symbol).upper()
+        self.proposal_id = str(proposal_id or "")
+
+
 # 订单终态集合（不再活跃），全局共用，避免各模块重复定义
 TERMINAL_STATUS: frozenset[str] = frozenset({
     "FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"

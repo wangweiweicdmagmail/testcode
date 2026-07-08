@@ -30,11 +30,13 @@ def production_safety_warnings() -> list[str]:
         return out
     if not os.environ.get("ORDER_GATEWAY_SECRET", "").strip():
         out.append("TRADING_ENV=live 但未设置 ORDER_GATEWAY_SECRET（8888 网关无 Token 保护）")
-    if not os.environ.get("NAUTILUS_API_SECRET", "").strip():
-        out.append("TRADING_ENV=live 但未设置 NAUTILUS_API_SECRET（前端审批/平仓 API 无鉴权）")
-    bind = os.environ.get("NAUTILUS_BIND_HOST", "127.0.0.1").strip()
-    if bind in ("0.0.0.0", "::", ""):
-        out.append(f"NAUTILUS_BIND_HOST={bind or '(空)'} — 前端 API 暴露于所有网卡，生产建议 127.0.0.1")
+    bind = os.environ.get("NAUTILUS_BIND_HOST", "127.0.0.1").strip().lower()
+    if bind not in ("127.0.0.1", "localhost"):
+        if not os.environ.get("NAUTILUS_API_SECRET", "").strip():
+            out.append("TRADING_ENV=live 但未设置 NAUTILUS_API_SECRET（前端审批/平仓 API 无鉴权）")
+    bind_display = os.environ.get("NAUTILUS_BIND_HOST", "127.0.0.1").strip()
+    if bind_display in ("0.0.0.0", "::", ""):
+        out.append(f"NAUTILUS_BIND_HOST={bind_display or '(空)'} — 前端 API 暴露于所有网卡，生产建议 127.0.0.1")
     fixed = max(0, int(os.environ.get("AUTO_FIXED_QTY", "0") or "0"))
     if fixed > 0 and not allow_fixed_qty(fixed):
         out.append(

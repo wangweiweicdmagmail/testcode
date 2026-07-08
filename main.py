@@ -21,6 +21,10 @@ import sys
 import signal
 import atexit
 
+from scripts.load_env import load_dotenv
+
+load_dotenv()  # 读取项目根 .env（不覆盖已有 export）
+
 # ============================================================
 # 单例保护：确保只有一个引擎进程在运行
 # ============================================================

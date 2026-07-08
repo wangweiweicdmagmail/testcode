@@ -4,11 +4,14 @@ Redis 交易建议（Proposal）读写 — Agent / 前端 / 引擎共用。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any, Optional
 
 import redis as _redis
+
+log = logging.getLogger(__name__)
 
 # Redis key 保留时长（与交易 expires_at 无关，仅供页面/审批留存）
 PROPOSAL_REDIS_RETENTION_SECONDS = int(
@@ -295,6 +298,10 @@ def mark_executing(
     if meta:
         payload["exec_meta"] = meta
     _save_approved(r, payload, event="executing")
+    log.info(
+        "[Proposal] executing %s %s qty=%s",
+        payload.get("symbol"), payload.get("proposal_id"), (meta or {}).get("qty"),
+    )
 
 
 def mark_submit_failed(
@@ -316,6 +323,10 @@ def mark_submit_failed(
         payload.pop(k, None)
     release_execution_claim(r, pid)
     _save_approved(r, payload, event="submit_failed", extra={"reason": reason})
+    log.warning(
+        "[Proposal] submit_failed %s %s reason=%s",
+        payload.get("symbol"), pid, reason,
+    )
 
 
 def mark_executed(
@@ -349,3 +360,7 @@ def mark_executed(
         "result": result,
     }, ensure_ascii=False))
     pipe.execute()
+    log.info(
+        "[Proposal] ✓ executed %s %s result=%s",
+        payload.get("symbol"), pid, result,
+    )

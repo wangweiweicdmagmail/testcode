@@ -9,24 +9,12 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const { spawn, execSync } = require("child_process");
-const journal = require("./journal");
 
-const PORT = parseInt(process.env.NAUTILUS_PORT || "3000", 10);
-const HOST = process.env.NAUTILUS_BIND_HOST || "127.0.0.1";
-const NAUTILUS_API_SECRET = process.env.NAUTILUS_API_SECRET || "";
-const ORDER_GATEWAY_SECRET = process.env.ORDER_GATEWAY_SECRET || "";
-const TRADING_ENV = (process.env.TRADING_ENV || "paper").trim().toLowerCase();
-const LIVE_TRADING_ALLOWED = TRADING_ENV === "live";
-const DEFAULT_ALPHA_SYMBOLS = (process.env.ALPHA_SYMBOLS || "NVDA,TSLA,AAPL")
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
-const SYMBOL = process.env.SYMBOL || "QQQ";
-
-// 加载项目根 .env（不覆盖已有环境变量）
+// 先加载项目根 .env（TRADING_ENV 等以 .env 为准，避免 shell 残留 export 覆盖）
 (function loadDotEnv() {
     const envPath = path.join(__dirname, "..", ".env");
     if (!fs.existsSync(envPath)) return;
+    const ALWAYS_FROM_FILE = new Set(["TRADING_ENV", "AUTO_STRATEGY_MODE"]);
     try {
         for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
             const trimmed = line.trim();
@@ -37,10 +25,45 @@ const SYMBOL = process.env.SYMBOL || "QQQ";
             if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
                 val = val.slice(1, -1);
             }
-            if (key && process.env[key] === undefined) process.env[key] = val;
+            if (key && (ALWAYS_FROM_FILE.has(key) || process.env[key] === undefined)) {
+                process.env[key] = val;
+            }
         }
     } catch (_) { /* ignore */ }
 })();
+
+const journal = require("./journal");
+
+/** 统一关键路径日志：tag 如 Approval / AutoPM / Config */
+function logKey(tag, level, message, extra) {
+    const ts = new Date().toISOString();
+    const suffix = extra !== undefined
+        ? ` ${typeof extra === "string" ? extra : JSON.stringify(extra)}`
+        : "";
+    const line = `[${ts}] [${tag}] ${message}${suffix}`;
+    if (level === "error") console.error(line);
+    else if (level === "warn") console.warn(line);
+    else console.log(line);
+}
+
+const PORT = parseInt(process.env.NAUTILUS_PORT || "3000", 10);
+const HOST = process.env.NAUTILUS_BIND_HOST || "127.0.0.1";
+const NAUTILUS_API_SECRET = process.env.NAUTILUS_API_SECRET || "";
+const ORDER_GATEWAY_SECRET = process.env.ORDER_GATEWAY_SECRET || "";
+const TRADING_ENV = (process.env.TRADING_ENV || "paper").trim().toLowerCase();
+const LIVE_TRADING_ALLOWED = TRADING_ENV === "live";
+
+/** 仅绑定本机时：前端免输 Token，仍保留 ORDER_GATEWAY_SECRET 保护 8888 */
+function isLocalBindOnly() {
+    const h = (HOST || "").trim().toLowerCase();
+    return h === "127.0.0.1" || h === "localhost";
+}
+const API_AUTH_ENFORCED = Boolean(NAUTILUS_API_SECRET) && !isLocalBindOnly();
+const DEFAULT_ALPHA_SYMBOLS = (process.env.ALPHA_SYMBOLS || "NVDA,TSLA,AAPL")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+const SYMBOL = process.env.SYMBOL || "QQQ";
 
 const FEISHU_VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN || "";
 const FEISHU_REQUIRE_TOKEN = !["0", "false", "no", "off"].includes(
@@ -53,7 +76,7 @@ function getApiToken(req) {
 }
 
 function requireApiSecret(req, res, next) {
-    if (!NAUTILUS_API_SECRET) return next();
+    if (!API_AUTH_ENFORCED) return next();
     if (getApiToken(req) === NAUTILUS_API_SECRET) return next();
     return res.status(401).json({
         error: "unauthorized",
@@ -316,7 +339,7 @@ function parseEngineHeartbeat(raw) {
 app.get("/api/config/public", (req, res) => {
     const warnings = [];
     if (LIVE_TRADING_ALLOWED) {
-        if (!NAUTILUS_API_SECRET) {
+        if (!NAUTILUS_API_SECRET && !isLocalBindOnly()) {
             warnings.push("TRADING_ENV=live 但未配置 NAUTILUS_API_SECRET");
         }
         if (!ORDER_GATEWAY_SECRET) {
@@ -327,7 +350,7 @@ app.get("/api/config/public", (req, res) => {
         warnings.push(`NAUTILUS_BIND_HOST=${HOST} — API 暴露于所有网卡`);
     }
     res.json({
-        api_auth_required: Boolean(NAUTILUS_API_SECRET),
+        api_auth_required: API_AUTH_ENFORCED,
         alpha_symbols: DEFAULT_ALPHA_SYMBOLS,
         bind_host: HOST,
         trading_env: TRADING_ENV,
@@ -407,7 +430,7 @@ app.get("/api/signals/touches/:symbol", async (req, res) => {
 const MAX_BARS = 500;
 const RTH_OPEN_SEC = 9 * 3600 + 30 * 60;   // 09:30 ET
 const RTH_CLOSE_SEC = 16 * 3600;            // 16:00 ET
-const PREMARKET_CHART_START_SEC = 9 * 3600; // 09:00 ET（开盘前 30 分钟）
+const PREMARKET_CHART_START_SEC = 8 * 3600 + 30 * 60; // 08:30 ET（开盘前 60 分钟）
 
 function isPremarketChartSec(secOfDay) {
     return secOfDay >= PREMARKET_CHART_START_SEC && secOfDay < RTH_OPEN_SEC;
@@ -447,7 +470,7 @@ app.get("/api/data/:symbol", async (req, res) => {
             return Array.from(map.values()).sort((a, b) => a.time - b.time);
         }
 
-        // 图表时段：盘前 30 分钟 + 正市
+        // 图表时段：盘前 60 分钟 + 正市
         // 计算昨日 H/L/C（从 5m bars 中筛选昨日 ET 日期数据）
         // ET fake-UTC：bars.time 已是 ET fake-UTC 秒
         function calcPrevDay(m5Bars) {
@@ -473,8 +496,8 @@ app.get("/api/data/:symbol", async (req, res) => {
             symbol,
             m1_bars: filterChartBars(dedupBars(m1All)).slice(-MAX_BARS),
             m5_bars: filterChartBars(dedupBars(m5All)).slice(-MAX_BARS),
-            // 含盘前预热数据的原始 M1 bars（供前端 ATR14 计算，不用于图表显示）
-            m1_atr_bars: dedupBars(m1All).slice(-50),
+            // 含盘前预热：引擎 04:00 起算指标，供前端 ATR 等（不限于图表 60 分窗口）
+            m1_atr_bars: dedupBars(m1All).slice(-120),
             position: posRaw ? JSON.parse(posRaw) : null,
             // 优先用引擎写入的日K数据，否则 fallback 到从5m bars计算
             prev_day: prevDayRaw ? JSON.parse(prevDayRaw) : calcPrevDay(m5All),
@@ -706,6 +729,7 @@ async function routeAutoPmClose(symbol, reason = 'ui_close') {
     const payload = JSON.stringify({ reason, ts: Math.floor(Date.now() / 1000) });
     await redis.set(`auto:close:${symbol}`, payload, 'EX', 300);
     await redis.publish('auto:close', JSON.stringify({ symbol, reason }));
+    logKey("AutoPM", "info", `平仓请求已写入 Redis auto:close:${symbol}`, { reason });
 }
 
 
@@ -1110,6 +1134,7 @@ async function linkAgentExecutionOnApproval(symbol, decision) {
     const changed = prev.auto_strategy !== !!settings.auto_strategy
         || prev.auto_observe !== !!settings.auto_observe;
     console.log(`⚙️  批准联动 Agent执行 [${sym}] → ${mode}`, settings);
+    logKey("Approval", "info", `联动 Agent执行 ${sym} → ${mode}`, { changed, previous: prev });
     return { symbol: sym, mode, changed, settings, previous: prev };
 }
 
@@ -1122,12 +1147,14 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
         const rawHb = await redis.get("engine:heartbeat");
         const { online } = parseEngineHeartbeat(rawHb);
         if (!online) {
+            logKey("Approval", "warn", `拒绝批准 id=${id}`, "引擎离线");
             const err = new Error("引擎离线，暂不允许批准（避免重启后意外自动执行）");
             err.statusCode = 503;
             throw err;
         }
     }
     if (decision === "approved_live" && !LIVE_TRADING_ALLOWED) {
+        logKey("Approval", "warn", `拒绝实盘批准 id=${id}`, `TRADING_ENV=${TRADING_ENV}`);
         const err = new Error(
             `TRADING_ENV=${TRADING_ENV}，禁止批准实盘。请在 .env 设置 TRADING_ENV=live 并重启引擎`
         );
@@ -1137,6 +1164,7 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
     const keyPending = `proposal:pending:${id}`;
     const proposal = await parseProposalHash(keyPending);
     if (!proposal) {
+        logKey("Approval", "warn", `建议不存在 id=${id} decision=${decision}`);
         const err = new Error("待审批建议不存在或已处理");
         err.statusCode = 404;
         throw err;
@@ -1160,7 +1188,7 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
         payload.approved_at = now;
         if (payload.execution_mode === "st_super_immediate") {
             payload.execution_phase = "ready_to_execute";
-            payload.reclaim_note = "超级信号：审批通过，下一根 M1 可下单";
+            payload.reclaim_note = "超级信号：审批通过，立即市价下单";
             if (agentExec?.mode === "live") {
                 payload.reclaim_note += "（已自动开启 Agent执行）";
             }
@@ -1197,7 +1225,25 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
         agent_exec: agentExec,
     }));
     await pipe.exec();
-    console.log(`📋 建议审批 [${payload.symbol}] ${decision} id=${id} by ${approver}`);
+    logKey("Approval", "info", `建议审批成功 ${payload.symbol} ${decision}`, {
+        id, approver, phase: payload.execution_phase, agent_exec: agentExec?.mode,
+    });
+    if (
+        isApproved
+        && payload.execution_phase === "ready_to_execute"
+        && (decision === "approved_live" || decision === "approved_observe")
+    ) {
+        const execResult = await proxyToEngine("POST", "/execute-proposal", {
+            symbol: payload.symbol,
+            proposal_id: id,
+        }, { engine_offline: true });
+        if (execResult?.engine_offline || execResult?.error) {
+            logKey("Approval", "warn", `立即执行未送达引擎 ${payload.symbol}`, execResult);
+        } else {
+            logKey("Approval", "info", `立即执行已触发 ${payload.symbol}`, execResult);
+        }
+        payload.immediate_exec = execResult;
+    }
     return payload;
 }
 
@@ -1250,7 +1296,7 @@ async function applyProposalCancel(id, approver = "operator", comment = "") {
         operator: approver,
     }));
     await pipe.exec();
-    console.log(`📋 建议取消批准 [${payload.symbol}] id=${id} by ${approver}`);
+    logKey("Approval", "info", `建议取消批准 ${payload.symbol}`, { id, approver });
     return payload;
 }
 
@@ -1267,6 +1313,8 @@ app.post("/api/proposals/:id/decision", requireApiSecret, async (req, res) => {
             agent_exec: payload.agent_exec || null,
         });
     } catch (e) {
+        logKey("Approval", e.statusCode >= 500 ? "error" : "warn",
+            `审批 API 失败 id=${id} decision=${decision}`, e.message);
         res.status(e.statusCode || 500).json({ error: e.message });
     }
 });
@@ -1279,6 +1327,7 @@ app.post("/api/proposals/:id/cancel", requireApiSecret, async (req, res) => {
         const payload = await applyProposalCancel(id, approver, comment);
         res.json({ ok: true, proposal: payload });
     } catch (e) {
+        logKey("Approval", "warn", `取消批准失败 id=${id}`, e.message);
         res.status(e.statusCode || 500).json({ error: e.message });
     }
 });
@@ -1536,7 +1585,7 @@ function isRTH() {
     return secOfDay >= RTH_OPEN_SEC && secOfDay < RTH_CLOSE_SEC;
 }
 
-// 图表实时推送窗口：盘前 30 分 + 正市
+// 图表实时推送窗口：盘前 60 分 + 正市
 function isChartLiveSession() {
     const { secOfDay } = getETInfo();
     return secOfDay >= PREMARKET_CHART_START_SEC && secOfDay < RTH_CLOSE_SEC;
@@ -1619,7 +1668,7 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
         }
 
 
-        // 盘前/盘后：拦截 kline 和 bars 实时推送（盘前 09:00 起放行）
+        // 盘前/盘后：拦截 kline 和 bars 实时推送（盘前 08:30 起放行）
         const isBarChannel = channel.startsWith('kline:') || channel.startsWith('bars:');
         if (isBarChannel && !isChartLiveSession()) {
             return;
@@ -1663,6 +1712,12 @@ server.on("error", (err) => {
 server.listen(PORT, HOST, () => {
     const urlHost = HOST === "0.0.0.0" || HOST === "::" ? "localhost" : HOST;
     printBanner(`SUCCESS: 前端已启动 http://${urlHost}:${PORT}  PID=${process.pid}`);
+    logKey("Config", "info", "前端配置", {
+        TRADING_ENV,
+        live_trading_allowed: LIVE_TRADING_ALLOWED,
+        bind: `${HOST}:${PORT}`,
+        alpha_symbols: DEFAULT_ALPHA_SYMBOLS,
+    });
     console.log(`   pidfile=${PID_FILE}`);
     console.log(`   监听频道: bars:1m:* / bars:5m:* / signal:*`);
 });

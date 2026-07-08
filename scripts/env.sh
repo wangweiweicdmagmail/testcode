@@ -5,8 +5,9 @@ export NAUTILUS_ROOT="$_NAUTILUS_ENV_SH"
 export NAUTILUS_API_BASE="${NAUTILUS_API_BASE:-http://localhost:3000}"
 export NAUTILUS_ENGINE_BASE="${NAUTILUS_ENGINE_BASE:-http://localhost:8888}"
 
-# 加载 .env（不覆盖已有 export）
+# 加载 .env（TRADING_ENV 以 .env 为准）
 _env_file="$_NAUTILUS_ENV_SH/.env"
+_ENV_ALWAYS=(TRADING_ENV AUTO_STRATEGY_MODE)
 if [[ -f "$_env_file" ]]; then
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
@@ -16,9 +17,12 @@ if [[ -f "$_env_file" ]]; then
     val="${line#*=}"
     val="${val%\"}"; val="${val#\"}"
     val="${val%\'}"; val="${val#\'}"
-    if [[ -n "$key" && -z "${!key:-}" ]]; then
+    [[ -z "$key" ]] && continue
+    _force=0
+    for _k in "${_ENV_ALWAYS[@]}"; do [[ "$key" == "$_k" ]] && _force=1 && break; done
+    if [[ "$_force" == 1 || -z "${!key:-}" ]]; then
       export "$key=$val"
     fi
   done < "$_env_file"
 fi
-unset _NAUTILUS_ENV_SH _env_file line key val
+unset _NAUTILUS_ENV_SH _env_file line key val _force _k _ENV_ALWAYS

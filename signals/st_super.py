@@ -1,6 +1,10 @@
 """
 超级信号（st_super）：5m ST 定方向 + 1m ST 翻回同向入场，止损 = 1m ST 值。
 
+节奏（与四宫格 M1 细线一致）：
+  - 1m ST **每根 M1 收盘在内部计算**（状态机连续）
+  - **对外展示 / 超级信号检测** 仅在 M5 桶收盘时刷新（每 5 分钟）
+
 参数（与四宫格前端一致，可通过环境变量覆盖）：
   ST_SUPER_PERIOD=10  ST_SUPER_MULT_1M=3.0  ST_SUPER_MULT_5M=3.5
 """
@@ -55,7 +59,7 @@ class STState:
         self._atr.update_raw(h, lo, c)
         if not self._atr.initialized:
             self._prev_close = c
-            return 0.0, 1
+            return 0.0, 0
         atr = self._atr.value
         hl2 = (h + lo) / 2
         basic_upper = hl2 + self.mult * atr
@@ -91,6 +95,11 @@ class StSuperSymbolState:
         return cls(st1=STState(ST_PERIOD, ST_MULT_1M), st5=STState(ST_PERIOD, ST_MULT_5M))
 
 
+def bucket5m(bar_time: int) -> int:
+    """ET fake-UTC 时间戳 → M5 桶起始秒。"""
+    return int(bar_time) - (int(bar_time) % 300)
+
+
 def _bar_et_minutes(bar_time: int) -> int:
     return (bar_time % 86400) // 60
 
@@ -98,6 +107,66 @@ def _bar_et_minutes(bar_time: int) -> int:
 def _tradable_minutes(bar_time: int) -> bool:
     em = _bar_et_minutes(bar_time)
     return RTH_ENTRY_START <= em < RTH_ENTRY_END
+
+
+def _m1_st_from_bar(
+    m1_bar: dict[str, Any],
+    state: StSuperSymbolState,
+) -> tuple[float, int]:
+    """优先用 strategy 已写入 bar 的 ST（与图表一致）；无字段时再本地重算。"""
+    raw_dir = m1_bar.get("st_dir")
+    raw_val = m1_bar.get("st_value")
+    if raw_dir is not None and raw_val is not None:
+        try:
+            st_dir = int(raw_dir)
+            st_val = float(raw_val)
+            if st_val > 0 and st_dir in (1, -1):
+                return st_val, st_dir
+        except (TypeError, ValueError):
+            pass
+    try:
+        o, h, lo, c = (
+            float(m1_bar["open"]), float(m1_bar["high"]),
+            float(m1_bar["low"]), float(m1_bar["close"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return 0.0, 0
+    st_val, st_dir = state.st1.update(o, h, lo, c)
+    return st_val, st_dir
+
+
+def _m5_dir_from_bar(m5_bar: dict[str, Any], state: StSuperSymbolState) -> int:
+    raw_dir = m5_bar.get("st_dir")
+    if raw_dir is not None:
+        try:
+            d = int(raw_dir)
+            if d in (1, -1):
+                return d
+        except (TypeError, ValueError):
+            pass
+    try:
+        o, h, lo, c = (
+            float(m5_bar["open"]), float(m5_bar["high"]),
+            float(m5_bar["low"]), float(m5_bar["close"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return state.st5_dir
+    _, d = state.st5.update(o, h, lo, c)
+    return d if state.st5.initialized else 0
+
+
+def _m1_bucket_end_bars(m1_bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """每桶取最后一根 M1（1m ST 对外仅在此刻刷新）。"""
+    m1 = sorted(m1_bars, key=lambda b: int(b.get("time") or 0))
+    if not m1:
+        return []
+    ends: dict[int, dict[str, Any]] = {}
+    for i, b in enumerate(m1):
+        bt = bucket5m(int(b["time"]))
+        nxt = m1[i + 1] if i + 1 < len(m1) else None
+        if nxt is None or bucket5m(int(nxt["time"])) != bt:
+            ends[bt] = b
+    return [ends[k] for k in sorted(ends)]
 
 
 def warmup_st_super_state(
@@ -116,15 +185,9 @@ def warmup_st_super_state(
         m1 = [b for b in m1 if rth_lo <= int(b["time"]) % 86400 < rth_hi]
     for b in m5:
         update_st5_from_m5_bar(b, state)
-    for b in m1:
-        try:
-            o, h, lo, c = (
-                float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]),
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-        _, st_dir = state.st1.update(o, h, lo, c)
-        if state.st1.initialized and st_dir:
+    for b in _m1_bucket_end_bars(m1):
+        st_val, st_dir = _m1_st_from_bar(b, state)
+        if st_val > 0 and st_dir in (1, -1):
             state.prev1_dir = st_dir
 
 
@@ -133,15 +196,20 @@ def replay_st_super_touches(
     m5_bars: list[dict[str, Any]],
     m1_bars: list[dict[str, Any]],
 ) -> tuple[StSuperSymbolState, list[TouchEvent]]:
-    """回放当日 RTH M1，返回 (最终状态, 超级信号列表)。"""
+    """回放当日 RTH；超级信号仅在 M5 桶收盘节奏检测。"""
     state = StSuperSymbolState.create()
     warmup_st_super_state(state, m5_bars, [], rth_only=True)
     rth_lo, rth_hi = 9 * 3600 + 30 * 60, 16 * 3600
     m1 = sorted(m1_bars, key=lambda b: int(b.get("time") or 0))
     m1 = [b for b in m1 if rth_lo <= int(b["time"]) % 86400 < rth_hi]
     events: list[TouchEvent] = []
-    for b in m1:
-        ev = detect_st_super_flip(symbol, b, state)
+    for b in _m1_bucket_end_bars(m1):
+        snap = dict(b)
+        st_val, st_dir = _m1_st_from_bar(b, state)
+        if st_val > 0 and st_dir in (1, -1):
+            snap["st_value"] = st_val
+            snap["st_dir"] = st_dir
+        ev = detect_st_super_flip(symbol, snap, state)
         if ev:
             events.append(ev)
     return state, events
@@ -152,19 +220,22 @@ def detect_st_super_flip(
     m1_bar: dict[str, Any],
     state: StSuperSymbolState,
 ) -> Optional[TouchEvent]:
-    """M1 收盘：若 1m ST 翻转且与当前 5m ST 同向 → 超级信号 TouchEvent。"""
+    """M5 桶收盘节奏：若 1m ST 相对上一档已翻转且与 5m ST 同向 → 超级信号。
+
+    调用方应在 M5 收盘时传入该桶最后一根 M1 的 OHLC + 已冻结的 st_dir/st_value。
+    """
     try:
-        o, h, lo, c = float(m1_bar["open"]), float(m1_bar["high"]), float(m1_bar["low"]), float(m1_bar["close"])
         bar_time = int(m1_bar.get("time") or 0)
+        c = float(m1_bar["close"])
+        h = float(m1_bar["high"])
+        lo = float(m1_bar["low"])
     except (KeyError, TypeError, ValueError):
         return None
     if not bar_time:
         return None
 
-    st_val, st_dir = state.st1.update(o, h, lo, c)
-    if not state.st1.initialized or st_val <= 0 or st_dir == 0:
-        if st_dir != 0:
-            state.prev1_dir = st_dir
+    st_val, st_dir = _m1_st_from_bar(m1_bar, state)
+    if st_val <= 0 or st_dir not in (1, -1):
         return None
 
     prev = state.prev1_dir
@@ -201,12 +272,8 @@ def detect_st_super_flip(
 
 
 def update_st5_from_m5_bar(m5_bar: dict[str, Any], state: StSuperSymbolState) -> None:
-    try:
-        o, h, lo, c = float(m5_bar["open"]), float(m5_bar["high"]), float(m5_bar["low"]), float(m5_bar["close"])
-    except (KeyError, TypeError, ValueError):
-        return
-    _, d = state.st5.update(o, h, lo, c)
-    if state.st5.initialized:
+    d = _m5_dir_from_bar(m5_bar, state)
+    if d in (1, -1):
         state.st5_dir = d
 
 

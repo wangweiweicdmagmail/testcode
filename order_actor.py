@@ -45,7 +45,12 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 from decimal import Decimal
-from events import STTrailSettingsEvent, EMATrailSettingsEvent, TERMINAL_STATUS
+from events import (
+    AgentExecuteNowEvent,
+    STTrailSettingsEvent,
+    EMATrailSettingsEvent,
+    TERMINAL_STATUS,
+)
 from portfolio.sessions import et_session_date, et_minute_now
 from portfolio.trading_env import live_orders_allowed
 from portfolio.ib_orders import build_marketable_order
@@ -1481,6 +1486,23 @@ class OrderGatewayActor(Strategy):
         except Exception as e:
             self.log.error(f"[Gateway] 消息发布失败: {e}")
 
+    async def _async_bridge_execute_now(self, data: dict) -> None:
+        """审批通过后立即触发 Agent 执行。"""
+        try:
+            symbol = str(data.get("symbol") or "").upper()
+            if not symbol:
+                self.log.warning("[Gateway] execute-proposal 缺少 symbol")
+                return
+            proposal_id = str(data.get("proposal_id") or "")
+            event = AgentExecuteNowEvent(symbol=symbol, proposal_id=proposal_id)
+            self.msgbus.publish(topic=AgentExecuteNowEvent.TOPIC, msg=event)
+            self.log.info(
+                f"[Gateway] Agent 立即执行已发布: {symbol}"
+                + (f" proposal={proposal_id}" if proposal_id else "")
+            )
+        except Exception as e:
+            self.log.error(f"[Gateway] Agent 立即执行发布失败: {e}")
+
     async def _async_bridge_settings(self, data: dict) -> None:
         """转发设置变更到 MessageBus（支持 st_trail 和 ema_trail）"""
         try:
@@ -1834,6 +1856,22 @@ class OrderGatewayActor(Strategy):
                         self._send(200, {"status": "ok"})
                     except Exception as e:
                         self._send(400, {"error": str(e)})
+                    return
+
+                if self.path == "/execute-proposal":
+                    try:
+                        n = int(self.headers.get("Content-Length", 0))
+                        data = json.loads(self.rfile.read(n)) if n > 0 else {}
+                        symbol = str(data.get("symbol") or "").upper()
+                        if not symbol:
+                            self._send(400, {"error": "缺少 symbol"})
+                            return
+                        asyncio.run_coroutine_threadsafe(
+                            actor._async_bridge_execute_now(data), loop
+                        ).result(timeout=3.0)
+                        self._send(200, {"status": "ok", "symbol": symbol})
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
                     return
 
                 if self.path == "/close-all":

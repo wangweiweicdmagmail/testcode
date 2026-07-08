@@ -103,6 +103,16 @@
 
   function renderSteps(symbol) {
     const { phase, proposal } = phaseForSymbol(symbol);
+    if (phase === 'none' && global.getGridSignalContext) {
+      const ctx = global.getGridSignalContext(symbol);
+      const labels = ['①信号', '②建议', '③审批', '④执行'];
+      return labels.map((label, i) => {
+        let cls = 'astep';
+        if (ctx?.superSide && i === 0) cls += ' done';
+        else if (!ctx?.superSide && i === 0) cls += ' active';
+        return `<span class="${cls}">${label}</span>`;
+      }).join('');
+    }
     const steps = Copy()
       ? Copy().workflowSteps(proposal, phase)
       : [
@@ -139,10 +149,18 @@
     if (!stepsEl) return;
 
     const { phase, proposal } = phaseForSymbol(symbol);
+    const idle = phase === 'none';
+    stepsEl.className = idle ? 'alpha-steps compact' : 'alpha-steps';
     stepsEl.innerHTML = renderSteps(symbol);
 
     if (detailEl) {
-      detailEl.textContent = formatProposalDetail(proposal);
+      if (idle && global.getGridSignalContext) {
+        const ctx = global.getGridSignalContext(symbol);
+        detailEl.innerHTML = Copy()?.formatIdleDetail(ctx)
+          || (ctx?.superSide ? `${ctx.sideLabel}` : '暂无超级信号 · 无待审批建议');
+      } else {
+        detailEl.textContent = formatProposalDetail(proposal);
+      }
     }
 
     const canApprove = engineOnline();
@@ -176,7 +194,8 @@
       }
     }
 
-    const cell = document.getElementById(`cell-${symbol}`);
+    const cell = (global.findAlphaCell && global.findAlphaCell(symbol))
+      || document.getElementById(`cell-${symbol}`);
     if (cell) {
       cell.classList.remove('cell-alpha-pending', 'cell-alpha-wait', 'cell-alpha-ready', 'cell-alpha-executing');
       if (phase === 'pending') cell.classList.add('cell-alpha-pending');

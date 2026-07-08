@@ -14,6 +14,7 @@ import redis as _redis
 from execution.models import Unit, UnitState
 from nautilus_trader.model.enums import OrderSide
 from portfolio.config import PortfolioRiskConfig
+from portfolio.order_policy import stop_on_wrong_side
 from portfolio.sessions import et_session_date
 from signals.base import IntentAction, TradeIntent
 

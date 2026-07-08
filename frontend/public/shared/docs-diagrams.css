@@ -1,0 +1,63 @@
+/* 文档页架构图解 */
+.diagram-wrap {
+  margin: 14px 0 18px;
+  background: #131722;
+  border: 1px solid #2a2e39;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.diagram-wrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 520px;
+}
+
+.diagram-caption {
+  padding: 8px 12px 10px;
+  font-size: 11px;
+  color: #787b86;
+  border-top: 1px solid #252932;
+  line-height: 1.45;
+}
+
+.diagram-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+@media (min-width: 720px) {
+  .diagram-grid.two-col {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.diagram-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 8px 0 4px;
+  font-size: 11px;
+  color: #787b86;
+}
+
+.diagram-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.diagram-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.leg-engine { background: #26a69a; }
+.leg-redis { background: #f0b90b; }
+.leg-frontend { background: #2962ff; }
+.leg-ibkr { background: #b388ff; }
+.leg-warn { background: #ef5350; }

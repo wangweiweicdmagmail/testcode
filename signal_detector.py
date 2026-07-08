@@ -1,9 +1,9 @@
 """
 SignalDetector — 独立 Actor（Strategy 壳）
 
-订阅 MessageBus：
-  - bar.collected           (M1) → 超级信号 st_super（M1 ST 翻转 + M5 ST 同向）
-  - bar.collected.m5        (M5) → 更新 M5 ST 状态
+订阅 MessageBus（均在 strategy 指标写入 bar 并发布事件之后）：
+  - bar.collected.m5        (M5) → 更新 5m 方向 + M5 节奏检测 st_super
+  - bar.collected           (M1) → 其它模块（AutoRunner / reclaim 等）
   - bars.history.flushed    → 历史 K 线 flush 后回放当天 st_super
 
 写入 Redis：
@@ -151,19 +151,39 @@ class SignalDetector(Strategy):
         if sym not in self._st_super:
             self._st_super[sym] = StSuperSymbolState.create()
         update_st5_from_m5_bar(bar, self._st_super[sym])
+        m1_dir = bar.get("m1_st_dir")
+        m1_val = bar.get("m1_st_value")
+        if m1_dir is None or m1_val is None:
+            self.log.debug(
+                f"[SignalDetector] {sym} M5 缺 m1_st 快照，跳过超级信号检测 "
+                f"time={bar.get('time')}"
+            )
+            return
+        m1_ctx = {
+            "time": bar.get("m1_bar_time") or bar.get("time"),
+            "open": bar.get("m1_open", bar.get("open")),
+            "high": bar.get("m1_high", bar.get("high")),
+            "low": bar.get("m1_low", bar.get("low")),
+            "close": bar.get("m1_close", bar.get("close")),
+            "st_dir": m1_dir,
+            "st_value": m1_val,
+        }
+        super_ev = detect_st_super_flip(sym, m1_ctx, self._st_super[sym])
+        if super_ev:
+            self._emit_touch(super_ev, publish_live=True)
+        else:
+            self.log.debug(
+                f"[SignalDetector] {sym} M5 节奏检测无超级信号 "
+                f"st5={self._st_super[sym].st5_dir} m1_st={m1_dir} time={bar.get('time')}"
+            )
         self.log.debug(
             f"[SignalDetector] {sym} M5 ST5 dir={self._st_super[sym].st5_dir} "
-            f"time={bar.get('time')}"
+            f"m1_st_dir={m1_dir} time={bar.get('time')}"
         )
 
     def _on_m1_bar(self, event: BarCollectedEvent) -> None:
-        sym = event.symbol
-        m1 = event.bar
-        if sym not in self._st_super:
-            self._st_super[sym] = StSuperSymbolState.create()
-        super_ev = detect_st_super_flip(sym, m1, self._st_super[sym])
-        if super_ev:
-            self._emit_touch(super_ev, publish_live=True)
+        """st_super 已迁至 M5 收盘节奏（_on_m5_bar）。"""
+        return
 
     def _append_marker(self, touch: TouchEvent, payload: dict) -> None:
         if not self._redis:
@@ -175,12 +195,14 @@ class SignalDetector(Strategy):
         key = dedup_key(touch)
         seen = self._dedup[touch.symbol]
         if key in seen:
+            self.log.debug(f"[SignalDetector] {touch.symbol} 重复 touch 跳过 {key}")
             return
         seen.add(key)
 
         payload = touch.to_dict()
         payload["emitted_at"] = int(time.time())
         if not self._redis:
+            self.log.warning(f"[SignalDetector] {touch.symbol} Redis 不可用，touch 未写入")
             return
         try:
             pipe = self._redis.pipeline()
@@ -198,7 +220,7 @@ class SignalDetector(Strategy):
             except Exception as e:
                 self.log.debug(f"[SignalDetector] signal_store: {e}")
             self.log.info(
-                f"[SignalDetector] {touch.symbol} {touch.signal_type} "
+                f"[SignalDetector] ✓ touch {touch.symbol} {touch.signal_type} "
                 f"{touch.side} @ {touch.touch_time} level={touch.trigger_level:.2f}"
             )
             if publish_live:
@@ -217,7 +239,7 @@ class SignalDetector(Strategy):
             created, out = auto_proposal_from_touch(self._redis, touch)
             if created:
                 self.log.info(
-                    f"[SignalDetector] + pending {sym} {touch.side} "
+                    f"[SignalDetector] ✓ + pending {sym} {touch.side} "
                     f"stop≈{touch.trigger_level:.2f} id={out}"
                 )
             else:

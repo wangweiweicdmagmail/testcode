@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -18,6 +19,8 @@ from approval.proposal_store import get_proposal, list_ids
 from nautilus_mcp.redis_io import DEFAULT_SYMBOLS, list_recent_touches
 from signals.st_super import SIGNAL_ST_SUPER
 from signals.touch_detector import TouchEvent, m5_st_dir
+
+log = logging.getLogger(__name__)
 
 MIN_RR_HALF = float(
     os.environ.get("ALPHA_MIN_RR_HALF", os.environ.get("RECLAIM_MIN_RR_HALF", "1.0"))
@@ -353,6 +356,26 @@ def run_incremental_scan(
             result.skipped.append(
                 SkipRecord(ev.symbol, ev.signal_type, ev.side, ev.touch_time, msg)
             )
+
+    log.info(
+        "[AlphaScan] 完成 symbols=%s candidates=%d created=%d skipped=%d incremental=%s",
+        ",".join(syms),
+        len(candidates),
+        len(result.created),
+        len(result.skipped),
+        incremental,
+    )
+    if result.created:
+        for p in result.created:
+            log.info(
+                "[AlphaScan] ✓ pending %s %s id=%s stop=%s",
+                p.get("symbol"), p.get("side"), p.get("proposal_id"), p.get("stop_price"),
+            )
+    elif result.skipped and not incremental:
+        log.info(
+            "[AlphaScan] 全部跳过，首条原因: %s",
+            result.skipped[0].reason if result.skipped else "—",
+        )
 
     return result
 

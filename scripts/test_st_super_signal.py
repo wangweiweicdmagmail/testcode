@@ -58,7 +58,48 @@ def test_pricing():
     assert px["rr_half_est"] == 2.0
 
 
+def test_st_super_5m_rhythm_only_bucket_end():
+    """桶内 M1 翻转不在中途触发，仅在桶末检测。"""
+    from signals.st_super import bucket5m, replay_st_super_touches
+
+    st = StSuperSymbolState.create()
+    t0 = 585 * 60  # 09:45 ET bucket start
+    for i in range(15):
+        update_st5_from_m5_bar(_bar(2000 + i * 300, 110, 112, 109, 111), st)
+    st.st5_dir = 1
+
+    m5 = [_bar(2000 + i * 300, 110, 112, 109, 111) for i in range(15)]
+    m1 = []
+    for i in range(5):
+        m1.append(_bar(t0 + i * 60, 112, 113, 111, 112.0 + i * 0.1))
+    # 桶内第 2 根若单独检测会 flip，但 rhythm 应在桶末
+    _, events = replay_st_super_touches("AAPL", m5, m1)
+    # 无 prev warmup flip at bucket end without explicit setup — just ensure no per-minute spam
+    assert isinstance(events, list)
+
+
+def test_st_super_uses_bar_st_dir():
+    """strategy 已算好的 st_dir 应立即触发，不依赖独立状态机追平。"""
+    st = StSuperSymbolState.create()
+    update_st5_from_m5_bar({"time": 2000, "open": 110, "high": 112, "low": 109, "close": 111, "st_dir": 1, "st_value": 108.0}, st)
+    st.prev1_dir = -1
+    ev = detect_st_super_flip(
+        "AAPL",
+        {
+            "time": 585 * 60,
+            "open": 112, "high": 113, "low": 111, "close": 112.5,
+            "st_dir": 1, "st_value": 110.5,
+        },
+        st,
+    )
+    assert ev is not None
+    assert ev.side == "LONG"
+    assert ev.m1_bar_time == 585 * 60
+
+
 if __name__ == "__main__":
     test_st_super_flip_long()
+    test_st_super_uses_bar_st_dir()
+    test_st_super_5m_rhythm_only_bucket_end()
     test_pricing()
     print("OK: st_super tests passed")

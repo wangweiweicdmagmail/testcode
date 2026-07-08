@@ -4,7 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>系统文档 · Docs</title>
+  <link rel="stylesheet" href="/shared/base.css">
   <link rel="stylesheet" href="/shared/status-bar.css">
+  <link rel="stylesheet" href="/shared/docs-diagrams.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -13,7 +15,7 @@
       min-height: 100vh; line-height: 1.55;
     }
     .page-subtitle { padding: 8px 20px 0; font-size: 12px; color: #787b86; }
-    .wrap { padding: 14px 20px 64px; max-width: 920px; display: flex; flex-direction: column; gap: 16px; }
+    .wrap { padding: 14px 20px 64px; max-width: 1000px; display: flex; flex-direction: column; gap: 16px; }
 
     .panel {
       background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; overflow: hidden;
@@ -77,6 +79,7 @@
       <div class="panel-hd">目录</div>
       <div class="panel-bd">
         <nav class="toc">
+          <a href="#diagrams">图解</a>
           <a href="#arch">架构</a>
           <a href="#data">数据链路</a>
           <a href="#alpha">Alpha 流程</a>
@@ -89,10 +92,219 @@
       </div>
     </div>
 
+    <div class="panel" id="diagrams">
+      <div class="panel-hd">架构图解</div>
+      <div class="panel-bd">
+        <p>下图与文字说明一致，便于快速建立整体心智模型。各层可独立重启，<strong>Redis 是唯一共享状态</strong>。</p>
+        <div class="diagram-legend">
+          <span><i class="leg-frontend"></i>前端 Node + 浏览器</span>
+          <span><i class="leg-redis"></i>Redis 总线</span>
+          <span><i class="leg-engine"></i>Python 引擎</span>
+          <span><i class="leg-ibkr"></i>IBKR / TWS</span>
+          <span><i class="leg-warn"></i>禁止 / 护栏</span>
+        </div>
+
+        <h3>三层解耦总览</h3>
+        <div class="diagram-wrap">
+          <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="三层架构：浏览器、Node、Redis、Python、IBKR">
+            <defs>
+              <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 Z" fill="#787b86"/>
+              </marker>
+              <linearGradient id="gFe" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#1e3a5f"/><stop offset="100%" stop-color="#1a2332"/>
+              </linearGradient>
+              <linearGradient id="gRe" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#3e2723"/><stop offset="100%" stop-color="#2a2220"/>
+              </linearGradient>
+              <linearGradient id="gEn" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#1b3a2f"/><stop offset="100%" stop-color="#1a2824"/>
+              </linearGradient>
+            </defs>
+            <!-- Browser -->
+            <rect x="280" y="16" width="320" height="56" rx="8" fill="url(#gFe)" stroke="#2962ff" stroke-width="1.5"/>
+            <text x="440" y="40" text-anchor="middle" fill="#90caf9" font-size="14" font-weight="600">浏览器 Dashboard</text>
+            <text x="440" y="58" text-anchor="middle" fill="#787b86" font-size="11">单图 / 四宫格 / 审批 / 审计</text>
+            <!-- Node -->
+            <rect x="280" y="88" width="320" height="48" rx="6" fill="#252932" stroke="#434651"/>
+            <text x="440" y="112" text-anchor="middle" fill="#d1d4dc" font-size="13" font-weight="600">frontend/server.js :3000</text>
+            <text x="440" y="128" text-anchor="middle" fill="#787b86" font-size="10">WebSocket + REST 代理</text>
+            <!-- Redis -->
+            <rect x="240" y="156" width="400" height="52" rx="8" fill="url(#gRe)" stroke="#f0b90b" stroke-width="1.5"/>
+            <text x="440" y="180" text-anchor="middle" fill="#ffcc80" font-size="14" font-weight="600">Redis 共享总线</text>
+            <text x="440" y="198" text-anchor="middle" fill="#787b86" font-size="10">bars:* · proposal:* · position:* · order:update · config:auto</text>
+            <!-- Engine -->
+            <rect x="200" y="224" width="480" height="56" rx="8" fill="url(#gEn)" stroke="#26a69a" stroke-width="1.5"/>
+            <text x="440" y="248" text-anchor="middle" fill="#80cbc4" font-size="14" font-weight="600">python main.py + order_actor :8888</text>
+            <text x="440" y="266" text-anchor="middle" fill="#787b86" font-size="10">strategy · SignalDetector · AutoRunner · AutoPM · ExitManager</text>
+            <!-- IBKR -->
+            <rect x="300" y="296" width="280" height="36" rx="6" fill="#252932" stroke="#b388ff"/>
+            <text x="440" y="318" text-anchor="middle" fill="#ce93d8" font-size="12" font-weight="600">TWS / IB Gateway · IBKR API</text>
+            <!-- Arrows -->
+            <line x1="440" y1="72" x2="440" y2="86" stroke="#787b86" stroke-width="1.5" marker-end="url(#arr)"/>
+            <text x="456" y="82" fill="#5b9cf5" font-size="9">WS</text>
+            <line x1="440" y1="136" x2="440" y2="154" stroke="#787b86" stroke-width="1.5" marker-end="url(#arr)"/>
+            <text x="456" y="148" fill="#f0b90b" font-size="9">sub</text>
+            <line x1="440" y1="208" x2="440" y2="222" stroke="#787b86" stroke-width="1.5" marker-end="url(#arr)"/>
+            <line x1="440" y1="280" x2="440" y2="294" stroke="#787b86" stroke-width="1.5" marker-end="url(#arr)"/>
+            <!-- Side notes -->
+            <text x="24" y="112" fill="#787b86" font-size="10">任意一层</text>
+            <text x="24" y="126" fill="#787b86" font-size="10">可独立重启</text>
+            <rect x="16" y="168" width="100" height="28" rx="4" fill="none" stroke="#434651" stroke-dasharray="4 3"/>
+            <text x="66" y="186" text-anchor="middle" fill="#787b86" font-size="9">状态唯一源</text>
+          </svg>
+          <div class="diagram-caption">实时 K 线、提案、仓位、订单事件均经 Redis 广播；引擎离线时前端仍可读历史 bars，但审批执行与 AutoPM 平仓需引擎在线。</div>
+        </div>
+
+        <div class="diagram-grid two-col">
+          <div>
+            <h3>超级信号 → 实盘（st_super）</h3>
+            <div class="diagram-wrap">
+              <svg viewBox="0 0 420 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="超级信号审批执行流程">
+                <defs><marker id="arr2" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#787b86"/></marker></defs>
+                <!-- steps -->
+                <g font-size="11" fill="#d1d4dc">
+                  <rect x="120" y="8" width="180" height="36" rx="6" fill="#252932" stroke="#363a45"/>
+                  <text x="210" y="30" text-anchor="middle" fill="#80cbc4">① M1 ST 翻转 + M5 同向</text>
+                  <line x1="210" y1="44" x2="210" y2="58" stroke="#787b86" marker-end="url(#arr2)"/>
+                  <rect x="100" y="58" width="220" height="36" rx="6" fill="#252932" stroke="#ef5350"/>
+                  <text x="210" y="80" text-anchor="middle" fill="#ef9a9a">② pending 提案 · 人工审批</text>
+                  <line x1="210" y1="94" x2="210" y2="108" stroke="#787b86" marker-end="url(#arr2)"/>
+                  <rect x="90" y="108" width="240" height="36" rx="6" fill="#252932" stroke="#2962ff"/>
+                  <text x="210" y="130" text-anchor="middle" fill="#90caf9">③ approved_live → ready</text>
+                  <line x1="210" y1="144" x2="210" y2="158" stroke="#787b86" marker-end="url(#arr2)"/>
+                  <rect x="80" y="158" width="260" height="36" rx="6" fill="#252932" stroke="#26a69a"/>
+                  <text x="210" y="180" text-anchor="middle" fill="#80cbc4">④ AutoRunner → RiskGate 定量</text>
+                  <line x1="210" y1="194" x2="210" y2="208" stroke="#787b86" marker-end="url(#arr2)"/>
+                  <rect x="70" y="208" width="280" height="36" rx="6" fill="#1b3a2f" stroke="#26a69a"/>
+                  <text x="210" y="230" text-anchor="middle" fill="#fff" font-weight="600">⑤ AutoPM 开仓 + OCA 止损/止盈</text>
+                  <line x1="210" y1="244" x2="210" y2="258" stroke="#787b86" marker-end="url(#arr2)"/>
+                  <rect x="110" y="258" width="200" height="32" rx="6" fill="#252932" stroke="#b388ff"/>
+                  <text x="210" y="278" text-anchor="middle" fill="#ce93d8">⑥ IBKR 成交</text>
+                </g>
+                <!-- ban -->
+                <rect x="8" y="118" width="72" height="48" rx="4" fill="#4a1c1c" stroke="#ef5350" stroke-dasharray="3 2"/>
+                <text x="44" y="138" text-anchor="middle" fill="#ef9a9a" font-size="9">禁止</text>
+                <text x="44" y="152" text-anchor="middle" fill="#ef9a9a" font-size="8">手动/order</text>
+              </svg>
+              <div class="diagram-caption">超级信号审批后下一根 M1 报单；reclaim 类需先 approved_wait 再回踩触发。</div>
+            </div>
+          </div>
+          <div>
+            <h3>平仓路由</h3>
+            <div class="diagram-wrap">
+              <svg viewBox="0 0 420 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="平仓两条路径">
+                <defs><marker id="arr3" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#787b86"/></marker></defs>
+                <rect x="130" y="12" width="160" height="40" rx="6" fill="#252932" stroke="#2962ff"/>
+                <text x="210" y="32" text-anchor="middle" fill="#90caf9" font-size="12" font-weight="600">UI 点平仓</text>
+                <text x="210" y="46" text-anchor="middle" fill="#787b86" font-size="9">DELETE /api/position</text>
+                <line x1="210" y1="52" x2="210" y2="72" stroke="#787b86" marker-end="url(#arr3)"/>
+                <polygon points="210,72 260,100 160,100" fill="#252932" stroke="#787b86"/>
+                <text x="210" y="92" text-anchor="middle" fill="#d1d4dc" font-size="10">AutoPM 接管?</text>
+                <!-- left branch -->
+                <line x1="160" y1="100" x2="80" y2="130" stroke="#26a69a" marker-end="url(#arr3)"/>
+                <text x="108" y="118" fill="#26a69a" font-size="9">是</text>
+                <rect x="16" y="130" width="130" height="70" rx="6" fill="#1b3a2f" stroke="#26a69a"/>
+                <text x="81" y="152" text-anchor="middle" fill="#80cbc4" font-size="10" font-weight="600">AutoPM 路径</text>
+                <text x="81" y="168" text-anchor="middle" fill="#787b86" font-size="8">auto:close:{sym}</text>
+                <text x="81" y="182" text-anchor="middle" fill="#787b86" font-size="8">AutoRunner</text>
+                <text x="81" y="194" text-anchor="middle" fill="#787b86" font-size="8">close_all → IBKR</text>
+                <!-- right branch -->
+                <line x1="260" y1="100" x2="340" y2="130" stroke="#f0b90b" marker-end="url(#arr3)"/>
+                <text x="312" y="118" fill="#f0b90b" font-size="9">否</text>
+                <rect x="274" y="130" width="130" height="70" rx="6" fill="#2a2220" stroke="#f0b90b"/>
+                <text x="339" y="152" text-anchor="middle" fill="#ffcc80" font-size="10" font-weight="600">手动 / trail</text>
+                <text x="339" y="168" text-anchor="middle" fill="#787b86" font-size="8">order_actor</text>
+                <text x="339" y="182" text-anchor="middle" fill="#787b86" font-size="8">POST /close</text>
+                <text x="339" y="194" text-anchor="middle" fill="#787b86" font-size="8">→ IBKR</text>
+                <!-- merge -->
+                <line x1="81" y1="200" x2="81" y2="230" stroke="#787b86"/>
+                <line x1="339" y1="200" x2="339" y2="230" stroke="#787b86"/>
+                <line x1="81" y1="230" x2="339" y2="230" stroke="#787b86"/>
+                <line x1="210" y1="230" x2="210" y2="248" stroke="#787b86" marker-end="url(#arr3)"/>
+                <rect x="120" y="248" width="180" height="40" rx="6" fill="#252932" stroke="#b388ff"/>
+                <text x="210" y="272" text-anchor="middle" fill="#ce93d8" font-size="11">成交确认 → Redis 仓位更新</text>
+              </svg>
+              <div class="diagram-caption">auto_strategy=live 的标的走 AutoPM；手动 trail 仓位仍走 order_actor。</div>
+            </div>
+          </div>
+        </div>
+
+        <h3>实时数据流</h3>
+        <div class="diagram-wrap">
+          <svg viewBox="0 0 880 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="实时数据链路">
+            <defs><marker id="arr4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#787b86"/></marker></defs>
+            <!-- K-line path -->
+            <text x="16" y="28" fill="#80cbc4" font-size="11" font-weight="600">K 线</text>
+            <rect x="60" y="12" width="72" height="32" rx="5" fill="#252932" stroke="#b388ff"/><text x="96" y="32" text-anchor="middle" fill="#ce93d8" font-size="10">IBKR</text>
+            <line x1="132" y1="28" x2="158" y2="28" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="158" y="12" width="88" height="32" rx="5" fill="#252932" stroke="#26a69a"/><text x="202" y="32" text-anchor="middle" fill="#80cbc4" font-size="10">strategy</text>
+            <line x1="246" y1="28" x2="272" y2="28" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="272" y="12" width="64" height="32" rx="5" fill="#252932" stroke="#f0b90b"/><text x="304" y="32" text-anchor="middle" fill="#ffcc80" font-size="10">Redis</text>
+            <line x1="336" y1="28" x2="362" y2="28" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="362" y="12" width="80" height="32" rx="5" fill="#252932" stroke="#2962ff"/><text x="402" y="32" text-anchor="middle" fill="#90caf9" font-size="10">server.js</text>
+            <line x1="442" y1="28" x2="468" y2="28" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="468" y="12" width="80" height="32" rx="5" fill="#252932" stroke="#2962ff"/><text x="508" y="32" text-anchor="middle" fill="#90caf9" font-size="10">浏览器</text>
+            <text x="560" y="32" fill="#787b86" font-size="9">图表 ST 与引擎 st_dir 同源</text>
+            <!-- Order path -->
+            <text x="16" y="88" fill="#ef9a9a" font-size="11" font-weight="600">订单</text>
+            <rect x="60" y="72" width="88" height="32" rx="5" fill="#1b3a2f" stroke="#26a69a"/><text x="104" y="92" text-anchor="middle" fill="#80cbc4" font-size="10">AutoPM</text>
+            <line x1="148" y1="88" x2="272" y2="88" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="272" y="72" width="64" height="32" rx="5" fill="#252932" stroke="#f0b90b"/><text x="304" y="92" text-anchor="middle" fill="#ffcc80" font-size="10">Redis</text>
+            <line x1="336" y1="88" x2="468" y2="88" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="468" y="72" width="100" height="32" rx="5" fill="#252932" stroke="#2962ff"/><text x="518" y="92" text-anchor="middle" fill="#90caf9" font-size="10">Toast / 语音</text>
+            <!-- Audit path -->
+            <text x="16" y="148" fill="#90caf9" font-size="11" font-weight="600">审计</text>
+            <rect x="60" y="132" width="276" height="32" rx="5" fill="#252932" stroke="#f0b90b"/><text x="198" y="152" text-anchor="middle" fill="#ffcc80" font-size="10">Redis 事件（proposal / order / signal）</text>
+            <line x1="336" y1="148" x2="362" y2="148" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="362" y="132" width="120" height="32" rx="5" fill="#252932" stroke="#363a45"/><text x="422" y="152" text-anchor="middle" fill="#d1d4dc" font-size="10">journal.jsonl</text>
+            <line x1="482" y1="148" x2="508" y2="148" stroke="#787b86" marker-end="url(#arr4)"/>
+            <rect x="508" y="132" width="72" height="32" rx="5" fill="#252932" stroke="#2962ff"/><text x="544" y="152" text-anchor="middle" fill="#90caf9" font-size="10">审计页</text>
+            <!-- Time note -->
+            <rect x="60" y="176" width="500" height="18" rx="3" fill="#131722" stroke="#363a45"/>
+            <text x="310" y="189" text-anchor="middle" fill="#787b86" font-size="9">时间轴：ET fake-UTC · 图表盘前 08:30–09:30 + RTH 09:30–16:00</text>
+          </svg>
+          <div class="diagram-caption">指标排行等静态数据走 HTTP 轮询；订单与提案走 WebSocket 推送。</div>
+        </div>
+
+        <h3>四宫格审批交互</h3>
+        <div class="diagram-wrap">
+          <svg viewBox="0 0 880 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="四宫格审批 UI 流程">
+            <defs><marker id="arr5" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#787b86"/></marker></defs>
+            <!-- 2x2 grid mock -->
+            <rect x="40" y="20" width="360" height="180" rx="8" fill="#131722" stroke="#434651"/>
+            <line x1="220" y1="20" x2="220" y2="200" stroke="#2a2e39"/>
+            <line x1="40" y1="110" x2="400" y2="110" stroke="#2a2e39"/>
+            <text x="130" y="70" text-anchor="middle" fill="#787b86" font-size="11">QQQ</text>
+            <text x="310" y="70" text-anchor="middle" fill="#787b86" font-size="11">NVDA</text>
+            <rect x="230" y="120" width="160" height="80" rx="4" fill="none" stroke="#ef5350" stroke-width="2"/>
+            <text x="310" y="155" text-anchor="middle" fill="#ef5350" font-size="12" font-weight="600">AMZN 待审批</text>
+            <text x="310" y="175" text-anchor="middle" fill="#787b86" font-size="9">脉冲红框聚焦</text>
+            <text x="130" y="155" text-anchor="middle" fill="#787b86" font-size="11">AAPL</text>
+            <!-- arrows to actions -->
+            <line x1="410" y1="110" x2="460" y2="110" stroke="#787b86" marker-end="url(#arr5)"/>
+            <rect x="460" y="88" width="120" height="44" rx="6" fill="#4a1c1c" stroke="#ef5350"/>
+            <text x="520" y="108" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">批准实盘</text>
+            <text x="520" y="124" text-anchor="middle" fill="#ef9a9a" font-size="9">Modal 二次确认</text>
+            <line x1="580" y1="110" x2="630" y2="110" stroke="#787b86" marker-end="url(#arr5)"/>
+            <rect x="630" y="92" width="100" height="36" rx="6" fill="#1b3a2f" stroke="#26a69a"/>
+            <text x="680" y="114" text-anchor="middle" fill="#80cbc4" font-size="10">auto_strategy</text>
+            <line x1="730" y1="110" x2="780" y2="110" stroke="#787b86" marker-end="url(#arr5)"/>
+            <rect x="780" y="88" width="80" height="44" rx="6" fill="#252932" stroke="#b388ff"/>
+            <text x="820" y="114" text-anchor="middle" fill="#ce93d8" font-size="10">下一根 M1</text>
+            <!-- status bar -->
+            <rect x="40" y="208" width="820" height="4" rx="2" fill="#2962ff" opacity="0.5"/>
+            <text x="450" y="218" text-anchor="middle" fill="#787b86" font-size="8">顶栏：待审批队列 · 引擎状态 · 日 PnL · 全平</text>
+          </svg>
+          <div class="diagram-caption">顶栏「待审批」可定位到对应宫格；引擎离线时批准按钮禁用。</div>
+        </div>
+      </div>
+    </div>
+
     <div class="panel" id="arch">
       <div class="panel-hd">系统架构</div>
       <div class="panel-bd">
-        <p>三层解耦：<strong>引擎（Python）</strong>、<strong>Redis 总线</strong>、<strong>前端（Node + 浏览器）</strong>。任意一层可独立重启，共享状态仅在 Redis。</p>
+        <p>三层解耦：<strong>引擎（Python）</strong>、<strong>Redis 总线</strong>、<strong>前端（Node + 浏览器）</strong>。示意图见 <a href="#diagrams">架构图解</a>。</p>
 
         <h3>引擎内模块（<code>python main.py</code>）</h3>
         <table>
@@ -135,7 +347,7 @@
           <tr><th>账户</th><td>IBKR reqAccountSummary → Redis <code>account:funds</code>（FA Group 子账户约 3 分钟刷新）</td></tr>
           <tr><th>审计</th><td>Redis 事件 → <code>.run/journal.jsonl</code> → <a href="/audit.html">审计页</a></td></tr>
         </table>
-        <p>图表时间轴使用 <strong>ET fake-UTC</strong>（与 Redis bar 的 <code>time</code> 字段一致）。RTH 展示 09:30–16:00 ET。</p>
+        <p>图表时间轴使用 <strong>ET fake-UTC</strong>。展示时段：<strong>盘前 08:30–09:30</strong> + <strong>RTH 09:30–16:00</strong> ET。详见上方<a href="#diagrams">架构图解</a>。</p>
       </div>
     </div>
 

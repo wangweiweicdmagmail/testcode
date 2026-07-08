@@ -1,0 +1,81 @@
+/* 全站基础：页面壳、粘性顶栏、工具条 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #131722;
+  color: #d1d4dc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.page-subtitle {
+  padding: 8px 20px 0;
+  font-size: 12px;
+  color: #787b86;
+  line-height: 1.5;
+}
+
+.page-subtitle b { color: #d1d4dc; }
+.page-subtitle a { color: #2962ff; text-decoration: none; }
+.page-subtitle a:hover { text-decoration: underline; }
+
+.page-header-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: #131722;
+}
+
+.page-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid #2a2e39;
+  flex-wrap: wrap;
+}
+
+.page-toolbar .tabs button {
+  background: #131722;
+  border: 1px solid #2a2e39;
+  color: #787b86;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: border-color .15s, color .15s;
+}
+
+.page-toolbar .tabs button:hover { color: #d1d4dc; border-color: #434651; }
+.page-toolbar .tabs button.active { color: #fff; border-color: #2962ff; }
+
+.page-toolbar select,
+.page-toolbar input {
+  background: #131722;
+  border: 1px solid #2a2e39;
+  color: #d1d4dc;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.panel {
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.panel-hd {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #787b86;
+  border-bottom: 1px solid #2a2e39;
+}
+
+.empty-state {
+  text-align: center;
+  color: #787b86;
+  padding: 48px 20px;
+  font-size: 13px;
+}

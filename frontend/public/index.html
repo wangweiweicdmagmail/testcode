@@ -5,6 +5,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Trading Dashboard</title>
+  <link rel="stylesheet" href="/shared/status-bar.css">
+  <link rel="stylesheet" href="/shared/toast.css">
   <link rel="stylesheet" href="/shared/approval-ui.css">
   <script
     src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
@@ -1256,21 +1258,31 @@
     .lop-dir-btn.buy.active  { background: rgba(38,166,154,.18); color: #26a69a; border-color: #26a69a; }
     .lop-dir-btn.sell.active { background: rgba(239,83,80,.18);  color: #ef5350; border-color: #ef5350; }
     .lop-dir-btn:hover:not(.active) { background: #363a46; color: #d1d4dc; }
+
+    /* 顶栏接管后隐藏工具栏重复控件 */
+    body.has-slim-bar #engine-heartbeat,
+    body.has-slim-bar #risk-badge,
+    body.has-slim-bar #voice-toggle,
+    body.has-slim-bar #tb-left .tb-mini-nav { display: none !important; }
   </style>
 </head>
 
-<body>
+<body class="has-slim-bar">
+
+  <div id="status-bar-root"></div>
 
   <div id="toolbar">
     <!-- 左列：symbol + price + OHLC 悬浮 -->
     <div id="tb-left">
       <div id="tb-left-row1">
+        <span class="tb-mini-nav">
         <a href="/multi.html" style="font-size:11px;color:#787b86;text-decoration:none;
                   padding:2px 8px;border:1px solid #2a2e39;border-radius:4px;
                   margin-right:4px;white-space:nowrap;" title="四图总览">⊞ 四图</a>
         <a href="/indicators.html" style="font-size:11px;color:#787b86;text-decoration:none;
                   padding:2px 8px;border:1px solid #2a2e39;border-radius:4px;
                   margin-right:6px;white-space:nowrap;" title="ST积分排行">📊 积分</a>
+        </span>
         <span id="symbol-label">QQQ</span>
         <span id="price-label" class="up">—</span>
         <span id="price-change" class="up-bg up">—</span>
@@ -1447,10 +1459,7 @@
       </div>
       <div id="loading">⏳ 加载数据中…</div>
       <div id="chart"></div>
-      <!-- Toast 语音提醒非弹语（右上角） -->
-      <div id="toast-container" style="
-      position:fixed;top:56px;right:420px;z-index:9999;
-      display:flex;flex-direction:column;gap:6px;pointer-events:none;"></div>
+      <!-- Toast 由 shared/toast.js 注入 #toast-container -->
       <div id="legend">
         <div class="legend-item">
           <div class="legend-dot" style="background:#26a69a"></div>
@@ -1778,13 +1787,15 @@
   <script src="/shared/api-auth.js"></script>
   <script src="/shared/alpha-copy.js"></script>
   <script src="/shared/approval-modal.js"></script>
+  <script src="/shared/toast.js"></script>
+  <script src="/shared/status-bar.js"></script>
   <script>
     // ─── 配置：从 URL ?symbol=XXX 读取标的，默认 QQQ ────────────────────
     const urlParams = new URLSearchParams(window.location.search);
     let SYMBOL = (urlParams.get('symbol') || 'QQQ').toUpperCase();
 
     // ─── 全局状态：缓存数据和开仓模式 ──────────────────────────────────
-    let currentBars = [];   // 最近加载的 M1 图表 bars（盘前30分 + RTH）
+    let currentBars = [];   // 最近加载的 M1 图表 bars（盘前60分 + RTH）
     let atrBars = [];        // M1 bars 含盘前预热数据（用于 ATR14 计算）
     let latestST = null; // 最新 ST 值
     let latestSTDir = null; // 1=多头 -1=空头
@@ -1954,25 +1965,10 @@
       }
     }
 
-    // ─── 语音提醒模块 ─────────────────────────────────────
-    // 语音默认开启（用户可手动关闭）
-    let voiceEnabled = true;
-    const voiceBtn = document.getElementById('voice-toggle');
-    // 初始花样：默认就是开启状态
-    voiceBtn.textContent = '🔔 语音 ON';
-    voiceBtn.style.color = '#26a69a';
-    voiceBtn.style.borderColor = '#26a69a';
-    voiceBtn.addEventListener('click', () => {
-      voiceEnabled = !voiceEnabled;
-      voiceBtn.style.color = voiceEnabled ? '#26a69a' : '#787b86';
-      voiceBtn.style.borderColor = voiceEnabled ? '#26a69a' : '#2a2e39';
-      voiceBtn.textContent = voiceEnabled ? '🔔 语音 ON' : '🔔 语音';
-    });
-
-    // 防重叠播放：相同文本 5s 内不重复
+    // ─── 语音提醒（由顶栏铃铛控制）────────────────────────
     const _spokenCache = new Map();
     function speak(text, priority = false) {
-      if (!voiceEnabled) return;
+      if (window.StatusBar && !StatusBar.isVoiceEnabled()) return;
       const now = Date.now();
       if (!priority && _spokenCache.has(text) && now - _spokenCache.get(text) < 5000) return;
       _spokenCache.set(text, now);
@@ -1981,23 +1977,6 @@
       u.lang = 'zh-CN';
       u.rate = 1.1;
       speechSynthesis.speak(u);
-    }
-
-    // Toast 提醒弹出（订单事件可视化）
-    function showToast(text, type = 'info') {
-      const colors = { info: '#2196f3', ok: '#26a69a', warn: '#ef5350', tip: '#f59e0b' };
-      const container = document.getElementById('toast-container');
-      if (!container) return;
-      const el = document.createElement('div');
-      el.textContent = text;
-      el.style.cssText = (
-        `background:${colors[type] || colors.info};color:#fff;padding:6px 14px;` +
-        `border-radius:6px;font-size:12px;font-weight:600;opacity:0;` +
-        `transition:opacity .3s;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;`
-      );
-      container.appendChild(el);
-      requestAnimationFrame(() => { el.style.opacity = '1'; });
-      setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 4000);
     }
 
     // ─── 图表初始化 ─────────────────────────────────────────
@@ -2053,6 +2032,7 @@
     let dema20M5Series = null;
     let vwapM1Series = null;
     let m5Frozen = null;         // 当前冻结的 M5 水平线
+    let m1Frozen = null;         // 当前冻结的 M1 ST（每 M5 桶收盘刷新）
     let currentM5Bars = [];
 
     // 自适应图表大小
@@ -3228,26 +3208,6 @@
             if (payload.vwap != null && vwapM1Series) {
               vwapM1Series.update({ time: payload.time, value: payload.vwap });
             }
-            if (payload.st_value != null && payload.st_value !== 0) {
-              const prevSTDir = latestSTDir;
-              latestST = payload.st_value;
-              latestSTDir = payload.st_dir;
-              // ── ST 转向语音提醒 ──
-              if (prevSTDir !== null && payload.st_dir !== prevSTDir) {
-                speak(`${SYMBOL} 超级趋势转${payload.st_dir === 1 ? '向上' : '向下'}，注意转向`, true);
-              }
-              if (payload.st_dir !== stLastDir || stLastSeries === null) {
-                const color = payload.st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
-                stLastSeries = chart.addLineSeries({
-                  color, lineWidth: ST_LINE_M1,
-                  crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
-                });
-                stSeriesList.push(stLastSeries);
-                stLastDir = payload.st_dir;
-                refreshSegmentLabels(stSeriesList, IND_LABELS.ST_M1);
-              }
-              stLastSeries.update({ time: payload.time, value: payload.st_value });
-            }
             updateM5IndicatorsAt(payload.time);
             // 行情变动时同步刷新仓位浮盈
             if (currentPosition && payload.symbol === SYMBOL) {
@@ -3261,7 +3221,7 @@
             loadIndicators();
           }
 
-          // ── M5 K 线收盘 — 更新冻结 ST / DEMA20（策略水平线）──
+          // ── M5 K 线收盘 — 更新冻结 ST / DEMA20（策略水平线）+ M1 ST（M5 节奏）──
           if (channel.startsWith("kline:5m:")) {
             if (payload.st_value != null || payload.dema20 != null) {
               m5Frozen = {
@@ -3270,6 +3230,27 @@
                 dema20: payload.dema20 ?? m5Frozen?.dema20,
               };
               updateM5IndicatorsAt(payload.time);
+            }
+            if (payload.m1_st_value != null && payload.m1_st_dir != null && payload.m1_st_value > 0) {
+              const prevSTDir = latestSTDir;
+              const m1t = payload.m1_bar_time ?? payload.time;
+              m1Frozen = { st_value: payload.m1_st_value, st_dir: payload.m1_st_dir };
+              latestST = payload.m1_st_value;
+              latestSTDir = payload.m1_st_dir;
+              if (prevSTDir !== null && payload.m1_st_dir !== prevSTDir) {
+                speak(`${SYMBOL} 一分钟超级趋势转${payload.m1_st_dir === 1 ? '向上' : '向下'}`, true);
+              }
+              if (payload.m1_st_dir !== stLastDir || stLastSeries === null) {
+                const color = payload.m1_st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
+                stLastSeries = chart.addLineSeries({
+                  color, lineWidth: ST_LINE_M1,
+                  crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+                });
+                stSeriesList.push(stLastSeries);
+                stLastDir = payload.m1_st_dir;
+                refreshSegmentLabels(stSeriesList, IND_LABELS.ST_M1);
+              }
+              stLastSeries.update({ time: m1t - (m1t % 300), value: payload.m1_st_value });
             }
             return;
           }
@@ -4972,6 +4953,18 @@
         }
       } catch (e) { /* 引擎离线时静默忽略 */ }
     }, 30000);
+
+    StatusBar.mount('status-bar-root', 'index', { slim: true });
+    StatusBar.startPolling(15000, (snap) => {
+      const badge = document.getElementById('proposal-badge');
+      if (badge && snap.pendingCount != null) {
+        badge.style.display = snap.pendingCount > 0 ? 'inline' : 'none';
+        badge.textContent = String(snap.pendingCount);
+      }
+    });
+    document.addEventListener('nautilus:open-proposals', () => {
+      document.getElementById('btn-proposals')?.click();
+    });
   </script>
 </body>
 

@@ -60,7 +60,7 @@
   function postApproveHint(proposal) {
     if (!proposal) return '';
     if (isStSuper(proposal)) {
-      return '批准后将开启 Agent 实盘执行，下一根 M1 市价入场。';
+      return '批准后将开启 Agent 实盘，立即市价入场。';
     }
     return proposal.reclaim_label || '批准后将等待 reclaim 条件，满足后引擎执行。';
   }
@@ -103,6 +103,20 @@
     if (uiPhase === 'wait') return { cls: 'pill-wait', text: '等待回踩' };
     if (uiPhase === 'ready') return { cls: 'pill-ready', text: '待执行' };
     return { cls: 'pill-none', text: '无信号' };
+  }
+
+  function formatIdleDetail(ctx) {
+    if (!ctx || !ctx.superSide) {
+      return '暂无超级信号 · 无待审批建议';
+    }
+    const align = ctx.stAligned
+      ? '<span class="sig-ok">ST 同向</span>'
+      : `<span class="sig-warn">ST 分歧 ${ctx.st5Label}/${ctx.st1Label}</span>`;
+    const touch = ctx.touchTime ? `触线 ${ctx.touchTime}` : '';
+    const parts = [`<b class="${ctx.sideCls}">${ctx.sideLabel}</b>`, align];
+    if (touch) parts.push(touch);
+    parts.push('<span class="sig-muted">无待审批</span>');
+    return parts.join(' · ');
   }
 
   function formatProposalDetail(proposal) {
@@ -186,6 +200,7 @@
     workflowSteps,
     pillForPhase,
     formatProposalDetail,
+    formatIdleDetail,
     ttlText,
     approveModalBody,
     showObserveApprove,

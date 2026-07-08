@@ -86,3 +86,24 @@ def decide_close_order(
         slippage_pct=slippage_pct,
         force_limit=force_limit,
     )
+
+
+def stop_on_wrong_side(side, ref_price: float, stop_px: float) -> bool:
+    """止损是否在入场价的错误侧（会立即触发 STOP_MARKET / 导致裸仓）。
+
+    做多要求 stop < 入场价；做空要求 stop > 入场价。
+    close==stop 视为错误侧（IBKR STOP_MARKET 触发条件含等于，会即时成交）。
+    无效价格（<=0）或未知方向视为不安全。
+    side 接受 nautilus OrderSide 或 'LONG'/'SHORT'/'BUY'/'SELL' 字符串。
+
+    放在此模块（叶子，无 execution 依赖）以避免 portfolio.risk_gate ↔ execution.auto_pm 循环导入；
+    risk_gate 与 auto_pm 均从此 re-export / 导入。
+    """
+    if ref_price <= 0 or stop_px <= 0:
+        return True
+    s = side.name.upper() if hasattr(side, "name") else str(side).upper()
+    if s in ("BUY", "LONG"):
+        return stop_px >= ref_price
+    if s in ("SELL", "SHORT"):
+        return stop_px <= ref_price
+    return True

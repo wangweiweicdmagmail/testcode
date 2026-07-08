@@ -17,7 +17,7 @@ from nautilus_trader.trading.strategy import Strategy
 
 from events import TERMINAL_STATUS
 from execution.models import Unit, UnitState
-from portfolio.order_policy import data_state_from_env, decide_entry_order
+from portfolio.order_policy import data_state_from_env, decide_entry_order, stop_on_wrong_side
 from portfolio.ib_orders import build_marketable_order
 from portfolio.config import ExecutionConfig
 from signals.base import IntentAction, PositionContext, TradeIntent
@@ -177,13 +177,17 @@ class AutoPositionManager:
         self._coid_index[unit.entry_coid] = (sym, "entry")
         self._host.submit_order(entry)
         self._journal_map_coid(unit.entry_coid, pid)
+        coid = unit.entry_coid
         self._publish(sym, "open", "live", {
             "side": intent.side.name, "seq": intent.seq, "qty": qty,
             "entry": round(intent.ref_price, 2),
             "stop": intent.stop_px, "tp": intent.tp_px,
             "proposal_id": pid or None,
         })
-        self._host.log.info(f"[PM] {sym}: 开仓 seq={intent.seq} {intent.side.name} qty={qty}")
+        self._host.log.info(
+            f"[PM] ✓ {sym}: 开仓单已提交 coid={coid} {intent.side.name} qty={qty} "
+            f"proposal={pid or '—'}"
+        )
         self._persist(sym)
 
     def close_all(self, sym: str, reason: str) -> None:
@@ -207,6 +211,7 @@ class AutoPositionManager:
             net = 0.0
 
         if net == 0:
+            self._host.log.info(f"[PM] {sym}: 平仓请求但净仓=0，直接清状态 ({reason})")
             self._finalize_symbol_close(sym)
             return
 
@@ -415,6 +420,22 @@ class AutoPositionManager:
         unit.state = UnitState.ACTIVE
         if instrument is None:
             self._host.log.error(f"[PM] {sym}: 合约未加载，无法挂止损")
+            return
+
+        # 防御兜底：成交价（含滑点/gap）穿过止损 → 不挂 STOP（会即时触发），立即平仓。
+        # 极低概率（主校验已拦提交前场景）；close_all 失败时 reconcile 补兜底 emergency stop。
+        if stop_on_wrong_side(unit.side, unit.entry_px, unit.hard_stop_px):
+            self._host.log.error(
+                f"[PM] {sym}: 成交价 {unit.entry_px} 穿过止损 {unit.hard_stop_px}，"
+                f"不挂 STOP（防即时触发），立即平仓"
+            )
+            self._persist(sym)
+            self.close_all(sym, "stop_wrong_side_guard")
+            if unit.proposal_id and self._on_proposal_exec:
+                self._on_proposal_exec(
+                    unit.proposal_id, "submit_failed",
+                    {"reason": "stop_wrong_side", "symbol": sym},
+                )
             return
 
         opp = OrderSide.SELL if unit.side == OrderSide.BUY else OrderSide.BUY
