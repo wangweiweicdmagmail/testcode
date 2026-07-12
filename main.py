@@ -118,7 +118,12 @@ from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
 from order_actor import OrderGatewayActor, OrderGatewayConfig
-from strategy import BarLoggerStrategy, BarLoggerStrategyConfig
+# 老 BarLoggerStrategy（1606 行胖策略）已停用，拆为 M1/M5 两个周期策略 + 共享 registry
+# （设计原则 #1：每周期一个 Strategy）。strategy.py 调试期保留，验证后删。
+# from strategy import BarLoggerStrategy, BarLoggerStrategyConfig
+from indicators import IndicatorRegistry
+from strategies.m1_indicator import M1IndicatorStrategy, M1IndicatorStrategyConfig
+from strategies.m5_indicator import M5IndicatorStrategy, M5IndicatorStrategyConfig
 from exit_manager import ExitManager, ExitManagerConfig
 from auto_runner import AutoRunner, AutoRunnerConfig
 from signal_detector import SignalDetector, SignalDetectorConfig
@@ -153,6 +158,17 @@ class _FAIBOrderTags(IBOrderTags, frozen=True):
 
 # 替换 execution.py 模块中的 IBOrderTags 引用，使解析时包含 FA 字段
 _ib_exec_mod.IBOrderTags = _FAIBOrderTags
+
+# ============================================================
+# ⚠️  FA Group 查询复用引擎 ibapi 连接（设计原则 #1：业务层不碰 ibapi）
+# patch InteractiveBrokersClient 挂一次性 FA 查询方法 + wrapper 回调路由，
+# 使 order_actor 的 FA 余额查询/校验复用引擎连接（不再建临时 ibapi 连接）。
+# 必须在 node.build() 前 patch（类方法 patch，实例化后也生效）。
+# 详见 portfolio/fa_account.py。
+# ============================================================
+from portfolio.fa_account import _patch_client_for_fa, _patch_wrapper_for_fa
+_patch_client_for_fa()
+_patch_wrapper_for_fa()
 
 # ============================================================
 # ⚙️  命令行参数解析
@@ -196,7 +212,7 @@ ACCOUNT_ID = os.environ.get("IB_ACCOUNT_ID", "F10251881")  # FA 主账号
 
 # FA Group 配置（用于下单路由）
 FA_GROUP  = os.environ.get("IB_FA_GROUP",  "dt_test")
-FA_METHOD = os.environ.get("IB_FA_METHOD", "NetLiq")   # EqualQuantity | AvailableEquity | NetLiq | PctChange
+FA_METHOD = os.environ.get("IB_FA_METHOD", "")   # 留空=用 FA Group 默认 allocation method（实测生效）；带值会被 IBKR 拒 10226/321
 
 # dt_test FA Group 余额查询：直接用 IBKR reqAccountSummary(group='dt_test')
 # IBKR 只会返回属于该 Group 的子账户，无需手动配置账号列表
@@ -295,21 +311,42 @@ config_node = TradingNodeConfig(
 )
 
 # ============================================================
-# 策略 1：K 线日志 Strategy
+# 指标层：共享 IndicatorRegistry + M1/M5 周期策略（取代老 BarLoggerStrategy 胖策略）
 # ============================================================
-bar_strategy = BarLoggerStrategy(
-    config=BarLoggerStrategyConfig(
+registry = IndicatorRegistry()
+
+m1_strategy = M1IndicatorStrategy(
+    config=M1IndicatorStrategyConfig(
         instrument_id=InstrumentId.from_str(BAR_INSTRUMENT_ID),
         instrument_ids=tuple(GATEWAY_INSTRUMENTS),  # P6: 多标的
         bar_step=1,
         st_period=int(os.environ.get("ST_SUPER_PERIOD", "10")),
         st_mult=float(os.environ.get("ST_SUPER_MULT_1M", "3.0")),
-        st_mult_m5=float(os.environ.get("ST_SUPER_MULT_5M", "3.5")),
         ema_period=21,
+        atr_period=14,
         history_days=2,      # 加载今日+昨日，使 prev_day 围栏数据可用
         backtest_mode=IS_BACKTEST,
         backtest_date=BACKTEST_DATE,
-    )
+    ),
+    registry=registry,
+)
+
+m5_strategy = M5IndicatorStrategy(
+    config=M5IndicatorStrategyConfig(
+        instrument_id=InstrumentId.from_str(BAR_INSTRUMENT_ID),
+        instrument_ids=tuple(GATEWAY_INSTRUMENTS),  # P6: 多标的
+        bar_step=5,
+        st_period=int(os.environ.get("ST_SUPER_PERIOD", "10")),
+        st_mult=float(os.environ.get("ST_SUPER_MULT_5M", "3.5")),
+        ema_period=21,
+        ema9_period=9,
+        atr_period=14,
+        dema_period=20,
+        history_days=2,
+        backtest_mode=IS_BACKTEST,
+        backtest_date=BACKTEST_DATE,
+    ),
+    registry=registry,
 )
 
 # ============================================================
@@ -364,6 +401,7 @@ auto_strategy = AutoRunner(
 
 signal_detector = SignalDetector(
     config=SignalDetectorConfig(instrument_ids=tuple(GATEWAY_INSTRUMENTS)),
+    registry=registry,
 )
 reclaim_watcher = ReclaimWatcher(config=ReclaimWatcherConfig())
 
@@ -371,7 +409,8 @@ reclaim_watcher = ReclaimWatcher(config=ReclaimWatcherConfig())
 # 启动交易节点
 # ============================================================
 node = TradingNode(config=config_node)
-node.trader.add_strategy(bar_strategy)
+node.trader.add_strategy(m1_strategy)   # M1 周期指标 + 数据落盘（ST/EMA/ATR/VWAP、日K→prev_day、仓位、tick）
+node.trader.add_strategy(m5_strategy)   # M5 周期指标（引擎原生订阅）+ 跨周期读 registry
 node.trader.add_strategy(gateway_actor)   # Actor 以 Strategy 形式注册
 node.trader.add_strategy(exit_manager)    # 注册独立止盈模块
 node.trader.add_strategy(signal_detector) # M1 触线检测
@@ -380,6 +419,24 @@ node.trader.add_strategy(auto_strategy)   # 注册全自动量化策略
 node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)
 node.add_exec_client_factory(IB, InteractiveBrokersLiveExecClientFactory)
 node.build()
+
+# 注入引擎 IB client 给 OrderGatewayActor（FA 查询复用引擎 ibapi 连接，不再建临时连接）
+try:
+    # 优先用工厂缓存 IB_CLIENTS（build 时工厂创建 client 即填入，DataClient/ExecClient 共享同一底层 client）
+    from nautilus_trader.adapters.interactive_brokers.factories import IB_CLIENTS
+    _ib_client = next(iter(IB_CLIENTS.values()), None) if IB_CLIENTS else None
+    # 回退：exec_engine._clients（client 可能 run 时才注册）
+    if _ib_client is None:
+        _clients = getattr(node.kernel.exec_engine, "_clients", {}) or {}
+        _ib_exec = next(iter(_clients.values()), None) if _clients else None
+        _ib_client = getattr(_ib_exec, "_client", None) if _ib_exec else None
+    if _ib_client is not None:
+        gateway_actor.set_ib_client(_ib_client)
+        print("[Main] 引擎 IB client 已注入 OrderGatewayActor（FA 查询复用引擎连接）", flush=True)
+    else:
+        print("[Main] ⚠️ 未找到引擎 IB client（IB_CLIENTS 与 exec_engine._clients 均空），FA 查询将不可用", flush=True)
+except Exception as e:
+    print(f"[Main] ⚠️ 注入引擎 IB client 失败: {e}", flush=True)
 
 
 

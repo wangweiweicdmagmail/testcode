@@ -8,75 +8,15 @@ import redis as _redis
 
 from nautilus_mcp.redis_io import get_bars, get_indicators_active
 
+from indicators.supertrend import STState
+
 ST_PERIOD = 10
 ST_MULT_M5 = 3.0
 
 
-class _WilderATR:
-    def __init__(self, period: int) -> None:
-        self.period = period
-        self._trs: list[float] = []
-        self.value = 0.0
-
-    @property
-    def initialized(self) -> bool:
-        return len(self._trs) >= self.period
-
-    def update_raw(self, h: float, lo: float, c: float, prev_close: float) -> float | None:
-        if not self._trs and prev_close == 0.0:
-            tr = h - lo
-        else:
-            tr = max(h - lo, abs(h - prev_close), abs(lo - prev_close))
-        self._trs.append(tr)
-        if len(self._trs) < self.period:
-            return None
-        if len(self._trs) == self.period:
-            self.value = sum(self._trs[-self.period :]) / self.period
-        else:
-            self.value = (self.value * (self.period - 1) + tr) / self.period
-        return self.value
-
-
-class STReplay:
-    """与 strategy._STState 转向规则一致（上一根 band 判断）。"""
-
-    def __init__(self, period: int = ST_PERIOD, mult: float = ST_MULT_M5) -> None:
-        self.period = period
-        self.mult = mult
-        self._atr = _WilderATR(period)
-        self._prev_close = 0.0
-        self._prev_upper_b = 0.0
-        self._prev_lower_b = 0.0
-        self._prev_dir = -1
-        self._initialized = False
-
-    def update(self, o: float, h: float, lo: float, c: float) -> tuple[float, int]:
-        atr = self._atr.update_raw(h, lo, c, self._prev_close)
-        if atr is None:
-            self._prev_close = c
-            return 0.0, 1
-        hl2 = (h + lo) / 2
-        basic_upper = hl2 + self.mult * atr
-        basic_lower = hl2 - self.mult * atr
-        flip_upper, flip_lower = self._prev_upper_b, self._prev_lower_b
-        if not self._initialized:
-            upper_b, lower_b = basic_upper, basic_lower
-            self._initialized = True
-        else:
-            pu, pl, pc = self._prev_upper_b, self._prev_lower_b, self._prev_close
-            upper_b = basic_upper if (basic_upper < pu or pc > pu) else pu
-            lower_b = basic_lower if (basic_lower > pl or pc < pl) else pl
-        if self._prev_dir == -1 and c > flip_upper:
-            st_dir = 1
-        elif self._prev_dir == 1 and c < flip_lower:
-            st_dir = -1
-        else:
-            st_dir = self._prev_dir
-        st_val = lower_b if st_dir == 1 else upper_b
-        self._prev_close, self._prev_upper_b, self._prev_lower_b, self._prev_dir = (
-            c, upper_b, lower_b, st_dir,
-        )
-        return round(st_val, 4), st_dir
+# SuperTrend 实现已合并至 indicators.supertrend.STState（设计原则 #2）。
+# 历史的 _WilderATR（手写 Wilder 平滑）与 STReplay 删除，统一用引擎
+# AverageTrueRange(WILDER)，消除原则 #2 的明确违背项。
 
 
 @dataclass
@@ -143,12 +83,12 @@ def audit_m5_st(
     sym = symbol.upper()
     bars = get_bars(r, "5m", sym, limit=limit)
     active = get_indicators_active(r, sym)
-    st = STReplay(ST_PERIOD, ST_MULT_M5)
+    st = STState(ST_PERIOD, ST_MULT_M5)
     mismatches: list[STMismatch] = []
     replay_last: Optional[dict[str, Any]] = None
 
     for i, b in enumerate(bars):
-        sv, sd = st.update(
+        sv, sd, _, _ = st.update(
             float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]),
         )
         replay_last = {"time": b["time"], "st_value": sv, "st_dir": sd, "close": b["close"]}

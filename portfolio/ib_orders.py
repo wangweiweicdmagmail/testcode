@@ -47,3 +47,33 @@ def build_marketable_order(
             tags=tags,
         )
     return order, decision
+
+
+def build_resting_limit(
+    order_factory,
+    *,
+    instrument,
+    instrument_id,
+    side,
+    qty: int,
+    limit_price: float,
+    tags: Optional[list[str]],
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> object:
+    """按指定价挂 GTC LIMIT（手动/EMA/SuperTrend 限价进场用，resting until filled）。
+
+    与 build_marketable_order 的区别：后者按行情类型决定 MARKET 或 marketable DAY-LMT；
+    本函数始终以用户/方法给定的精确价位挂 GTC 限价，等触及才成交。
+    """
+    q = instrument.make_qty(Decimal(str(qty)))
+    p = instrument.make_price(Decimal(str(limit_price)))
+    if log_fn:
+        log_fn(f"resting_limit GTC @ {limit_price}")
+    return order_factory.limit(
+        instrument_id=instrument_id,
+        order_side=side,
+        quantity=q,
+        price=p,
+        time_in_force=TimeInForce.GTC,
+        tags=tags,
+    )

@@ -2,8 +2,8 @@
 SignalDetector — 独立 Actor（Strategy 壳）
 
 订阅 MessageBus（均在 strategy 指标写入 bar 并发布事件之后）：
-  - bar.collected.m5        (M5) → 更新 5m 方向 + M5 节奏检测 st_super
-  - bar.collected           (M1) → 其它模块（AutoRunner / reclaim 等）
+  - bar.collected.m5        (M5) → 更新 5m 方向（st_super 同向过滤用）
+  - bar.collected           (M1) → 每根 M1 收盘检测 st_super 翻转
   - bars.history.flushed    → 历史 K 线 flush 后回放当天 st_super
 
 写入 Redis：
@@ -24,13 +24,15 @@ import redis as _redis
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
 
+from typing import Optional
+
 from approval.alpha_scan import auto_proposal_from_touch
-from events import BarCollectedEvent, BarCollectedM5Event, BarsHistoryFlushedEvent
+from events import BarCollectedEvent, BarsHistoryFlushedEvent
+from indicators import IndicatorRegistry
 from signals.st_super import (
     StSuperSymbolState,
     detect_st_super_flip,
     replay_st_super_touches,
-    update_st5_from_m5_bar,
 )
 from signals.touch_backfill import MARKERS_KEY, write_markers_list
 from signals.touch_detector import TouchEvent, dedup_key
@@ -59,8 +61,13 @@ class SignalDetectorConfig(StrategyConfig, frozen=True):
 class SignalDetector(Strategy):
     """M1 ST 翻转 + M5 ST 同向 → st_super 触线写入 Redis，并可选自动建 pending 建议。"""
 
-    def __init__(self, config: SignalDetectorConfig) -> None:
+    def __init__(
+        self,
+        config: SignalDetectorConfig,
+        registry: Optional[IndicatorRegistry] = None,
+    ) -> None:
         super().__init__(config)
+        self._registry: Optional[IndicatorRegistry] = registry
         self._redis: _redis.Redis | None = None
         self._dedup: dict[str, set[str]] = defaultdict(set)
         self._st_super: dict[str, StSuperSymbolState] = {}
@@ -76,8 +83,11 @@ class SignalDetector(Strategy):
             self._redis = None
 
         self.msgbus.subscribe(topic="bar.collected", handler=self._on_m1_bar)
-        self.msgbus.subscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
         self.msgbus.subscribe(topic="bars.history.flushed", handler=self._on_history_flushed)
+        if self._registry is None:
+            self.log.warning(
+                "[SignalDetector] registry 未注入，M5 st_dir 读不到 → st_super 不会触发"
+            )
         self.log.info(
             "[SignalDetector] 已启动 | st_super + "
             f"{'自动建建议' if AUTO_PROPOSAL else '仅写 touch'}"
@@ -86,7 +96,6 @@ class SignalDetector(Strategy):
     def on_stop(self) -> None:
         try:
             self.msgbus.unsubscribe(topic="bar.collected", handler=self._on_m1_bar)
-            self.msgbus.unsubscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
             self.msgbus.unsubscribe(topic="bars.history.flushed", handler=self._on_history_flushed)
         except Exception:
             pass
@@ -145,45 +154,48 @@ class SignalDetector(Strategy):
         except Exception as e:
             self.log.error(f"[SignalDetector] {sym}: 历史触线回放失败: {e}")
 
-    def _on_m5_bar(self, event: BarCollectedM5Event) -> None:
+    def _on_m1_bar(self, event: BarCollectedEvent) -> None:
+        """每根 M1 收盘检测 st_super 翻转（1m ST 翻转且与 5m ST 同向 → 信号）。
+
+        M1/M5 ST 从共享 IndicatorRegistry 读（指标策略算好写入）；registry 缺失时
+        回退 bar_dict。M5 st_dir 同步写入 state.st5_dir 供同向过滤。
+        """
         sym = event.symbol
         bar = event.bar
         if sym not in self._st_super:
             self._st_super[sym] = StSuperSymbolState.create()
-        update_st5_from_m5_bar(bar, self._st_super[sym])
-        m1_dir = bar.get("m1_st_dir")
-        m1_val = bar.get("m1_st_value")
+
+        # M1 ST：优先 registry，回退 bar_dict
+        snap_m1 = self._registry.get_all(sym, "m1") if self._registry else {}
+        m1_dir = snap_m1.get("st_dir")
+        m1_val = snap_m1.get("st_value")
+        if m1_dir is None or m1_val is None:
+            m1_dir = bar.get("st_dir")
+            m1_val = bar.get("st_value")
         if m1_dir is None or m1_val is None:
             self.log.debug(
-                f"[SignalDetector] {sym} M5 缺 m1_st 快照，跳过超级信号检测 "
-                f"time={bar.get('time')}"
+                f"[SignalDetector] {sym} M1 缺 st 快照，跳过超级信号检测 time={bar.get('time')}"
             )
             return
+
+        # M5 ST 方向：从 registry 读并同步到 state.st5_dir（同向过滤用）
+        snap_m5 = self._registry.get_all(sym, "m5") if self._registry else {}
+        m5_dir = snap_m5.get("st_dir")
+        if m5_dir in (1, -1):
+            self._st_super[sym].st5_dir = int(m5_dir)
+
         m1_ctx = {
-            "time": bar.get("m1_bar_time") or bar.get("time"),
-            "open": bar.get("m1_open", bar.get("open")),
-            "high": bar.get("m1_high", bar.get("high")),
-            "low": bar.get("m1_low", bar.get("low")),
-            "close": bar.get("m1_close", bar.get("close")),
+            "time": bar.get("time"),
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+            "close": bar.get("close"),
             "st_dir": m1_dir,
             "st_value": m1_val,
         }
         super_ev = detect_st_super_flip(sym, m1_ctx, self._st_super[sym])
         if super_ev:
             self._emit_touch(super_ev, publish_live=True)
-        else:
-            self.log.debug(
-                f"[SignalDetector] {sym} M5 节奏检测无超级信号 "
-                f"st5={self._st_super[sym].st5_dir} m1_st={m1_dir} time={bar.get('time')}"
-            )
-        self.log.debug(
-            f"[SignalDetector] {sym} M5 ST5 dir={self._st_super[sym].st5_dir} "
-            f"m1_st_dir={m1_dir} time={bar.get('time')}"
-        )
-
-    def _on_m1_bar(self, event: BarCollectedEvent) -> None:
-        """st_super 已迁至 M5 收盘节奏（_on_m5_bar）。"""
-        return
 
     def _append_marker(self, touch: TouchEvent, payload: dict) -> None:
         if not self._redis:

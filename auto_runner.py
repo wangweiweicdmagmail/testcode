@@ -29,24 +29,26 @@ from approval.proposal_store import (
     pop_approved_for_symbol,
     try_claim_execution,
 )
-from events import AgentExecuteNowEvent
+from events import AgentExecuteNowEvent, EntryExecuteNowEvent
 from execution.auto_pm import AutoPositionManager
+from execution.models import UnitState
 from portfolio.config import ExecutionConfig, PortfolioRiskConfig
 from portfolio.risk_gate import RiskGate, stop_on_wrong_side
 from portfolio.trading_env import live_orders_allowed, trading_env
-from signals.base import BarContext, IntentAction, TradeIntent
-from signals.opening_breakout import OpeningBreakoutConfig, OpeningBreakoutEngine
-from signals.st_dema_m5 import StDemaM5Config, StDemaM5Engine
+from signals.base import IntentAction, TradeIntent
+from entry import ticket_store
+from signals.entry_methods import (
+    ENTRY_METHODS,
+    EntryBuildError,
+    parse_entry_request,
+    req_from_dict,
+    req_to_dict,
+)
 from nautilus_trader.model.enums import OrderSide
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 EOD_CLOSE_ET_MINUTE = 15 * 60 + 45
-# 超级信号单一路径：禁用 legacy st_dema_m5 与开盘突破（不经审批的 bypass）
-ALPHA_SUPER_ONLY = os.environ.get("ALPHA_SUPER_ONLY", "1").strip().lower() in ("1", "true", "yes")
-
-DEFAULT_SIGNAL_PROFILE = "st_dema_m5"
-OPENING_BREAKOUT_PROFILE = "opening_breakout"
 
 
 class AutoRunnerConfig(StrategyConfig, frozen=True):
@@ -54,11 +56,6 @@ class AutoRunnerConfig(StrategyConfig, frozen=True):
     instrument_ids: tuple[str, ...] = ()
     fa_group: str = ""
     fa_method: str = "NetLiq"
-    # Alpha: ST+DEMA
-    dema_period: int = 21
-    atr_period: int = 14
-    min_st_dema_spread_atr: float = 0.30
-    require_close_confirm: bool = True
     # Portfolio risk
     risk_pct: float = 0.002
     max_position_pct: float = 0.10
@@ -82,12 +79,13 @@ class AutoRunner(Strategy):
         super().__init__(config)
         self._redis: Optional[_redis.Redis] = None
         self._iid_map: dict[str, InstrumentId] = {}
-        self._engines: dict[str, StDemaM5Engine | OpeningBreakoutEngine] = {}
         self._risk: Optional[RiskGate] = None
         self._pm: Optional[AutoPositionManager] = None
         self._eod_closed_dates: set[str] = set()
         self._pending_proposals: dict[str, dict] = {}
         self._last_agent_off_warn: dict[str, float] = {}
+        self._last_purge_ts: float = 0.0
+        self._last_entry_expire_ts: float = 0.0
 
     def on_start(self) -> None:
         try:
@@ -163,30 +161,6 @@ class AutoRunner(Strategy):
             sym = iid.symbol.value
             self._iid_map[sym] = iid
 
-        st_engine = StDemaM5Engine(
-            StDemaM5Config(
-                dema_period=self.config.dema_period,
-                atr_period=self.config.atr_period,
-                atr_mult=self.config.atr_mult,
-                tp_rr=self.config.tp_rr,
-                min_st_dema_spread_atr=self.config.min_st_dema_spread_atr,
-                require_close_confirm=self.config.require_close_confirm,
-            ),
-            self._redis,
-            self.log.info,
-        )
-        for sym in self._iid_map:
-            st_engine.register_symbol(sym)
-            st_engine.preheat(sym)
-        self._engines[DEFAULT_SIGNAL_PROFILE] = st_engine
-
-        ob_engine = OpeningBreakoutEngine(
-            OpeningBreakoutConfig(),
-            self._redis,
-            self.log.info,
-        )
-        self._engines[OPENING_BREAKOUT_PROFILE] = ob_engine
-
         self._risk = RiskGate(
             risk_cfg, self._redis, self._account_equity,
             lambda: self._pm.units if self._pm else {},
@@ -203,11 +177,11 @@ class AutoRunner(Strategy):
         self.msgbus.subscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
         self.msgbus.subscribe(topic="bar.collected", handler=self._on_m1_bar)
         self.msgbus.subscribe(topic=AgentExecuteNowEvent.TOPIC, handler=self._on_execute_now)
+        self.msgbus.subscribe(topic=EntryExecuteNowEvent.TOPIC, handler=self._on_enter_now)
         threading.Timer(25.0, self._recover).start()
         self.log.info(
             f"[Runner] 已启动 | {len(self._iid_map)} 标的 | "
-            f"架构=Alpha→Risk→PM | profile={DEFAULT_SIGNAL_PROFILE} | "
-            f"super_only={ALPHA_SUPER_ONLY}"
+            f"架构=审批→Risk→PM（st_super 单一信号路径）"
         )
 
     def on_stop(self) -> None:
@@ -215,6 +189,7 @@ class AutoRunner(Strategy):
             self.msgbus.unsubscribe(topic="bar.collected.m5", handler=self._on_m5_bar)
             self.msgbus.unsubscribe(topic="bar.collected", handler=self._on_m1_bar)
             self.msgbus.unsubscribe(topic=AgentExecuteNowEvent.TOPIC, handler=self._on_execute_now)
+            self.msgbus.unsubscribe(topic=EntryExecuteNowEvent.TOPIC, handler=self._on_enter_now)
         except Exception:
             pass
         if self._redis:
@@ -239,6 +214,27 @@ class AutoRunner(Strategy):
             except Exception as e:
                 self.log.warning(f"[Runner] 写 reconcile:startup 失败: {e}")
 
+    def _maybe_purge_expired_proposals(self) -> None:
+        """过期 pending 建议清理（全局节流，每 5 分钟一次；首个标的 M5 触发全量）。"""
+        if not self._redis:
+            return
+        if (time.time() - self._last_purge_ts) < 300:
+            return
+        self._last_purge_ts = time.time()
+        try:
+            from approval.pending_cleanup import purge_pending_proposals
+            result = purge_pending_proposals(
+                self._redis,
+                reject_expired=True,
+                reject_stale_touch=False,
+                reject_counter_trend=False,
+                operator="auto_runner",
+            )
+            if result.purged:
+                self.log.info(f"[Runner] 清理过期 pending: {len(result.purged)} 个")
+        except Exception as e:
+            self.log.warning(f"[Runner] 清理过期 pending 失败: {e}")
+
     def _on_m5_bar(self, event) -> None:
         sym = event.symbol
         if sym not in self._iid_map or not self._pm or not self._risk:
@@ -254,7 +250,6 @@ class AutoRunner(Strategy):
             return
 
         self._pm.set_last_bar(sym, c, bar_time)
-        self._engines[DEFAULT_SIGNAL_PROFILE].set_last_close(sym, c)
 
         # #12 周期账实对账：每根 M5 比对 broker 实际持仓与本地单元，
         # 修复 close 漏确认 / 宕机止损 / FA 回调缺失导致的分歧（含补兜底止损）。
@@ -263,52 +258,11 @@ class AutoRunner(Strategy):
         except Exception as e:
             self.log.warning(f"[Runner] {sym}: 对账异常 {e}")
 
+        self._maybe_purge_expired_proposals()
+
         if et_min >= EOD_CLOSE_ET_MINUTE:
             self._maybe_eod(bar_time)
             return
-
-        if not self._legacy_alpha_enabled(sym):
-            return
-
-        mode = self._mode(sym)
-        if mode == "off":
-            return
-        live = self._effective_live(mode)
-
-        ctx = BarContext(symbol=sym, bar=bar, bar_time=bar_time, et_min=et_min, mode=mode)
-        pos_ctx = self._pm.position_context(sym)
-
-        if not pos_ctx.open_units and not self._risk.is_entry_window(et_min):
-            return
-
-        engine = self._engines[self._signal_profile(sym)]
-        output = engine.on_bar(ctx, pos_ctx)
-
-        if output.observe_note and mode == "observe":
-            self.log.info(f"[Runner][观察] {output.observe_note}")
-
-        for reject in output.rejects:
-            self._publish_signal(sym, "rejected", mode, {"reason": reject.reason, **reject.meta})
-
-        for intent in output.intents:
-            if intent.action == IntentAction.EXIT:
-                self._pm.execute_exit(intent, mode, live)
-                if live:
-                    engine.reset_symbol(sym)
-                continue
-
-            if intent.action in (IntentAction.ENTER, IntentAction.ADD):
-                verdict = self._risk.check_enter(
-                    intent, self.config.atr_mult, self.config.max_units, live,
-                )
-                if not verdict.allowed:
-                    self._publish_signal(sym, "rejected", mode, {
-                        "reason": verdict.reason, **(verdict.meta or {}),
-                    })
-                    continue
-                if live:
-                    self._risk.record_daily_trade(sym, bar_time)
-                self._pm.execute_enter(intent, verdict.qty, mode, live)
 
     def _on_m1_bar(self, event) -> None:
         """M1：消费 reclaim 完成的 Agent 建议（低延迟执行）。"""
@@ -325,12 +279,12 @@ class AutoRunner(Strategy):
             c = 0.0
 
         self._drain_close_request(sym)
+        self._drain_enter_request(sym)
+        self._drain_entry_cmds()
+        self._evaluate_armed_entries(sym, bar, bar_time)
+        self._reconcile_pending_tickets(sym)
 
         if et_min >= EOD_CLOSE_ET_MINUTE:
-            return
-        ob_mode = self._opening_breakout_mode(sym)
-        if ob_mode != "off":
-            self._on_opening_breakout_m1(sym, bar, bar_time, et_min, ob_mode)
             return
         mode = self._mode(sym)
         if mode == "off":
@@ -351,94 +305,6 @@ class AutoRunner(Strategy):
             return
         self._consume_agent_proposals(sym, bar, bar_time, et_min, mode)
 
-    def _on_opening_breakout_m1(
-        self, sym: str, bar: dict, bar_time: int, et_min: int, mode: str,
-    ) -> None:
-        if not self._pm or not self._risk:
-            return
-        live = self._effective_live(mode)
-        allow_long, allow_short = self._opening_breakout_dirs(sym)
-        engine = self._engines[OPENING_BREAKOUT_PROFILE]
-        engine.set_directions(sym, allow_long, allow_short)
-
-        ctx = BarContext(symbol=sym, bar=bar, bar_time=bar_time, et_min=et_min, mode=mode)
-        pos_ctx = self._pm.position_context(sym)
-        output = engine.on_m1(ctx, pos_ctx)
-
-        for reject in output.rejects:
-            if reject.reason not in ("no_breakout",):
-                if reject.reason in ("not_armed", "premarket_ref_missing", "premarket_ref_stale"):
-                    self.log.info(f"[Runner][OB] {sym} {reject.reason}")
-                self._publish_signal(sym, "ob_rejected", mode, {
-                    "reason": reject.reason, "profile": OPENING_BREAKOUT_PROFILE,
-                })
-
-        for intent in output.intents:
-            if not self._risk.is_entry_window(et_min, opening_breakout=True):
-                self._publish_signal(sym, "ob_rejected", mode, {"reason": "outside_opening_window"})
-                continue
-            verdict = self._risk.check_enter(
-                intent, self.config.atr_mult, max_units=1, live=live,
-            )
-            if not verdict.allowed:
-                self._publish_signal(sym, "ob_rejected", mode, {
-                    "reason": verdict.reason, **(verdict.meta or {}),
-                })
-                continue
-            if live:
-                self._risk.record_daily_trade(sym, bar_time)
-            self._pm.execute_enter(intent, verdict.qty, mode, live)
-            ref = engine._load_ref(sym) or {}
-            session_date = engine._session_date(bar_time)
-            engine.confirm_trigger(sym, session_date, intent, ref, mode)
-            self.log.info(
-                f"[Runner][OB] {'实盘' if live else '观察'} {sym} {intent.side.name} "
-                f"qty={verdict.qty} entry≈{intent.ref_price}"
-            )
-
-    def _opening_breakout_mode(self, sym: str) -> str:
-        if ALPHA_SUPER_ONLY:
-            return "off"
-        if not self._redis:
-            return "off"
-        try:
-            raw = self._redis.get(f"settings:{sym}")
-            if not raw:
-                return "off"
-            s = json.loads(raw)
-            if s.get("opening_breakout_live"):
-                return "live"
-            if s.get("opening_breakout_observe"):
-                return "observe"
-        except Exception:
-            pass
-        return "off"
-
-    def _opening_breakout_dirs(self, sym: str) -> tuple[bool, bool]:
-        if not self._redis:
-            return True, True
-        try:
-            raw = self._redis.get(f"settings:{sym}")
-            if not raw:
-                return True, True
-            s = json.loads(raw)
-            return bool(s.get("opening_breakout_long", True)), bool(s.get("opening_breakout_short", True))
-        except Exception:
-            return True, True
-
-    def _legacy_alpha_enabled(self, sym: str) -> bool:
-        if ALPHA_SUPER_ONLY:
-            return False
-        if not self._redis:
-            return False
-        try:
-            raw = self._redis.get(f"settings:{sym}")
-            if not raw:
-                return False
-            return bool(json.loads(raw).get("use_legacy_alpha"))
-        except Exception:
-            return False
-
     def _load_latest_m1_bar(self, sym: str) -> Optional[dict]:
         if not self._redis:
             return None
@@ -452,6 +318,22 @@ class AutoRunner(Strategy):
         except Exception as e:
             self.log.warning(f"[Runner] 读取最新 M1 bar 失败 {sym}: {e}")
         return None
+
+    def _on_enter_now(self, event) -> None:
+        """控制台进场立即触发（不等下一根 M1，市价单低延迟进场）。
+
+        server.js 写 auto:enter:{sym} 后经 order_actor /enter-now 发布本事件；
+        这里直接调用 _drain_enter_request 立即消费。M1 的 _drain_enter_request
+        作为兜底（事件丢失 / 引擎重启时 key 仍在）。
+        """
+        sym = str(getattr(event, "symbol", "") or "").upper()
+        if sym not in self._iid_map:
+            self.log.warning(f"[Runner][Entry] 立即进场跳过 {sym}: 不在 instrument_ids")
+            return
+        try:
+            self._drain_enter_request(sym)
+        except Exception as e:
+            self.log.warning(f"[Runner][Entry] 立即进场异常 {sym}: {e}")
 
     def _on_execute_now(self, event: AgentExecuteNowEvent) -> None:
         """审批通过后立即执行（不等下一根 M1）。"""
@@ -676,6 +558,275 @@ class AutoRunner(Strategy):
         except Exception as e:
             self.log.warning(f"[Runner] 消费 auto:close {sym} 失败: {e}")
 
+    # ── 控制台进场（auto:enter / 条件触发 / 票据对账 / 撤改单）────────────
+    def _load_levels(self, sym: str) -> dict:
+        if not self._redis:
+            return {}
+        try:
+            raw = self._redis.get(f"indicators:active:{sym.upper()}")
+            if raw:
+                return json.loads(raw)
+        except Exception as e:
+            self.log.debug(f"[Runner] indicators:active {sym} 读取失败: {e}")
+        return {}
+
+    def _latest_close(self, sym: str) -> float:
+        bar = self._load_latest_m1_bar(sym)
+        if bar:
+            try:
+                return float(bar.get("close") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    def _entry_mode_live(self) -> tuple[str, bool]:
+        live = live_orders_allowed()
+        return ("live" if live else "observe"), live
+
+    def _risk_and_execute(
+        self, sym: str, intent: TradeIntent, bar_time: int, *, live: bool, bypass_window: bool,
+    ) -> tuple[Optional[str], int, Optional[str]]:
+        """控制台进场专用通道：熔断 → 窗口 → 止损侧 → check_enter → execute_enter。
+        返回 (coid, qty, err)；err 非 None 即被拒（已 publish entry_rejected）。"""
+        if self._risk.is_halted():
+            self._publish_signal(sym, "entry_rejected", "live", {"reason": "halted"})
+            return None, 0, "halted"
+        et_min = (bar_time % 86400) // 60
+        if not bypass_window and not self._risk.is_entry_window(et_min):
+            self._publish_signal(sym, "entry_rejected", "live",
+                                 {"reason": "outside_entry_window", "et_min": et_min})
+            return None, 0, "outside_entry_window"
+        if intent.stop_px and stop_on_wrong_side(
+            intent.side, float(intent.ref_price), float(intent.stop_px)
+        ):
+            self._publish_signal(sym, "entry_rejected", "live", {"reason": "stop_side_breached"})
+            return None, 0, "stop_side_breached"
+        verdict = self._risk.check_enter(intent, self.config.atr_mult, self.config.max_units, live)
+        if not verdict.allowed:
+            self._publish_signal(sym, "entry_rejected", "live",
+                                 {"reason": verdict.reason, **(verdict.meta or {})})
+            return None, 0, verdict.reason
+        if live:
+            self._risk.record_daily_trade(sym, bar_time)
+        coid = self._pm.execute_enter(intent, verdict.qty, "live" if live else "observe", live)
+        return coid, int(verdict.qty), None
+
+    def _drain_enter_request(self, sym: str) -> None:
+        """消费 Redis auto:enter:{sym}（控制台发起的进场请求）。"""
+        if not self._redis or not self._pm or not self._risk:
+            return
+        key = f"auto:enter:{sym.upper()}"
+        try:
+            raw = self._redis.get(key)
+            if not raw:
+                return
+            self._redis.delete(key)
+            payload = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            self.log.warning(f"[Runner] 消费 auto:enter {sym} 失败: {e}")
+            return
+        payload["symbol"] = sym
+        try:
+            req = parse_entry_request(payload)
+        except EntryBuildError as e:
+            self._publish_signal(sym, "entry_rejected", "live", {"reason": e.reason, **e.meta})
+            self.log.info(f"[Runner] 进场请求解析失败 {sym}: {e.reason}")
+            return
+        method = ENTRY_METHODS[req.method]
+        bar_time = (self._pm._last_bar_time.get(sym) if self._pm else None) or int(time.time())
+        try:
+            intent, directive = method.build_intent(
+                req, self._load_levels(sym), self._latest_close(sym), bar_time,
+            )
+        except EntryBuildError as e:
+            self._publish_signal(sym, "entry_rejected", "live", {"reason": e.reason, **e.meta})
+            self.log.info(f"[Runner] 进场构造失败 {sym}: {e.reason}")
+            return
+
+        if directive.kind == "arm":
+            ticket = ticket_store.create_ticket(
+                self._redis, req_dict=req_to_dict(req), state="ARMED", expire_ts=req.expire_ts,
+            )
+            self._publish_signal(sym, "entry_armed", "live", {
+                "ticket_id": ticket["ticket_id"], "method": req.method,
+                "side": req.side.name, "trigger": req.trigger,
+            })
+            self.log.info(
+                f"[Runner] ARMED 条件进场 {sym} {req.side.name} ticket={ticket['ticket_id']}"
+            )
+            return
+
+        # resting_limit（manual/EMA/ST）：建 RESTING 票 → 执行 → 回填 coid
+        ticket = ticket_store.create_ticket(
+            self._redis, req_dict=req_to_dict(req), state="RESTING", expire_ts=req.expire_ts,
+            intent_meta={"limit_price": directive.limit_price, "stop": intent.stop_px,
+                         "tp": intent.tp_px, "method": req.method},
+        )
+        mode, live = self._entry_mode_live()
+        coid, qty, err = self._risk_and_execute(
+            sym, intent, bar_time, live=live, bypass_window=req.bypass_window,
+        )
+        if err:
+            ticket_store.mark_canceled(self._redis, ticket["ticket_id"], reason=err)
+            self.log.info(f"[Runner] RESTING 进场被拒 {sym}: {err}")
+            return
+        if coid:
+            ticket_store.update(self._redis, ticket["ticket_id"],
+                                fields={"entry_coid": coid, "qty": qty}, event="armed")
+            self._publish_signal(sym, "entry_armed", mode, {
+                "ticket_id": ticket["ticket_id"], "method": req.method, "side": req.side.name,
+                "resting": True, "limit_price": directive.limit_price,
+                "entry_coid": coid, "qty": qty,
+            })
+            self.log.info(
+                f"[Runner] RESTING 进场 {sym} {req.side.name} ticket={ticket['ticket_id']} "
+                f"coid={coid} qty={qty} @ {directive.limit_price}"
+            )
+        else:
+            # 观察模式 dry-run（AutoPM 已 publish would_open）
+            ticket_store.mark_observed(self._redis, ticket["ticket_id"])
+            self.log.info(f"[Runner] RESTING 进场（观察）{sym} {req.side.name} qty={qty}")
+
+    def _evaluate_armed_entries(self, sym: str, bar: dict, bar_time: int) -> None:
+        """每根 M1 评估该标的的 ARMED 条件票：过期清理 + 触发转 marketable。"""
+        if not self._redis or not self._pm or not self._risk:
+            return
+        now = time.time()
+        if now - self._last_entry_expire_ts > 60:
+            self._last_entry_expire_ts = now
+            try:
+                expired = ticket_store.expire_due(self._redis)
+                if expired:
+                    self.log.info(f"[Runner] 过期条件票清理: {len(expired)}")
+            except Exception as e:
+                self.log.warning(f"[Runner] entry expire_due 失败: {e}")
+        mode, live = self._entry_mode_live()
+        levels = self._load_levels(sym)
+        try:
+            close = float(bar.get("close") or 0)
+        except (TypeError, ValueError):
+            close = 0.0
+        for t in ticket_store.list_armed_for_symbol(self._redis, sym):
+            tid = t["ticket_id"]
+            try:
+                req = req_from_dict(t.get("params") or {})
+            except EntryBuildError:
+                continue
+            method = ENTRY_METHODS.get(req.method)
+            if method is None or not method.is_conditional():
+                continue
+            try:
+                if not method.check_trigger(req, bar, levels):
+                    continue
+            except Exception as e:
+                self.log.warning(f"[Runner] 触发判定异常 {tid}: {e}")
+                continue
+            if not ticket_store.claim(self._redis, tid):
+                continue
+            ticket_store.mark_triggered(self._redis, tid, trigger_close=close, bar_time=bar_time)
+            self._publish_signal(sym, "entry_triggered", mode,
+                                 {"ticket_id": tid, "method": req.method, "trigger_close": close})
+            self.log.info(f"[Runner] 条件进场触发 {sym} ticket={tid} @ {close}")
+            try:
+                intent, _directive = method.build_trigger_intent(req, close, bar_time)
+            except EntryBuildError as e:
+                ticket_store.mark_canceled(self._redis, tid, reason=e.reason)
+                self._publish_signal(sym, "entry_rejected", mode,
+                                     {"reason": e.reason, "ticket_id": tid})
+                continue
+            coid, qty, err = self._risk_and_execute(
+                sym, intent, bar_time, live=live, bypass_window=req.bypass_window,
+            )
+            if err:
+                ticket_store.mark_canceled(self._redis, tid, reason=err)
+            elif coid:
+                ticket_store.update(self._redis, tid,
+                                    fields={"entry_coid": coid, "qty": qty}, event="triggered")
+                self._publish_signal(sym, "entry_filled", mode, {"ticket_id": tid, "qty": qty})
+            else:
+                ticket_store.mark_observed(self._redis, tid)
+
+    def _reconcile_pending_tickets(self, sym: str) -> None:
+        """TRIGGERED 条件票：对应 AutoPM Unit 进入 ACTIVE → FILLED；coid 消失 → CANCELED。"""
+        if not self._redis or not self._pm:
+            return
+        units = self._pm.units.get(sym, [])
+        active = {u.entry_coid: u for u in units
+                  if u.entry_coid and u.state in (UnitState.ACTIVE, UnitState.BREAKEVEN)}
+        gone = {u.entry_coid for u in units
+                if u.entry_coid and u.state == UnitState.CLOSED}
+        for t in ticket_store.list_pending(self._redis, symbol=sym, limit=200):
+            if t.get("state") not in ("RESTING", "TRIGGERED"):
+                continue
+            coid = t.get("entry_coid") or ""
+            if not coid:
+                continue
+            if coid in active:
+                ticket_store.mark_filled(self._redis, t["ticket_id"],
+                                         entry_coid=coid, qty=int(active[coid].qty))
+            elif coid in gone:
+                ticket_store.mark_canceled(self._redis, t["ticket_id"], reason="order_gone")
+
+    def _drain_entry_cmds(self) -> None:
+        """消费 Redis list entry:cmd（控制台 撤单/改价，按 ticket_id 或 entry_coid 寻址）。"""
+        if not self._redis or not self._pm:
+            return
+        for _ in range(50):
+            try:
+                raw = self._redis.rpop("entry:cmd")
+            except Exception:
+                break
+            if not raw:
+                break
+            try:
+                cmd = json.loads(raw)
+            except Exception:
+                continue
+            action = str(cmd.get("action") or "")
+            tid = str(cmd.get("ticket_id") or "")
+            coid = str(cmd.get("entry_coid") or "")
+            sym = str(cmd.get("symbol") or "").upper()
+            ticket = ticket_store.get_ticket(self._redis, tid) if tid else None
+            if ticket:
+                sym = str(ticket.get("symbol") or sym).upper()
+                coid = coid or str(ticket.get("entry_coid") or "")
+            if not sym:
+                continue
+            if action == "cancel":
+                if coid:
+                    try:
+                        self._pm.cancel_pending_entry(sym, coid)
+                    except Exception as e:
+                        self.log.warning(f"[Runner] 撤挂单 {coid} 失败: {e}")
+                if ticket:
+                    ticket_store.mark_canceled(
+                        self._redis, tid, reason=str(cmd.get("reason") or "ui_cancel"),
+                    )
+                self._publish_signal(sym, "entry_canceled", "live",
+                                     {"ticket_id": tid or None, "entry_coid": coid or None})
+            elif action == "modify":
+                price = cmd.get("price")
+                if coid and price is not None:
+                    res = self._pm.modify_pending_entry(sym, coid, float(price))
+                    if res.get("error"):
+                        self._publish_signal(sym, "entry_rejected", "live",
+                                             {"ticket_id": tid or None, "reason": res["error"]})
+                        continue
+                if ticket:
+                    params = dict(ticket.get("params") or {})
+                    if ticket.get("state") == "ARMED" and isinstance(params.get("trigger"), dict):
+                        try:
+                            params["trigger"]["level"] = float(price)
+                        except (TypeError, ValueError):
+                            pass
+                    elif price is not None:
+                        params["limit_price"] = float(price)
+                    ticket_store.update(self._redis, tid,
+                                        fields={"params": params}, event="modified")
+                self._publish_signal(sym, "entry_modified", "live",
+                                     {"ticket_id": tid or None, "entry_coid": coid or None,
+                                      "price": price})
+
     def _maybe_eod(self, bar_time: int) -> None:
         date = datetime.fromtimestamp(bar_time, tz=timezone.utc).strftime("%Y-%m-%d")
         if date in self._eod_closed_dates:
@@ -686,7 +837,6 @@ class AutoRunner(Strategy):
         closed = self._pm.eod_close_all()
         for s in closed:
             self._publish_signal(s, "eod", "live", {"reason": "15:45 ET"})
-            self._engines[DEFAULT_SIGNAL_PROFILE].reset_symbol(s)
         if closed:
             self.log.info(f"[Runner] EOD 全平: {closed}")
 
@@ -750,7 +900,6 @@ class AutoRunner(Strategy):
         sym = self._sym_of(event)
         if sym and self._pm:
             self._pm.on_position_closed(sym)
-            self._engines[DEFAULT_SIGNAL_PROFILE].reset_symbol(sym)
 
     # ── 工具 ──────────────────────────────────────────────────────────
     def _effective_live(self, mode: str) -> bool:
@@ -776,19 +925,6 @@ class AutoRunner(Strategy):
             return "off"
         except Exception:
             return "off"
-
-    def _signal_profile(self, sym: str) -> str:
-        if not self._redis:
-            return DEFAULT_SIGNAL_PROFILE
-        try:
-            raw = self._redis.get(f"settings:{sym}")
-            if raw:
-                p = json.loads(raw).get("signal_profile")
-                if p and p in self._engines:
-                    return p
-        except Exception:
-            pass
-        return DEFAULT_SIGNAL_PROFILE
 
     def _account_equity(self) -> Optional[float]:
         if self._redis:

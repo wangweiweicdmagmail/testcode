@@ -993,32 +993,6 @@
       height: 22px;
     }
 
-    .ob-dir-row {
-      display: flex;
-      gap: 6px;
-      font-size: 11px;
-      color: #787b86;
-      line-height: 1;
-    }
-
-    .ob-dir-row label {
-      display: flex;
-      align-items: center;
-      gap: 2px;
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .ob-dir-row input { accent-color: #60a5fa; }
-
-    #ob-status-chip {
-      font-size: 10px;
-      color: #787b86;
-      max-width: 140px;
-      text-align: right;
-      line-height: 1.2;
-      white-space: normal;
-    }
 
     /* ─── 账户资金面板 ──────────────────────────────────────── */
     #account-panel {
@@ -1332,20 +1306,6 @@
           <option value="observe">观察(不下单)</option>
           <option value="live">实盘下单</option>
         </select>
-      </div>
-      <div class="tb-vdivider"></div>
-      <div class="tb-ctrl-group" title="盘前锚定 + 09:30-09:35 触线突破（与 Agent 互斥）">
-        <span class="tb-ctrl-label">开盘突破</span>
-        <select id="ob-mode-select" class="tb-ctrl-select">
-          <option value="off">关闭</option>
-          <option value="observe">观察</option>
-          <option value="live">实盘</option>
-        </select>
-        <div class="ob-dir-row">
-          <label><input type="checkbox" id="ob-long-cb" checked>多</label>
-          <label><input type="checkbox" id="ob-short-cb" checked>空</label>
-        </div>
-        <div id="ob-status-chip">—</div>
       </div>
     </div>
 
@@ -2108,7 +2068,6 @@
     // ─── 盘前锚定线（开盘突破 PM High / PM Low）────────────────────
     let premarketRefLines = { high: null, low: null };
     let premarketRefData = null;
-    let obMarkers = [];
     let sessionMarkers = []; // 09:30 开盘等会话标记
 
     function markRthOpenIfNeeded(bars) {
@@ -2170,57 +2129,12 @@
       });
     }
 
-    function obSignalToMarker(sig) {
-      const isLong = String(sig.side || '').toUpperCase() === 'LONG';
-      return {
-        time: sig.bar_time || Math.floor(Date.now() / 1000),
-        position: isLong ? 'belowBar' : 'aboveBar',
-        color: isLong ? '#26a69a' : '#ef5350',
-        shape: isLong ? 'arrowUp' : 'arrowDown',
-        text: 'OB',
-        size: 2.4,
-      };
-    }
-
-    function addObMarker(sig) {
-      const m = obSignalToMarker(sig);
-      const k = `${m.time}:OB:${m.shape}`;
-      if (obMarkers.some(x => `${x.time}:OB:${x.shape}` === k)) return;
-      obMarkers.push(m);
-      refreshMarkers();
-    }
-
-    function refreshObStatusChip(ref, fired) {
-      const el = document.getElementById('ob-status-chip');
-      if (!el) return;
-      if (!ref?.m1_anchor) {
-        el.textContent = '无盘前锚定';
-        el.style.color = '#787b86';
-        return;
-      }
-      const hi = ref.m1_anchor.high?.toFixed?.(2) ?? ref.m1_anchor.high;
-      const lo = ref.m1_anchor.low?.toFixed?.(2) ?? ref.m1_anchor.low;
-      if (fired) {
-        el.textContent = `已触发 ${fired.side} @${Number(fired.entry).toFixed(2)}`;
-        el.style.color = '#f59e0b';
-        return;
-      }
-      const arms = [];
-      if (ref.armed_long) arms.push('多');
-      if (ref.armed_short) arms.push('空');
-      el.textContent = arms.length
-        ? `待命 ${arms.join('/')} H${hi} L${lo}`
-        : `未共振 H${hi} L${lo}`;
-      el.style.color = arms.length ? '#60a5fa' : '#787b86';
-    }
-
     async function loadPremarketRef() {
       try {
-        const res = await fetch(`/api/opening-breakout/status/${SYMBOL}`);
+        const res = await fetch(`/api/premarket-ref/${SYMBOL}`);
         if (!res.ok) return;
-        const data = await res.json();
-        if (data.ref) addPremarketRefLines(data.ref);
-        refreshObStatusChip(data.ref, data.fired);
+        const ref = await res.json();
+        if (ref) addPremarketRefLines(ref);
       } catch (_) { /* 引擎离线 */ }
     }
 
@@ -2273,7 +2187,7 @@
 
     function refreshMarkers() {
       // 按时间升序排序后刷新（LWC 要求 markers 必须升序）
-      const merged = [...signalMarkers, ...obMarkers, ...sessionMarkers, ...orderMarkers].sort((a, b) => a.time - b.time);
+      const merged = [...signalMarkers, ...sessionMarkers, ...orderMarkers].sort((a, b) => a.time - b.time);
       candleSeries.setMarkers(merged);
     }
 
@@ -2875,31 +2789,10 @@
             return;
           }
 
-          // ── 盘前锚定 / 开盘突破触发 ───────────────────────────────
+          // ── 盘前锚定线（premarket:ref，M5 策略写入）──────────────
           if (channel && channel.startsWith('premarket:ref:')) {
             if (payload.symbol && payload.symbol !== SYMBOL) return;
             addPremarketRefLines(payload);
-            fetch(`/api/opening-breakout/status/${SYMBOL}`)
-              .then(r => r.ok ? r.json() : null)
-              .then(d => d && refreshObStatusChip(d.ref, d.fired))
-              .catch(() => {});
-            return;
-          }
-          if (channel === 'opening_breakout:signal') {
-            if (payload.symbol && payload.symbol !== SYMBOL) return;
-            addObMarker(payload);
-            const sideZh = payload.side === 'SHORT' ? '空' : '多';
-            const observe = payload.mode === 'observe';
-            speak(`${SYMBOL} 开盘突破${observe ? '观察' : ''} ${sideZh}`, true);
-            showToast(
-              `${observe ? '👁' : '⚡'} ${SYMBOL} 开盘突破${observe ? '(观察)' : ''} ${sideZh} ` +
-              `入@${Number(payload.entry).toFixed(2)} 止@${Number(payload.stop).toFixed(2)}`,
-              observe ? 'tip' : 'warn'
-            );
-            fetch(`/api/opening-breakout/status/${SYMBOL}`)
-              .then(r => r.ok ? r.json() : null)
-              .then(d => d && refreshObStatusChip(d.ref, d.fired))
-              .catch(() => {});
             return;
           }
 
@@ -2911,11 +2804,9 @@
             const sideZh = s.side === 'SELL' ? '空' : '多';
             switch (s.action) {
               case 'would_open': {
-                const isOb = s.profile === 'opening_breakout';
-                const label = isOb ? '开盘突破观察' : '自动策略观察';
-                speak(`${sym} ${label}：应开${sideZh} ${s.qty || ''}股`, true);
+                speak(`${sym} 自动策略观察：应开${sideZh} ${s.qty || ''}股`, true);
                 showToast(
-                  `👁 ${sym} ${label}：应开${sideZh} qty=${s.qty} 止损@${s.stop}`,
+                  `👁 ${sym} 自动策略观察：应开${sideZh} qty=${s.qty} 止损@${s.stop}`,
                   'tip'
                 );
                 break;
@@ -2939,15 +2830,6 @@
               case 'halted':
                 speak(`${sym} 熔断，禁止自动开仓`, true);
                 showToast(`⛔ ${sym} 日亏损熔断，禁止开仓`, 'warn');
-                break;
-              case 'ob_rejected':
-                if (s.reason === 'not_armed') {
-                  showToast(`${sym} 开盘突破：盘前未共振，今日不触发`, 'info');
-                } else if (s.reason === 'premarket_ref_missing') {
-                  showToast(`${sym} 开盘突破：缺少盘前锚定数据`, 'warn');
-                } else if (s.reason && s.reason !== 'no_breakout') {
-                  showToast(`开盘突破: ${s.reason}`, 'info');
-                }
                 break;
             }
             return;
@@ -4191,53 +4073,7 @@
     // observe/live 时强制 trail_mode=0，避免 ExitManager 跟踪止盈与 AutoStrategy 互相改单
     const autoSel = document.getElementById('auto-strategy-select');
     let autoStrategyMode = 'off';
-    const obSel = document.getElementById('ob-mode-select');
-    const obLongCb = document.getElementById('ob-long-cb');
-    const obShortCb = document.getElementById('ob-short-cb');
-    let openingBreakoutMode = 'off';
     const AUTO_COLORS = { off: '#2a2e39', observe: '#f0b90b', live: '#ef5350' };
-    const OB_COLORS = { off: '#2a2e39', observe: '#a78bfa', live: '#ef5350' };
-
-    function applyObStyle(mode) {
-      openingBreakoutMode = mode;
-      obSel.style.borderColor = OB_COLORS[mode] || '#2a2e39';
-      obSel.style.color = mode === 'off' ? '#787b86' : (OB_COLORS[mode] || '#d1d4dc');
-      updateTradeButtonsState();
-    }
-
-    async function saveObDirs() {
-      await fetch(`/api/settings/${SYMBOL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          opening_breakout_long: obLongCb.checked,
-          opening_breakout_short: obShortCb.checked,
-        }),
-      });
-    }
-
-    async function saveObSettings(mode) {
-      const body = {
-        opening_breakout_live: mode === 'live',
-        opening_breakout_observe: mode === 'observe',
-        opening_breakout_long: obLongCb.checked,
-        opening_breakout_short: obShortCb.checked,
-      };
-      if (mode !== 'off') {
-        body.trail_mode = 0;
-        body.auto_strategy = false;
-        body.auto_observe = false;
-        trailSelect.value = '0';
-        applyTrailSelectStyle(0);
-        autoSel.value = 'off';
-        applyAutoStyle('off');
-      }
-      await fetch(`/api/settings/${SYMBOL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    }
 
     function applyAutoStyle(mode) {
       autoStrategyMode = mode;
@@ -4256,10 +4092,9 @@
       return true;
     }
     function blockIfAutoLive(actionLabel) {
-      if (autoStrategyMode !== 'live' && openingBreakoutMode !== 'live') return false;
-      const which = openingBreakoutMode === 'live' ? '开盘突破' : '自动策略';
-      showToast(`⚠️ ${SYMBOL} ${which}实盘中，请先关闭后再${actionLabel}`, 'warn');
-      speak(`${which}实盘中，禁止手动操作`, true);
+      if (autoStrategyMode !== 'live') return false;
+      showToast(`⚠️ ${SYMBOL} 自动策略实盘中，请先关闭后再${actionLabel}`, 'warn');
+      speak(`自动策略实盘中，禁止手动操作`, true);
       return true;
     }
     function blockIfHalted(actionLabel) {
@@ -4292,12 +4127,8 @@
       };
       if (mode !== 'off') {
         body.trail_mode = 0;
-        body.opening_breakout_live = false;
-        body.opening_breakout_observe = false;
         trailSelect.value = '0';
         applyTrailSelectStyle(0);
-        obSel.value = 'off';
-        applyObStyle('off');
       }
       applyAutoStyle(mode);
       await fetch(`/api/settings/${SYMBOL}`, {
@@ -4308,23 +4139,6 @@
       const label = mode === 'live' ? '实盘下单' : (mode === 'observe' ? '观察(不下单)' : '已关闭');
       showToast(`${SYMBOL} Agent执行：${label}`,
                 mode === 'live' ? 'warn' : (mode === 'observe' ? 'tip' : 'info'));
-    });
-
-    obLongCb.addEventListener('change', saveObDirs);
-    obShortCb.addEventListener('change', saveObDirs);
-
-    obSel.addEventListener('change', async () => {
-      let mode = obSel.value;
-      if (mode === 'live' &&
-          !confirm(`确认让 ${SYMBOL} 开盘突破进入【实盘】？\n09:30-09:35 触线将自动下单（测试固定股数）！`)) {
-        mode = 'observe';
-        obSel.value = 'observe';
-      }
-      applyObStyle(mode);
-      await saveObSettings(mode);
-      const label = mode === 'live' ? '实盘' : (mode === 'observe' ? '观察' : '已关闭');
-      showToast(`${SYMBOL} 开盘突破：${label}`, mode === 'live' ? 'warn' : 'tip');
-      await loadPremarketRef();
     });
 
     // ─── Alpha 建议审批抽屉 ─────────────────────────────────────────
@@ -4693,12 +4507,6 @@
           const autoMode = s.auto_strategy ? 'live' : (s.auto_observe ? 'observe' : 'off');
           autoSel.value = autoMode;
           applyAutoStyle(autoMode);
-          const obMode = s.opening_breakout_live ? 'live'
-            : (s.opening_breakout_observe ? 'observe' : 'off');
-          obSel.value = obMode;
-          applyObStyle(obMode);
-          if (s.opening_breakout_long === false) obLongCb.checked = false;
-          if (s.opening_breakout_short === false) obShortCb.checked = false;
         }
       } catch (e) { /* 引擎离线时忽略 */ }
     })();

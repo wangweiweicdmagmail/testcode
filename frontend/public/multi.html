@@ -870,6 +870,7 @@
         }
 
         function pickReplacementSlot(newSym) {
+            // 第一轮：有限保护分最低的格子（observe/旧信号/手动）—— 优先挤
             let bestIdx = -1;
             let bestScore = Infinity;
             for (let i = 0; i < DEFAULT_SYMBOLS.length; i++) {
@@ -882,7 +883,24 @@
                     bestIdx = i;
                 }
             }
-            return bestIdx;
+            if (bestIdx >= 0) return bestIdx;
+
+            // 第二轮（全 Infinity：pending/live）：强制挤掉非持仓中 shownAt 最早的
+            const meta = loadSlotMeta();
+            let fallbackIdx = -1;
+            let earliest = Infinity;
+            for (let i = 0; i < DEFAULT_SYMBOLS.length; i++) {
+                const sym = DEFAULT_SYMBOLS[i];
+                if (sym === newSym) return i;
+                const pos = state[sym]?.position;
+                if (pos && Math.abs(pos.quantity || 0) > 0) continue;   // 持仓 = 风控底线，永不挤
+                const shownAt = meta[i]?.shownAt || 0;
+                if (shownAt < earliest) {
+                    earliest = shownAt;
+                    fallbackIdx = i;
+                }
+            }
+            return fallbackIdx;   // 全持仓则 -1（真不可挤，由调用方提示）
         }
 
         function autoAssignSymbolToGrid(sym, source, extra = {}) {
@@ -1929,14 +1947,13 @@
         // 5 分钟桶起始时间戳（对齐 300 秒）
         function bucket5m(t) { return t - (t % 300); }
 
-        // 将实时 1m / tick 聚合进「正在形成的 5m K 线」并刷新蜡烛
-        function feedForming5m(s, o, h, l, c, t) {
+        // 将实时 tick / 1m 收盘刷进「正在形成的 1m K 线」并刷新蜡烛
+        function feedForming1m(s, o, h, l, c, t) {
             if (!s?.candleSeries) return;
-            const bt = bucket5m(t);
-            let cur = s.curM5;
-            if (!cur || cur.time !== bt) {
-                cur = { time: bt, open: o, high: h, low: l, close: c };
-                s.curM5 = cur;
+            let cur = s.curM1;
+            if (!cur || cur.time !== t) {
+                cur = { time: t, open: o, high: h, low: l, close: c };
+                s.curM1 = cur;
             } else {
                 cur.high = Math.max(cur.high, h);
                 cur.low = Math.min(cur.low, l);
@@ -2159,31 +2176,25 @@
 
                 document.getElementById(`loading-${symbol}`).style.display = 'none';
 
-                // ── K 线：五分钟（主图改为 M5 蜡烛）──
+                // ── K 线：一分钟（主图 M1 蜡烛）──
+                const m1 = m1_bars || [];
                 const m5 = m5_bars || [];
                 state[symbol].m5Bars = m5;
-                state[symbol].candleSeries.setData(m5.map(b => ({
+                state[symbol].candleSeries.setData(m1.map(b => ({
                     time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
                 })));
 
-                // ── M5 ST：使用引擎写入的 st_dir/st_value（04:00 起预热，勿仅用图表窗口重算）──
-                const m5WithST = m5;
-                const c5 = computeSTSeries(m5, ST_PERIOD, ST_MULT_5M);
-                state[symbol].st5 = c5.st;   // 仅作实时 fallback 状态续接
-
-                const m1 = m1_bars || [];
+                // ── ST 双线（均铺到 M1 时间轴）：1m 细（逐根）+ 5m 粗（阶梯化，桶收盘后切换）──
                 const m1STForChart = m1.map(b => ({
-                    time: b.time,
-                    close: b.close,
-                    st_value: b.st_value,
-                    st_dir: b.st_dir,
+                    time: b.time, close: b.close, st_value: b.st_value, st_dir: b.st_dir,
                 }));
                 const c1 = computeSTSeries(m1, ST_PERIOD, ST_MULT_1M);
                 state[symbol].st1 = c1.st;
+                const c5 = computeSTSeries(m5, ST_PERIOD, ST_MULT_5M);
+                state[symbol].st5 = c5.st;
 
-                // ST 5m 粗线 + ST 1m 细线（超级信号仅依赖这两条线）
-                createSegmentedST(symbol, m5WithST, { lineWidth: ST_LINE_M5, listKey: 'm5' });
-                createSegmentedST(symbol, resample1mSTto5m(m1STForChart), { lineWidth: ST_LINE_M1, listKey: 'st', labelTitle: IND_LABELS.ST_M1 });
+                createSegmentedST(symbol, expandM5OntoM1(m1, m5), { lineWidth: ST_LINE_M5, listKey: 'm5' });
+                createSegmentedST(symbol, m1STForChart, { lineWidth: ST_LINE_M1, listKey: 'st', labelTitle: IND_LABELS.ST_M1 });
 
                 // ── 超级信号标记：以后端 signals:touch 为准 ──
                 try {
@@ -2207,10 +2218,11 @@
 
                 const lastM5 = m5[m5.length - 1];
                 const lastM5ST = [...m5].reverse().find(b => b.st_value != null && b.st_dir != null);
+                const lastM1Bar = m1[m1.length - 1];
                 const lastM1ST = [...m1].reverse().find(b => b.st_value != null && b.st_dir != null);
-                // 初始化正在形成的 5m 桶，供实时 tick/1m 续接聚合
-                state[symbol].curM5 = lastM5
-                    ? { time: lastM5.time, open: lastM5.open, high: lastM5.high, low: lastM5.low, close: lastM5.close }
+                // 初始化正在形成的 1m 桶，供实时 tick 续接聚合
+                state[symbol].curM1 = lastM1Bar
+                    ? { time: lastM1Bar.time, open: lastM1Bar.open, high: lastM1Bar.high, low: lastM1Bar.low, close: lastM1Bar.close }
                     : null;
                 if (lastM5) {
                     state[symbol].m5Frozen = {
@@ -2228,16 +2240,16 @@
                 if (m1.length) state[symbol].lastM1Time = m1[m1.length - 1].time;
                 updateSysPanel(symbol);
                 drawProposalPriceLines(symbol);
-                addOpeningRange(symbol, m5);
+                addOpeningRange(symbol, m1);
                 addPositionLines(symbol, position);
                 updateCloseButton(symbol, !!(position && Math.abs(position.quantity || 0) > 0));
                 updateHeader(symbol, m1_bars);
                 centerChartView(symbol);
 
-                // ── 构建止损拖动 ctx ──（以 M5 为准）
+                // ── 构建止损拖动 ctx ──（以 M1 为准）
                 const s = state[symbol];
-                const lastBar = m5[m5.length - 1] || m1_bars[m1_bars.length - 1];
-                const lastST = [...m5WithST].reverse().find(b => b.st_value != null && b.st_value !== 0);
+                const lastBar = m1[m1.length - 1] || m5[m5.length - 1];
+                const lastST = [...m1STForChart].reverse().find(b => b.st_value != null && b.st_value !== 0);
                 const id = symbol;
                 const ctx = {
                     sym: symbol, cs: s.candleSeries, chart: s.chart,
@@ -2962,21 +2974,28 @@
                     const s = state[sym];
                     if (!chartsReady) return;
 
-                    // tick 实时推送：聚合进正在形成的 5m 蜡烛
+                    // tick 实时推送：刷进正在形成的 1m 蜡烛
                     if (channel.startsWith('bars:1m:tick:')) {
-                        s.lastTickTime = bucket5m(payload.time);
-                        feedForming5m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
+                        s.lastTickTime = payload.time;
+                        feedForming1m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
                         if (s.ctx) s.ctx.latestClose = payload.close;
                         const priceEl = document.getElementById(`price-${sym}`);
                         if (priceEl) priceEl.textContent = payload.close.toFixed(2);
                         return;
                     }
-                    // kline:1m 收盘：聚合进 5m 蜡烛（M5 权威 bar 到达前的实时形态）
+                    // kline:1m 收盘：1m 蜡烛定型 + 1m ST 刷新（主图已是 M1）
                     if (channel.startsWith('kline:1m:')) {
                         if (payload.time < s.lastM1Time) return;
                         s.lastM1Time = payload.time;
-                        s.lastTickTime = bucket5m(payload.time);
-                        feedForming5m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
+                        s.lastTickTime = payload.time;
+                        feedForming1m(s, payload.open, payload.high, payload.low, payload.close, payload.time);
+                        // 1m ST：用引擎 payload 的 st_value/st_dir（04:00 预热权威值）
+                        if (payload.st_value != null && payload.st_dir != null && payload.st_value > 0) {
+                            if (s.st1) s.st1.update(payload.open, payload.high, payload.low, payload.close);
+                            updateM1STForSymbol(sym, payload.time, payload.st_value, payload.st_dir);
+                            s.m1Frozen = { st_value: payload.st_value, st_dir: payload.st_dir };
+                            s.prev1mDir = payload.st_dir;
+                        }
                         // 行情变动：更新 latestClose，刷新仓位浮盈面板
                         if (s.ctx) s.ctx.latestClose = payload.close;
                         const priceEl = document.getElementById(`price-${sym}`);
@@ -2991,20 +3010,11 @@
                                 refreshPositionPanel(sym, pos);
                             }
                         }
-                        // 1m ST 仅在 M5 收盘刷新（与引擎 kline:5m.m1_st_* 一致）
                         updateSysPanel(sym);
                         return;
                     }
                     if (channel.startsWith('kline:5m:')) {
-                        // 权威 5m 蜡烛收盘定型（覆盖实时聚合的形态），并重置正在形成的桶
-                        if (payload.open != null) {
-                            s.candleSeries.update({
-                                time: payload.time, open: payload.open,
-                                high: payload.high, low: payload.low, close: payload.close,
-                            });
-                        }
-                        s.curM5 = null;
-                        // ── 5m ST：优先用引擎 payload（04:00 预热后的权威 st_dir）──
+                        // 5m 收盘：更新 5m ST 状态 + 粗线阶梯延伸（主图 M1 蜡烛由 kline:1m 负责，1m ST 由 kline:1m 刷新）
                         if (payload.open != null) {
                             let val = payload.st_value;
                             let dir = payload.st_dir;
@@ -3018,15 +3028,9 @@
                                 }
                                 s.st5Dir = dir;
                                 s.m5Frozen = { st_value: val, st_dir: dir, dema20: payload.dema20 ?? s.m5Frozen?.dema20 };
-                                updateM5IndicatorsForSymbol(sym, payload.time);
-                            }
-                            const m1v = payload.m1_st_value;
-                            const m1d = payload.m1_st_dir;
-                            if (m1v != null && m1d != null && m1v > 0) {
-                                s.m1Frozen = { st_value: m1v, st_dir: m1d };
+                                // 5m ST 粗线铺到 1m 轴：用 5m 桶末的 1m 时间
                                 const m1t = payload.m1_bar_time ?? payload.time;
-                                updateM1STForSymbol(sym, bucket5m(m1t), m1v, m1d);
-                                s.prev1mDir = m1d;
+                                updateM5IndicatorsForSymbol(sym, m1t);
                             }
                         }
                         updateSysPanel(sym);
@@ -3121,11 +3125,15 @@
             playPostReloadAlert();
             DEFAULT_SYMBOLS.forEach(drawProposalPriceLines);
             const focusSym = new URLSearchParams(location.search).get('focus')?.toUpperCase();
-            if (focusSym && DEFAULT_SYMBOLS.includes(focusSym)) {
-                setTimeout(() => {
-                    const prop = window.AlphaCell?.phaseForSymbol(focusSym)?.proposal;
-                    focusApprovalCell(focusSym, prop);
-                }, 400);
+            if (focusSym && SYMBOL_UNIVERSE.includes(focusSym)) {
+                if (DEFAULT_SYMBOLS.includes(focusSym)) {
+                    setTimeout(() => {
+                        const prop = window.AlphaCell?.phaseForSymbol(focusSym)?.proposal;
+                        focusApprovalCell(focusSym, prop);
+                    }, 400);
+                } else {
+                    autoAssignSymbolToGrid(focusSym, 'proposal');
+                }
             }
             // ── 十字线联动（悬停任一图，其余三图同步显示十字线）──────
             DEFAULT_SYMBOLS.forEach(sym => wireCrosshairForSymbol(sym));

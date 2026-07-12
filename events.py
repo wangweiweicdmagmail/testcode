@@ -80,6 +80,18 @@ class AgentExecuteNowEvent(Event):
         self.proposal_id = str(proposal_id or "")
 
 
+class EntryExecuteNowEvent(Event):
+    """控制台进场请求立即触发（不等下一根 M1，市价单低延迟进场）。"""
+    TOPIC = "entry.execute.now"
+
+    def __init__(self, symbol: str) -> None:
+        self._ts_event = time.time_ns()
+        self._ts_init = time.time_ns()
+        self._id = UUID4()
+
+        self.symbol = str(symbol).upper()
+
+
 # 订单终态集合（不再活跃），全局共用，避免各模块重复定义
 TERMINAL_STATUS: frozenset[str] = frozenset({
     "FILLED", "CANCELED", "EXPIRED", "REJECTED", "DENIED"

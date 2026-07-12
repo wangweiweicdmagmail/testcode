@@ -234,7 +234,10 @@ class RiskGate:
             qty = self._cfg.fixed_qty
         elif (
             intent.stop_px and float(intent.stop_px) > 0 and intent.ref_price
-            and intent.profile in ("st_super", "agent_proposal")
+            and intent.profile in (
+                "st_super", "agent_proposal",
+                "market_entry", "manual_entry", "ema_entry", "st_entry", "conditional_entry",
+            )
         ):
             qty = self.size_by_stop(intent.ref_price, float(intent.stop_px))
         else:

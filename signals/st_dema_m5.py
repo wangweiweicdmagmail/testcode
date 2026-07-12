@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import redis as _redis
-from nautilus_trader.indicators import AverageTrueRange, DoubleExponentialMovingAverage
+from nautilus_trader.indicators import AverageTrueRange
 from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.enums import OrderSide
 
+from indicators.states import DEMAState
 from signals.base import (
     BarContext,
     IntentAction,
@@ -23,21 +24,7 @@ from signals.base import (
 )
 
 
-class _DEMAState:
-    def __init__(self, period: int = 21):
-        self._dema = DoubleExponentialMovingAverage(period)
-        self._prev: Optional[float] = None
-
-    def update(self, close: float) -> tuple[Optional[float], int]:
-        self._dema.update_raw(close)
-        if not self._dema.initialized:
-            return None, 0
-        cur = self._dema.value
-        slope = 0
-        if self._prev is not None:
-            slope = 1 if cur > self._prev else (-1 if cur < self._prev else 0)
-        self._prev = cur
-        return round(cur, 4), slope
+# DEMA 状态机已合并至 indicators.states.DEMAState（设计原则 #2）。
 
 
 @dataclass(frozen=True)
@@ -62,13 +49,13 @@ class StDemaM5Engine(SignalEngine):
         self._cfg = config
         self._redis = redis
         self._log = log_fn
-        self._dema: dict[str, _DEMAState] = {}
+        self._dema: dict[str, DEMAState] = {}
         self._atr: dict[str, AverageTrueRange] = {}
         self._arm: dict[str, str] = {}
         self._last_close: dict[str, float] = {}
 
     def register_symbol(self, symbol: str) -> None:
-        self._dema[symbol] = _DEMAState(self._cfg.dema_period)
+        self._dema[symbol] = DEMAState(self._cfg.dema_period)
         self._atr[symbol] = AverageTrueRange(self._cfg.atr_period, MovingAverageType.WILDER)
         self._arm[symbol] = "init"
 
@@ -111,7 +98,8 @@ class StDemaM5Engine(SignalEngine):
             return out
 
         self._last_close[sym] = c
-        dema, slope = self._dema[sym].update(c)
+        dema = self._dema[sym].update(c)
+        slope = self._dema[sym].slope
         self._atr[sym].update_raw(h, lo, c)
 
         st = float(bar.get("st_value", 0.0) or 0.0)

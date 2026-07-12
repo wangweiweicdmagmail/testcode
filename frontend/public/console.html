@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>进场控制台 · Entry Console</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c232c; --border: #30363d;
+    --txt: #e6edf3; --muted: #8b949e; --accent: #2f81f7; --green: #3fb950;
+    --red: #f85149; --amber: #d29922; --purple: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .header .meta { color: var(--muted); font-size: 12px; }
+  .header .spacer { flex: 1; }
+  .pill {
+    padding: 3px 9px; border-radius: 10px; font-size: 11px; font-weight: 600;
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .pill.ok { color: var(--green); border-color: var(--green); }
+  .pill.bad { color: var(--red); border-color: var(--red); }
+  .pill.warn { color: var(--amber); border-color: var(--amber); }
+  .nav-links { display: flex; gap: 10px; font-size: 12px; }
+  .kill {
+    background: var(--red); color: #fff; border: none; padding: 7px 16px;
+    border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 12px;
+  }
+  .kill:hover { filter: brightness(1.1); }
+  .main { display: grid; grid-template-columns: 380px 1fr; gap: 14px; padding: 14px; }
+  @media (max-width: 980px) { .main { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 12px 0; color: var(--txt); display: flex; align-items: center; gap: 8px; }
+  .card h2 .count { color: var(--muted); font-weight: 400; font-size: 11px; }
+  label { display: block; color: var(--muted); font-size: 11px; margin: 8px 0 3px; }
+  input, select {
+    width: 100%; background: var(--bg); color: var(--txt); border: 1px solid var(--border);
+    border-radius: 5px; padding: 6px 8px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .seg {
+    display: flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden;
+  }
+  .seg button {
+    flex: 1; background: var(--bg); color: var(--muted); border: none; padding: 7px;
+    cursor: pointer; font-size: 12px; font-weight: 600; font-family: inherit;
+  }
+  .seg button.active.long { background: var(--green); color: #0d1117; }
+  .seg button.active.short { background: var(--red); color: #0d1117; }
+  .method-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 4px 0; }
+  .method-grid button {
+    background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 5px; padding: 8px 6px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .method-grid button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .method-grid button .sub { display: block; font-size: 10px; opacity: 0.8; margin-top: 2px; }
+  .preview {
+    background: var(--bg); border: 1px dashed var(--border); border-radius: 6px;
+    padding: 10px; margin-top: 10px; font-size: 12px;
+  }
+  .preview .line { display: flex; justify-content: space-between; padding: 2px 0; }
+  .preview .line .k { color: var(--muted); }
+  .preview .line .v { font-weight: 600; }
+  .preview .v.long { color: var(--green); } .preview .v.short { color: var(--red); }
+  .submit {
+    width: 100%; margin-top: 10px; background: var(--accent); color: #fff; border: none;
+    padding: 9px; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 13px; font-family: inherit;
+  }
+  .submit:hover { filter: brightness(1.1); }
+  .submit:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:hover td { background: var(--panel2); }
+  .empty { color: var(--muted); text-align: center; padding: 24px; font-style: italic; }
+  .sym { font-weight: 700; }
+  .pos.long { color: var(--green); } .pos.short { color: var(--red); }
+  .num { font-variant-numeric: tabular-nums; font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+  .btn {
+    background: var(--panel2); color: var(--txt); border: 1px solid var(--border);
+    padding: 3px 9px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.danger { color: var(--red); border-color: var(--red); }
+  .btn.confirm { color: var(--green); border-color: var(--green); }
+  .actions { display: flex; gap: 4px; }
+  .state { padding: 2px 7px; border-radius: 9px; font-size: 10px; font-weight: 700; }
+  .state.ARMED { background: rgba(163,113,247,0.18); color: var(--purple); }
+  .state.RESTING { background: rgba(47,129,247,0.18); color: var(--accent); }
+  .state.TRIGGERED { background: rgba(210,153,34,0.2); color: var(--amber); }
+  .toasts { position: fixed; bottom: 16px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 99; }
+  .toast {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    padding: 9px 13px; border-radius: 5px; font-size: 12px; max-width: 380px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); animation: slidein 0.2s ease;
+  }
+  .toast.ok { border-left-color: var(--green); }
+  .toast.err { border-left-color: var(--red); }
+  .toast.warn { border-left-color: var(--amber); }
+  @keyframes slidein { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+  .halted-banner {
+    background: rgba(248,81,73,0.15); border: 1px solid var(--red); color: var(--red);
+    padding: 8px 14px; border-radius: 6px; font-weight: 600; text-align: center; margin-bottom: 12px;
+    display: none;
+  }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+  .checkbox-row input { width: auto; }
+  .checkbox-row label { margin: 0; color: var(--muted); }
+  .method-desc { color: var(--muted); font-size: 11px; margin: 6px 0; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🎯 进场控制台</h1>
+  <span class="pill" id="enginePill">引擎 …</span>
+  <span class="pill" id="envPill">—</span>
+  <span class="meta" id="accountMeta">账户 …</span>
+  <div class="spacer"></div>
+  <div class="nav-links">
+    <a href="index.html">单图</a>
+    <a href="multi.html">四图</a>
+    <a href="indicators.html">指标</a>
+    <a href="proposals.html">审批</a>
+  </div>
+  <button class="kill" id="killBtn" title="取消所有进场单 + 撤所有挂单 + 市价平所有仓 + 熔断">⚠ KILL SWITCH</button>
+</div>
+
+<div style="padding: 0 14px;">
+  <div class="halted-banner" id="haltedBanner">⛔ 风控熔断已触发（risk:halt）— 所有进场被拦截，仅可平仓。</div>
+</div>
+
+<div class="main">
+  <!-- 左：创建进场单 -->
+  <div>
+    <div class="card">
+      <h2>📝 创建进场单</h2>
+      <div class="row">
+        <div>
+          <label>标的</label>
+          <select id="symbol"></select>
+        </div>
+        <div>
+          <label>方向</label>
+          <div class="seg" id="sideSeg">
+            <button data-side="LONG" class="active long">做多 LONG</button>
+            <button data-side="SHORT">做空 SHORT</button>
+          </div>
+        </div>
+      </div>
+
+      <label>进场方法</label>
+      <div class="method-grid" id="methodGrid">
+        <button data-method="market" class="active">市价单<span class="sub">立即市价成交</span></button>
+        <button data-method="manual_limit">手动限价<span class="sub">指定价位 GTC</span></button>
+        <button data-method="ema">EMA20 限价<span class="sub">DEMA20 挂单</span></button>
+        <button data-method="st_limit">超级趋势限价<span class="sub">ST 线挂单</span></button>
+        <button data-method="conditional">条件进场<span class="sub">穿价触发</span></button>
+      </div>
+      <div class="method-desc" id="methodDesc"></div>
+
+      <!-- 方法参数（动态） -->
+      <div id="paramManual">
+        <label>限价价位</label>
+        <input id="limitPrice" type="number" step="0.01" placeholder="如 200.00" />
+      </div>
+      <div id="paramSt" style="display:none">
+        <label>取 ST 哪条线</label>
+        <select id="stField"><option value="value">value（主线）</option><option value="upper">upper</option><option value="lower">lower</option></select>
+      </div>
+      <div id="paramCond" style="display:none">
+        <div class="row">
+          <div>
+            <label>触发类型</label>
+            <select id="trigType"><option value="price_cross">价格穿越 price_cross</option></select>
+          </div>
+          <div>
+            <label>触发方向</label>
+            <select id="trigDir"><option value="up">向上穿（买入触发）</option><option value="down">向下穿（卖出触发）</option></select>
+          </div>
+        </div>
+        <label>触发价位</label>
+        <input id="trigLevel" type="number" step="0.01" placeholder="价格到达该点触发" />
+        <label>有效期（分钟，留空=不过期）</label>
+        <input id="expireMin" type="number" step="1" placeholder="如 120" />
+      </div>
+
+      <div class="row">
+        <div>
+          <label>止损价（以损定量）</label>
+          <input id="stopPrice" type="number" step="0.01" placeholder="如 198.00" />
+        </div>
+        <div>
+          <label>止盈 RR（半仓）</label>
+          <input id="tpRr" type="number" step="0.1" value="2.0" />
+        </div>
+      </div>
+      <div class="checkbox-row">
+        <input id="bypassWindow" type="checkbox" />
+        <label for="bypassWindow">允许在 RTH 黑窗外进场（熔断仍不可绕过）</label>
+      </div>
+      <div class="checkbox-row">
+        <input id="stTrail" type="checkbox" />
+        <label for="stTrail">启用 ST 跟踪止盈（复用 ExitManager：剩余半仓用 M5 SuperTrend 棘轮跟踪）</label>
+      </div>
+
+      <div class="preview" id="preview"><div class="empty">填写参数后将预览 entry / stop / tp / 仓位</div></div>
+      <button class="submit" id="submitBtn">提交进场</button>
+    </div>
+  </div>
+
+  <!-- 右：挂单 + 持仓 + 提案 -->
+  <div>
+    <div class="card">
+      <h2>📋 挂单进场 <span class="count" id="pendingCount"></span></h2>
+      <div id="pendingWrap"><div class="empty">无挂单</div></div>
+    </div>
+    <div class="card">
+      <h2>📊 持仓管理 <span class="count" id="posCount"></span></h2>
+      <div id="posWrap"><div class="empty">无持仓</div></div>
+    </div>
+    <div class="card">
+      <h2>📨 信号提案（审批） <span class="count" id="propCount"></span>
+        <button class="btn danger" id="clearPropBtn" style="margin-left:auto;">清空全部</button>
+      </h2>
+      <div id="propWrap"><div class="empty">无待审批提案</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+const SYMBOLS = ["QQQ","NVDA","AAPL","TSLA","GOOG","AVGO","SPY","PLTR","AMZN","AMD","META","MSFT","TSM","MU","NFLX"];
+const $ = (id) => document.getElementById(id);
+const state = { symbol: "", side: "LONG", method: "market", ctx: null, live: false };
+
+// ── 初始化 ──────────────────────────────────────────────────────
+(function init() {
+  const q = new URLSearchParams(location.search).get("symbol");
+  state.symbol = (q || localStorage.getItem("consoleSymbol") || "QQQ").toUpperCase();
+  $("symbol").value = state.symbol;
+  loadSymbols();
+  bindForm();
+  refreshAll();
+  connectWS();
+  setInterval(refreshAll, 10000);
+})();
+
+async function loadSymbols() {
+  let symbols = SYMBOLS;
+  try {
+    const r = await fetch("/api/config/public");
+    const j = await r.json();
+    if (Array.isArray(j.symbols) && j.symbols.length) symbols = j.symbols.map(s => String(s).toUpperCase());
+  } catch {}
+  $("symbol").innerHTML = symbols.map(s => `<option value="${s}">${s}</option>`).join("");
+  if (state.symbol) $("symbol").value = state.symbol;
+}
+
+async function loadSettings() {
+  try {
+    const r = await fetch(`/api/settings/${state.symbol}`);
+    const s = await r.json();
+    $("stTrail").checked = (Number(s.trail_mode) === 2);
+  } catch {}
+}
+
+async function toggleStTrail(e) {
+  const mode = e.target.checked ? 2 : 0;
+  try {
+    await fetch(`/api/settings/${state.symbol}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trail_mode: mode }),
+    });
+    toast(`ST 跟踪止盈 ${e.target.checked ? "已开启（M5-ST，由 ExitManager 棘轮）" : "已关闭"}`, "ok");
+  } catch (err) { toast("ST 跟踪设置失败", "err"); }
+}
+
+function bindForm() {
+  $("symbol").addEventListener("change", (e) => {
+    state.symbol = e.target.value.trim().toUpperCase();
+    localStorage.setItem("consoleSymbol", state.symbol);
+    loadContext();
+  });
+  $("sideSeg").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    state.side = b.dataset.side;
+    $("sideSeg").querySelectorAll("button").forEach(x => x.classList.remove("active", "long", "short"));
+    b.classList.add("active", state.side === "LONG" ? "long" : "short");
+    renderPreview();
+  });
+  $("methodGrid").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    state.method = b.dataset.method;
+    $("methodGrid").querySelectorAll("button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    toggleMethodParams();
+    renderPreview();
+  });
+  ["limitPrice","stField","trigType","trigDir","trigLevel","expireMin","stopPrice","tpRr","bypassWindow"]
+    .forEach(id => $(id).addEventListener("input", renderPreview));
+  $("submitBtn").addEventListener("click", submitEntry);
+  $("killBtn").addEventListener("click", killSwitch);
+  $("stTrail").addEventListener("change", toggleStTrail);
+  $("clearPropBtn").addEventListener("click", clearProposals);
+  $("pendingWrap").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    if (b.dataset.act === "cancel") cancelEntry(b.dataset.handle, b.dataset.sym);
+    else if (b.dataset.act === "modify") modifyEntry(b.dataset.handle);
+  });
+}
+
+const METHOD_DESC = {
+  market: "以当前最新价立即市价进场（延迟行情下自动升级为 marketable LIMIT）。成交后自动挂 bracket（止损+止盈）。",
+  manual_limit: "在指定价位挂 GTC 限价单，成交后自动挂 bracket（止损+止盈）。适合精确点位进场。",
+  ema: "以当前 DEMA20（≈EMA20）为挂单价位挂 GTC 限价。回踩均线进场的常用方式。",
+  st_limit: "以当前 SuperTrend 线价位挂 GTC 限价。趋势线附近限价进场。",
+  conditional: "不立即下单。价格穿越触发价时转市价进场（每根 M1 判定）。条件触发进场。",
+};
+function toggleMethodParams() {
+  const m = state.method;
+  $("paramManual").style.display = (m === "manual_limit") ? "" : "none";
+  $("paramSt").style.display = (m === "st_limit") ? "" : "none";
+  $("paramCond").style.display = (m === "conditional") ? "" : "none";
+  $("methodDesc").textContent = METHOD_DESC[m] || "";
+}
+
+// ── 预览 ────────────────────────────────────────────────────────
+function computeEntry() {
+  const ctx = state.ctx; if (!ctx) return null;
+  const side = state.side; const m = state.method;
+  const rr = parseFloat($("tpRr").value) || 2.0;
+  let entry = 0, refLabel = "";
+  if (m === "market") { entry = ctx.last_close || 0; refLabel = "最新价"; }
+  else if (m === "manual_limit") { entry = parseFloat($("limitPrice").value) || 0; refLabel = "手动限价"; }
+  else if (m === "ema") { entry = ctx.dema20 || 0; refLabel = "DEMA20"; }
+  else if (m === "st_limit") { const f = $("stField").value; entry = (ctx.supertrend && ctx.supertrend[f]) || (ctx.supertrend && ctx.supertrend.value) || 0; refLabel = `ST.${f}`; }
+  else if (m === "conditional") { entry = parseFloat($("trigLevel").value) || 0; refLabel = "触发价"; }
+  if (!entry || entry <= 0) return { entry: 0, side, refLabel, reason: m === "market" ? "等待最新价（无 M1 行情）" : (m === "ema" ? "等待 DEMA20 指标" : (m === "st_limit" ? "等待 ST 指标" : "填写价位")) };
+  const sign = side === "LONG" ? 1 : -1;
+  const stopIn = parseFloat($("stopPrice").value);
+  if (!stopIn || stopIn <= 0) return { entry, side, refLabel, reason: "填写止损价（以损定量）" };
+  if ((sign === 1 && stopIn >= entry) || (sign === -1 && stopIn <= entry))
+    return { entry, side, refLabel, reason: `止损价须在入场价之${side === "LONG" ? "下" : "上"}` };
+  const risk = Math.abs(entry - stopIn);   // 每股风险
+  const stop = +stopIn.toFixed(2);
+  const tp = +(entry + sign * risk * rr).toFixed(2);
+  // 以损定量：仓位 = (净值 × risk_pct) / 每股风险
+  let qty = 0;
+  if (ctx.fixed_qty > 0) qty = ctx.fixed_qty;
+  else if (ctx.equity > 0 && risk > 0) {
+    qty = Math.floor((ctx.equity * ctx.risk_pct) / risk);
+    if (ctx.max_position_pct > 0) {
+      const cap = Math.floor((ctx.equity * ctx.max_position_pct) / entry);
+      if (cap > 0) qty = Math.min(qty, cap);
+    }
+  }
+  if (qty < (ctx.min_qty || 1)) qty = 0;
+  return { entry, stop, tp, qty, side, refLabel, rr, risk };
+}
+
+function renderPreview() {
+  const p = computeEntry();
+  const el = $("preview");
+  if (!p || !p.entry) {
+    el.innerHTML = `<div class="empty">${(p && p.reason) ? p.reason : "填写参数后将预览"}</div>`;
+    return;
+  }
+  const cls = p.side === "LONG" ? "long" : "short";
+  el.innerHTML = `
+    <div class="line"><span class="k">进场价 (${p.refLabel})</span><span class="v num">${p.entry.toFixed(2)}</span></div>
+    <div class="line"><span class="k">止损</span><span class="v num">${p.stop.toFixed(2)} <span class="k">(每股风险 $${p.risk.toFixed(2)})</span></span></div>
+    <div class="line"><span class="k">止盈（半仓 RR ${p.rr}）</span><span class="v num">${p.tp.toFixed(2)} <span class="k">→ 半仓止盈后剩余用 ST 跟踪</span></span></div>
+    <div class="line"><span class="k">方向</span><span class="v ${cls}">${p.side}</span></div>
+    <div class="line"><span class="k">风险预算</span><span class="v num">$${(state.ctx.equity*state.ctx.risk_pct).toFixed(2)} <span class="k">(${(state.ctx.risk_pct*100).toFixed(2)}% 净值)</span></span></div>
+    <div class="line"><span class="k">预估仓位</span><span class="v num">${p.qty > 0 ? p.qty + " 股" : "⚠ 定量过小（被 min_qty 拦截）"}</span></div>
+    ${state.ctx && state.ctx.fixed_qty > 0 ? '<div class="line"><span class="k">⚠</span><span class="v" style="color:var(--amber)">测试固定仓位模式 AUTO_FIXED_QTY='+state.ctx.fixed_qty+'</span></div>' : ''}
+  `;
+}
+
+// ── 提交进场 ────────────────────────────────────────────────────
+async function submitEntry() {
+  const p = computeEntry();
+  if (!p || !p.entry) { toast("请先填写有效参数", "err"); return; }
+  if (!p.qty && state.method !== "conditional") { if (!confirm("预估仓位为 0（可能被 min_qty/风控拦截），仍提交？")) return; }
+  const sym = state.symbol;
+  const body = {
+    method: state.method, side: state.side,
+    stop_price: p.stop,
+    tp_rr: parseFloat($("tpRr").value),
+    bypass_window: $("bypassWindow").checked,
+    operator: "console",
+  };
+  if (state.method === "manual_limit") body.limit_price = p.entry;
+  if (state.method === "st_limit") body.st_field = $("stField").value;
+  if (state.method === "conditional") {
+    const min = parseInt($("expireMin").value, 10);
+    body.trigger = { type: $("trigType").value, direction: $("trigDir").value, level: p.entry };
+    if (min > 0) body.expire_ts = Math.floor(Date.now() / 1000) + min * 60;
+  }
+  try {
+    const r = await fetch(`/api/enter/${sym}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (r.ok && j.ok) {
+      toast(`✓ 进场请求已送达 ${sym} (${state.method})，引擎下一根 M1 内处理`, "ok");
+      setTimeout(refreshPending, 800);
+    } else {
+      toast(`✗ 进场失败: ${j.error || r.status}`, "err");
+    }
+  } catch (e) { toast(`✗ 网络错误: ${e.message}`, "err"); }
+}
+
+// ── 数据刷新 ────────────────────────────────────────────────────
+async function refreshAll() { await loadContext(); loadSettings(); refreshPending(); refreshPositions(); refreshProposals(); refreshHeader(); }
+
+async function loadContext() {
+  try {
+    const r = await fetch(`/api/entry-context/${state.symbol}`);
+    state.ctx = await r.json();
+    $("envPill").textContent = `env: ${state.ctx.trading_env || "?"}` + (state.ctx.live_orders_allowed ? " · LIVE" : " · 观察模式");
+    $("envPill").className = "pill " + (state.ctx.live_orders_allowed ? "ok" : "warn");
+    $("haltedBanner").style.display = state.ctx.halted ? "" : "none";
+    renderPreview();
+  } catch (e) { /* 引擎/Redis 未就绪 */ }
+}
+
+async function refreshHeader() {
+  try {
+    const [engR, acctR] = await Promise.all([fetch("/api/engine-status"), fetch("/api/account")]);
+    const eng = await engR.json();
+    const acct = await acctR.json();
+    const online = eng && eng.online !== false;
+    $("enginePill").textContent = online ? "引擎在线" : "引擎离线";
+    $("enginePill").className = "pill " + (online ? "ok" : "bad");
+    let total = 0, free = 0;
+    try { const b = (acct.balances || []).find(x => x.currency === "USD"); total = (b && b.total) || 0; free = (b && b.free) || 0; } catch {}
+    $("accountMeta").innerHTML = total
+      ? `净值 <b style="color:var(--txt)">$${total.toLocaleString(undefined,{maximumFractionDigits:0})}</b> · 可用 <b style="color:var(--green)">$${free.toLocaleString(undefined,{maximumFractionDigits:0})}</b>`
+      : "账户 …";
+  } catch {}
+}
+
+async function refreshPending() {
+  try {
+    const r = await fetch("/api/pending-entries");
+    const list = await r.json();
+    $("pendingCount").textContent = list.length ? `(${list.length})` : "";
+    if (!list.length) { $("pendingWrap").innerHTML = '<div class="empty">无挂单（RESTING 限价 / ARMED 条件单）</div>'; return; }
+    $("pendingWrap").innerHTML = `<table>
+      <thead><tr><th>标的</th><th>方法</th><th>方向</th><th>状态</th><th>挂单价/触发</th><th>止损</th><th>止盈</th><th>数量</th><th>操作</th></tr></thead>
+      <tbody>${list.map(renderPendingRow).join("")}</tbody></table>`;
+  } catch {}
+}
+
+function ticketPrice(t) {
+  if (t.state === "ARMED" && t.params && t.params.trigger) return `▶ ${t.params.trigger.direction} ${(+t.params.trigger.level).toFixed(2)}`;
+  const lp = (t.intent_meta && t.intent_meta.limit_price) || (t.params && t.params.limit_price);
+  return lp ? (+lp).toFixed(2) : "—";
+}
+function renderPendingRow(t) {
+  const side = (t.params && t.params.side) || t.side || "";
+  const sideCls = side === "BUY" || side === "LONG" ? "long" : "short";
+  const stop = (t.intent_meta && t.intent_meta.stop) || (t.params && t.params.stop_px);
+  const tp = (t.intent_meta && t.intent_meta.tp);
+  const handle = t.ticket_id ? `ticket_id=${t.ticket_id}` : `entry_coid=${t.entry_coid}`;
+  return `<tr>
+    <td class="sym">${t.symbol}</td>
+    <td>${(t.params && t.params.method) || t.method}</td>
+    <td class="pos ${sideCls}">${side}</td>
+    <td><span class="state ${t.state}">${t.state}</span></td>
+    <td class="num">${ticketPrice(t)}</td>
+    <td class="num">${stop ? (+stop).toFixed(2) : "—"}</td>
+    <td class="num">${tp ? (+tp).toFixed(2) : "—"}</td>
+    <td class="num">${t.qty || "—"}</td>
+    <td class="actions">
+      <button class="btn" data-handle="${handle}" data-sym="${t.symbol}" data-act="modify">改价</button>
+      <button class="btn danger" data-handle="${handle}" data-sym="${t.symbol}" data-act="cancel">撤单</button>
+    </td></tr>`;
+}
+function attr(s) { return JSON.stringify(s); }
+
+async function refreshPositions() {
+  try {
+    const [brokerR, redisR] = await Promise.all([
+      fetch("/api/positions").then(r => r.json()).catch(() => null),
+      fetch("/api/positions-redis").then(r => r.json()).catch(() => null),
+    ]);
+    const broker = Array.isArray(brokerR) ? brokerR : [];
+    const redisArr = (redisR && redisR.positions) || (Array.isArray(redisR) ? redisR : []);
+    const stopBySym = {};
+    redisArr.forEach(p => { if (p && p.symbol) stopBySym[p.symbol.toUpperCase()] = p; });
+    // broker 是存在性来源（真实 IBKR 全部持仓）；broker 不可用时退回 Redis 快照
+    const source = broker.length ? broker : redisArr;
+    const open = source.filter(p => p && Math.abs(+p.quantity) > 0).map(p => {
+      const sym = (p.symbol || "").toUpperCase();
+      const r = stopBySym[sym] || {};
+      return {
+        symbol: sym,
+        quantity: +p.quantity,
+        entry_price: p.avg_px_open != null ? +p.avg_px_open : (+p.entry_price || 0),
+        stop_loss: r.stop_loss != null ? r.stop_loss : (p.stop_loss != null ? p.stop_loss : null),
+        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : (r.unrealized_pnl != null ? r.unrealized_pnl : null),
+      };
+    });
+    $("posCount").textContent = open.length ? `(${open.length})` : "";
+    if (!open.length) { $("posWrap").innerHTML = '<div class="empty">无持仓</div>'; return; }
+    $("posWrap").innerHTML = `<table>
+      <thead><tr><th>标的</th><th>方向</th><th>数量</th><th>入场</th><th>止损</th><th>浮盈</th><th>操作</th></tr></thead>
+      <tbody>${open.map(renderPosRow).join("")}</tbody></table>`;
+  } catch {}
+}
+function renderPosRow(p) {
+  const long = +p.quantity > 0;
+  const upnl = (p.unrealized_pnl != null) ? (+p.unrealized_pnl) : null;
+  return `<tr>
+    <td class="sym">${p.symbol}</td>
+    <td class="pos ${long?"long":"short"}">${long?"LONG":"SHORT"}</td>
+    <td class="num">${Math.abs(+p.quantity)}</td>
+    <td class="num">${(+p.entry_price).toFixed(2)}</td>
+    <td class="num">${p.stop_loss ? (+p.stop_loss).toFixed(2) : "—"}</td>
+    <td class="num" style="color:${upnl==null?"var(--muted)":(upnl>=0?"var(--green)":"var(--red)")}">${upnl==null?"—":upnl>=0?"+":""}${upnl.toFixed(2)}</td>
+    <td class="actions">
+      <button class="btn" onclick="modifyStop('${p.symbol}', ${p.stop_loss||0})">改止损</button>
+      <button class="btn danger" onclick="closePos('${p.symbol}')">平仓</button>
+    </td></tr>`;
+}
+
+function formatTime(ts) {
+  if (!ts) return "—";
+  try { return new Date(ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }); } catch { return "—"; }
+}
+function elapsedMin(ts) {
+  if (!ts) return "—";
+  const m = Math.floor((Date.now() / 1000 - ts) / 60);
+  if (m < 1) return "<1分";
+  if (m < 60) return m + "分";
+  return Math.floor(m / 60) + "时" + (m % 60) + "分";
+}
+function elapsedColor(ts) {
+  if (!ts) return "var(--muted)";
+  const m = (Date.now() / 1000 - ts) / 60;
+  if (m >= 15) return "var(--red)";      // ≥15 分：明显过期，建议丢弃
+  if (m >= 5) return "var(--amber)";     // 5–15 分：新鲜度下降
+  return "var(--muted)";
+}
+
+async function refreshProposals() {
+  try {
+    const r = await fetch("/api/proposals?status=pending&limit=20");
+    const list = await r.json();
+    const arr = (list && list.proposals) || (Array.isArray(list) ? list : []);
+    $("propCount").textContent = arr.length ? `(${arr.length})` : "";
+    if (!arr.length) { $("propWrap").innerHTML = '<div class="empty">无待审批提案（st_super 信号自动生成）</div>'; return; }
+    $("propWrap").innerHTML = `<table>
+      <thead><tr><th>标的</th><th>方向</th><th>入场</th><th>止损</th><th>止盈</th><th>置信</th><th>信号时间</th><th>已过</th><th>操作</th></tr></thead>
+      <tbody>${arr.map(renderPropRow).join("")}</tbody></table>`;
+  } catch {}
+}
+function renderPropRow(p) {
+  const long = (p.side || "").toUpperCase() === "LONG";
+  const entry = p.entry_price || p.reclaim_close;
+  return `<tr>
+    <td class="sym">${p.symbol}</td>
+    <td class="pos ${long?"long":"short"}">${p.side}</td>
+    <td class="num">${entry?(+entry).toFixed(2):"—"}</td>
+    <td class="num">${p.stop_price?(+p.stop_price).toFixed(2):"—"}</td>
+    <td class="num">${p.tp_price?(+p.tp_price).toFixed(2):"—"}</td>
+    <td class="num">${p.confidence!=null?(+p.confidence).toFixed(2):"—"}</td>
+    <td class="num">${formatTime(p.created_at)}</td>
+    <td class="num" style="color:${elapsedColor(p.created_at)};font-weight:600">${elapsedMin(p.created_at)}</td>
+    <td class="actions">
+      <button class="btn confirm" onclick="decideProposal('${p.proposal_id}','approved_live')">实盘</button>
+      <button class="btn" onclick="decideProposal('${p.proposal_id}','approved_observe')">观察</button>
+      <button class="btn danger" onclick="decideProposal('${p.proposal_id}','rejected')">拒绝</button>
+    </td></tr>`;
+}
+
+// ── 操作 ────────────────────────────────────────────────────────
+async function cancelEntry(handleStr, sym) {
+  if (!confirm(`撤单 ${sym}？`)) return;
+  const body = parseHandle(handleStr); body.symbol = sym; body.action = undefined;
+  await postJson("/api/entry-cancel", body) && toast(`✓ 撤单请求已送达 ${sym}`, "ok");
+  setTimeout(refreshPending, 600);
+}
+async function modifyEntry(handleStr) {
+  const price = prompt("新价位："); if (!price) return;
+  const body = parseHandle(handleStr); body.price = parseFloat(price);
+  await postJson("/api/entry-modify", body) && toast(`✓ 改价请求已送达`, "ok");
+  setTimeout(refreshPending, 600);
+}
+function parseHandle(s) {
+  const out = {}; s.split(",").map(x=>x.trim()).forEach(kv => {
+    const [k,v] = kv.split("="); if (k) out[k.trim()] = (v||"").trim();
+  }); return out;
+}
+async function modifyStop(sym, cur) {
+  const price = prompt(`修改 ${sym} 止损价（当前 ${cur||"—"}）：`); if (!price) return;
+  const r = await fetch(`/api/modify-stop/${sym}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ price: parseFloat(price) }) });
+  const j = await r.json(); toast(r.ok && !j.error ? `✓ ${sym} 止损改价已送达` : `✗ ${j.error||"失败"}`, r.ok?"ok":"err");
+}
+async function closePos(sym) {
+  if (!confirm(`平仓 ${sym}？`)) return;
+  const r = await fetch(`/api/position/${sym}`, { method: "DELETE" });
+  const j = await r.json(); toast(r.ok && j.ok ? `✓ ${sym} 平仓请求已送达` : `✗ ${j.error||"失败"}`, r.ok?"ok":"err");
+  setTimeout(refreshPositions, 800);
+}
+async function decideProposal(pid, decision) {
+  const r = await fetch(`/api/proposals/${pid}/decision`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ decision, approver: "console" }) });
+  const j = await r.json(); toast(r.ok && !j.error ? `✓ 提案 ${pid} → ${decision}` : `✗ ${j.error||"失败"}`, r.ok?"ok":"err");
+  setTimeout(refreshProposals, 600);
+}
+
+async function clearProposals() {
+  if (!confirm("清空所有待审批信号提案？（已批准 / 已执行的不受影响）")) return;
+  try {
+    const r = await fetch("/api/proposals/clear", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator: "console", reason: "console_clear" }),
+    });
+    const j = await r.json();
+    toast(r.ok && j.ok ? `✓ 已清除 ${j.cleared || 0} 个提案` : `✗ ${j.error || "失败"}`, r.ok ? "ok" : "err");
+    setTimeout(refreshProposals, 500);
+  } catch (e) { toast("清空失败: " + e.message, "err"); }
+}
+async function killSwitch() {
+  if (!confirm("⚠ KILL SWITCH：取消所有进场 + 撤所有挂单 + 市价平所有仓 + 触发熔断。确认？")) return;
+  if (!confirm("再次确认执行全局清仓？")) return;
+  const r = await fetch("/api/close-all", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ reason: "console_kill" }) });
+  const j = await r.json(); toast(r.ok ? "⛔ KILL SWITCH 已触发" : `✗ ${j.error||"失败"}`, r.ok?"warn":"err");
+  setTimeout(refreshAll, 1000);
+}
+async function postJson(url, body) {
+  try {
+    const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok || !j.ok) { toast(`✗ ${j.error || r.status}`, "err"); return false; }
+    return true;
+  } catch (e) { toast(`✗ ${e.message}`, "err"); return false; }
+}
+
+// ── WebSocket ───────────────────────────────────────────────────
+function connectWS() {
+  let ws;
+  try { ws = new WebSocket(`ws://${location.host}`); } catch (e) { return; }
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    const ch = m.channel, d = m.data || {};
+    if (ch === "entry:update") { refreshPending(); }
+    else if (ch === "auto:signal") {
+      if ((d.action||"").startsWith("entry_")) { refreshPending(); toastEntrySignal(d); }
+      else if (d.action === "would_open" || d.action === "open" || d.action === "unit_stop") { refreshPositions(); }
+    }
+    else if (ch === "position:update") { refreshPositions(); }
+    else if (ch === "proposal:update") { refreshProposals(); }
+    else if (ch === "risk:update") { loadContext(); }
+    else if (ch === "account:update") { refreshHeader(); }
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+}
+function toastEntrySignal(d) {
+  const map = { entry_armed:["ok","进场单已建立"], entry_triggered:["warn","条件进场已触发"], entry_filled:["ok","进场已成交"], entry_canceled:["warn","进场已撤"], entry_expired:["warn","条件票已过期"], entry_modified:["ok","挂单已改价"], entry_rejected:["err",`进场被拒：${d.reason||""}`], entry_canceled:["warn","进场已撤"] };
+  const [type, msg] = map[d.action] || ["ok", d.action];
+  toast(`${d.symbol||""} ${msg}`, type);
+}
+
+// ── Toast ───────────────────────────────────────────────────────
+function toast(msg, type="ok") {
+  const el = document.createElement("div");
+  el.className = "toast " + type; el.textContent = msg;
+  $("toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity 0.3s"; setTimeout(() => el.remove(), 300); }, 4500);
+}
+</script>
+</body>
+</html>

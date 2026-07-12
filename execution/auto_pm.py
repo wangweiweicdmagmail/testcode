@@ -18,7 +18,7 @@ from nautilus_trader.trading.strategy import Strategy
 from events import TERMINAL_STATUS
 from execution.models import Unit, UnitState
 from portfolio.order_policy import data_state_from_env, decide_entry_order, stop_on_wrong_side
-from portfolio.ib_orders import build_marketable_order
+from portfolio.ib_orders import build_marketable_order, build_resting_limit
 from portfolio.config import ExecutionConfig
 from signals.base import IntentAction, PositionContext, TradeIntent
 
@@ -80,7 +80,7 @@ class AutoPositionManager:
             pass
 
     # ── 执行意图 ──────────────────────────────────────────────────────
-    def execute_enter(self, intent: TradeIntent, qty: int, mode: str, live: bool) -> None:
+    def execute_enter(self, intent: TradeIntent, qty: int, mode: str, live: bool) -> Optional[str]:
         sym = intent.symbol
         if not live:
             if intent.profile != "opening_breakout":
@@ -90,8 +90,41 @@ class AutoPositionManager:
                     f"[PM] {sym}: 开盘突破观察 qty={qty} {intent.side.name} "
                     f"stop≈{intent.stop_px} tp≈{intent.tp_px}"
                 )
-            return
-        self._submit_entry(sym, intent, qty)
+            return None
+        return self._submit_entry(sym, intent, qty)
+
+    def _check_order_accepted_async(self, sym: str, coid: str) -> None:
+        """submit 后异步核对 IBKR 是否真接受。
+
+        IBKR 的 order error（如 10226 faMethod 无效）NautilusTrader 不事件化，
+        on_order_rejected 收不到——submit 后看似成功但 IBKR 已静默拒。
+        此处 2.5s 后查 order.status：ACCEPTED/PENDING=IBKR 接受；
+        仍 INITIALIZED/CANCELLED/REJECTED=被拒，提示查 ExecClient error code。
+        """
+        import threading
+        from nautilus_trader.model.identifiers import ClientOrderId
+
+        def _check():
+            import time as _t
+            _t.sleep(2.5)
+            try:
+                order = self._host.cache.order(ClientOrderId(coid))
+                if order is None:
+                    self._host.log.warning(
+                        f"[PM] ⚠️ {sym} coid={coid} 提交后 cache 无记录（IBKR 可能拒，查 ExecClient error）"
+                    )
+                    return
+                st = order.status.name  # ACCEPTED / PENDING / REJECTED / ...
+                if st in ("ACCEPTED", "PENDING"):
+                    self._host.log.info(f"[PM] ✓ {sym} coid={coid} IBKR 已接受 status={st}")
+                else:
+                    self._host.log.warning(
+                        f"[PM] ⚠️ {sym} coid={coid} 提交2.5s后 status={st}（IBKR 未接受，查 ExecClient error code）"
+                    )
+            except Exception as e:
+                self._host.log.warning(f"[PM] {sym} order 状态核对异常: {e}")
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def execute_exit(self, intent: TradeIntent, mode: str, live: bool) -> None:
         sym = intent.symbol
@@ -140,20 +173,43 @@ class AutoPositionManager:
                 self._on_proposal_exec(pid, "submit_failed", {"reason": str(e)})
             return
 
-        entry, decision = build_marketable_order(
-            self._host.order_factory,
-            instrument=instrument,
-            instrument_id=iid,
-            side=intent.side,
-            qty=qty,
-            ref_price=ref_px,
-            tags=self._fa_tags(),
-            log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
-        )
-        if decision.use_limit:
-            self._host.log.info(
-                f"[PM] {sym}: 入场 {decision.reason} @ {decision.limit_price} (ref={ref_px})"
+        # 控制台限价进场（manual/EMA/ST）：meta 携带 resting_limit_price → 挂 GTC 限价；
+        # 否则按行情类型走 MARKET / marketable DAY-LMT（信号链路既有路径）。
+        resting_raw = intent.meta.get("resting_limit_price")
+        try:
+            resting_price = float(resting_raw) if resting_raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            resting_price = 0.0
+        is_resting = resting_price > 0
+        if is_resting:
+            entry = build_resting_limit(
+                self._host.order_factory,
+                instrument=instrument,
+                instrument_id=iid,
+                side=intent.side,
+                qty=qty,
+                limit_price=resting_price,
+                tags=self._fa_tags(),
+                log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
             )
+            self._host.log.info(
+                f"[PM] {sym}: 入场 resting_limit GTC @ {resting_price} (ref={ref_px})"
+            )
+        else:
+            entry, decision = build_marketable_order(
+                self._host.order_factory,
+                instrument=instrument,
+                instrument_id=iid,
+                side=intent.side,
+                qty=qty,
+                ref_price=ref_px,
+                tags=self._fa_tags(),
+                log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
+            )
+            if decision.use_limit:
+                self._host.log.info(
+                    f"[PM] {sym}: 入场 {decision.reason} @ {decision.limit_price} (ref={ref_px})"
+                )
         unit = Unit(
             sym=sym, seq=intent.seq, side=intent.side,
             state=UnitState.PENDING_ENTRY, qty=qty,
@@ -178,17 +234,69 @@ class AutoPositionManager:
         self._host.submit_order(entry)
         self._journal_map_coid(unit.entry_coid, pid)
         coid = unit.entry_coid
+        # submit 后异步核对 IBKR 是否真接受（10226 等 error 不事件化，需主动查 order 状态）
+        self._check_order_accepted_async(sym, coid)
         self._publish(sym, "open", "live", {
             "side": intent.side.name, "seq": intent.seq, "qty": qty,
             "entry": round(intent.ref_price, 2),
             "stop": intent.stop_px, "tp": intent.tp_px,
             "proposal_id": pid or None,
+            "resting": is_resting,
         })
         self._host.log.info(
             f"[PM] ✓ {sym}: 开仓单已提交 coid={coid} {intent.side.name} qty={qty} "
             f"proposal={pid or '—'}"
         )
         self._persist(sym)
+        return unit.entry_coid
+
+    def cancel_pending_entry(self, sym: str, coid: str) -> dict:
+        """取消一张挂单中的限价入场单（控制台用户主动撤）。
+
+        Unit 已在 PENDING_ENTRY；IBKR 端的 cancel/reject 也由 on_order_terminal 处理。
+        本方法只补"用户主动撤"路径，撤后单元作废、索引清理、publish entry_canceled。
+        """
+        try:
+            o = self._host.cache.order(ClientOrderId(coid))
+        except Exception:
+            o = None
+        status = getattr(o.status, "name", "") if o else ""
+        if o is not None and status not in TERMINAL_STATUS and o.is_open:
+            try:
+                self._host.cancel_order(o)
+            except Exception as e:
+                self._host.log.warning(f"[PM] {sym}: 撤挂单失败 {coid}: {e}")
+        unit = self._unit_by_coid(sym, coid)
+        if unit and unit.state == UnitState.PENDING_ENTRY:
+            unit.state = UnitState.CLOSED
+            self._host.log.info(f"[PM] {sym}: 主动撤挂单入场 {coid}")
+        self._coid_index.pop(coid, None)
+        self._persist(sym)
+        self._publish(sym, "entry_canceled", "live", {"client_order_id": coid})
+        return {"status": "canceled", "client_order_id": coid, "order_status": status}
+
+    def modify_pending_entry(self, sym: str, coid: str, price: float) -> dict:
+        """改挂单限价入场价（控制台用户主动改价）。"""
+        try:
+            o = self._host.cache.order(ClientOrderId(coid))
+        except Exception:
+            return {"error": f"找不到订单 {coid}"}
+        if o is None:
+            return {"error": f"找不到订单 {coid}"}
+        status = getattr(o.status, "name", "")
+        if status in TERMINAL_STATUS:
+            return {"error": f"订单 {coid} 已终态 {status}"}
+        instrument = self._host.cache.instrument(o.instrument_id)
+        if instrument is None:
+            return {"error": "合约未加载"}
+        new_price = instrument.make_price(Decimal(str(price)))
+        try:
+            self._host.modify_order(o, price=new_price, trigger_price=None)
+        except Exception as e:
+            self._host.log.error(f"[PM] {sym}: 改挂单价失败 {coid}: {e}")
+            return {"error": str(e)}
+        self._host.log.info(f"[PM] {sym}: 改挂单入场 {coid} → {new_price}")
+        return {"status": "modified", "client_order_id": coid, "price": str(new_price)}
 
     def close_all(self, sym: str, reason: str) -> None:
         iid = self._iid_map[sym]
@@ -494,11 +602,15 @@ class AutoPositionManager:
             self._persist(sym)
             return
         if stop and stop.is_open and instrument and remaining > 0:
+            # 移保本但不放松：ExitManager(ST 跟踪)可能已把止损棘轮上移 → 取较紧者
+            current_tp = float(stop.trigger_price) if stop.trigger_price else unit.entry_px
+            be = round(unit.entry_px, 2)
+            new_tp = max(current_tp, be) if unit.side == OrderSide.BUY else min(current_tp, be)
             try:
                 self._host.modify_order(
                     order=stop,
                     quantity=instrument.make_qty(Decimal(str(remaining))),
-                    trigger_price=instrument.make_price(Decimal(str(round(unit.entry_px, 2)))),
+                    trigger_price=instrument.make_price(Decimal(str(new_tp))),
                 )
             except Exception as e:
                 self._host.log.error(f"[PM] {sym}: 移保本失败: {e}")
@@ -881,7 +993,11 @@ class AutoPositionManager:
         payload: dict = {}
         if self._cfg.fa_group:
             payload["faGroup"] = self._cfg.fa_group
-            payload["faMethod"] = self._cfg.fa_method
+            # faMethod 仅在显式指定时附加：FA Group 有自己的默认 allocation method，
+            # 带 faMethod 值反而被 IBKR 拒（10226/321 "财务顾问方式无效"）。
+            # 留空让 IBKR 用 group 默认 method（实测 code 2184 FA 分配生效）。
+            if self._cfg.fa_method:
+                payload["faMethod"] = self._cfg.fa_method
         if oca_group:
             payload["ocaGroup"] = oca_group
             payload["ocaType"] = 1  # One-Cancels-All（官方 OCA 模式）

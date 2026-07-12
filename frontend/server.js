@@ -316,7 +316,7 @@ function getETOffsetSec() {
 
 
 // 静态文件服务
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), { index: "console.html" }));
 app.use(express.json());
 
 const ENGINE_HEARTBEAT_MAX_AGE_S = parseInt(process.env.ENGINE_HEARTBEAT_MAX_AGE_S || "30", 10);
@@ -352,6 +352,7 @@ app.get("/api/config/public", (req, res) => {
     res.json({
         api_auth_required: API_AUTH_ENFORCED,
         alpha_symbols: DEFAULT_ALPHA_SYMBOLS,
+        symbols: Object.keys(SYMBOL_MAP),
         bind_host: HOST,
         trading_env: TRADING_ENV,
         live_trading_allowed: LIVE_TRADING_ALLOWED,
@@ -719,7 +720,7 @@ async function usesAutoPm(symbol) {
         const raw = await redis.get(`settings:${symbol}`);
         if (!raw) return false;
         const s = JSON.parse(raw);
-        return !!(s.auto_strategy || s.opening_breakout_live);
+        return !!s.auto_strategy;
     } catch {
         return false;
     }
@@ -732,6 +733,172 @@ async function routeAutoPmClose(symbol, reason = 'ui_close') {
     logKey("AutoPM", "info", `平仓请求已写入 Redis auto:close:${symbol}`, { reason });
 }
 
+
+
+// ── 控制台进场（Entry Console）路由 ────────────────────────────────────
+// 四种进场方式统一经 auto:enter:{sym} → AutoRunner → AutoPM（与 auto:close 同构）。
+
+// POST /api/enter/:symbol — 发起进场（manual_limit / ema / st_limit / conditional）
+app.post("/api/enter/:symbol", requireApiSecret, async (req, res) => {
+    const symbol = String(req.params.symbol || "").toUpperCase();
+    const body = req.body || {};
+    if (!symbol) return res.status(400).json({ error: "缺少 symbol" });
+    const method = String(body.method || "").toLowerCase();
+    if (!["market", "manual_limit", "ema", "st_limit", "conditional"].includes(method)) {
+        return res.status(400).json({ error: `未知进场方法: ${method}` });
+    }
+    if (!["LONG", "SHORT", "BUY", "SELL"].includes(String(body.side || "").toUpperCase())) {
+        return res.status(400).json({ error: "缺少或非法 side（LONG/SHORT）" });
+    }
+    const payload = JSON.stringify({
+        method,
+        side: String(body.side || "").toUpperCase(),
+        limit_price: body.limit_price != null ? Number(body.limit_price) : null,
+        ema_period: body.ema_period != null ? Number(body.ema_period) : 20,
+        st_field: body.st_field || "value",
+        stop_price: body.stop_price != null ? Number(body.stop_price) : null,
+        tp_rr: body.tp_rr != null ? Number(body.tp_rr) : 2.0,
+        trigger: body.trigger || null,
+        expire_ts: body.expire_ts || null,
+        bypass_window: !!body.bypass_window,
+        operator: body.operator || "console",
+        ts: Math.floor(Date.now() / 1000),
+    });
+    try {
+        await redis.set(`auto:enter:${symbol}`, payload, "EX", 300);
+        await redis.publish("auto:enter", JSON.stringify({ symbol, method }));
+        // 立即触发引擎消费（市价单低延迟进场，不等下一根 M1；通知失败则 M1 兜底）
+        proxyToEngine("POST", "/enter-now", { symbol }).catch(() => {});
+        logKey("Entry", "info", `进场请求已写入 auto:enter:${symbol}（已通知立即执行）`, { method });
+        res.json({
+            ok: true, routed: "auto_pm_enter", symbol, method,
+            note: "已立即触发 AutoRunner 消费；经 auto:signal / entry:update 跟踪状态",
+        });
+    } catch (e) {
+        logKey("Entry", "error", `auto:enter 写入失败 ${symbol}: ${e.message}`);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/pending-entries?symbol= — 挂单进场（RESTING 限价 + ARMED/TRIGGERED 条件票）
+app.get("/api/pending-entries", async (req, res) => {
+    const symbol = String(req.query.symbol || "").toUpperCase();
+    try {
+        const ids = await redis.zrevrange("entry:pending:index", 0, 99);
+        const out = [];
+        for (const id of ids) {
+            const t = await parseTicketHash(`entry:ticket:${id}`);
+            if (!t) { await redis.zrem("entry:pending:index", id); continue; }
+            if (!["ARMED", "RESTING", "TRIGGERED"].includes(String(t.state || ""))) {
+                await redis.zrem("entry:pending:index", id); continue;
+            }
+            if (symbol && String(t.symbol || "").toUpperCase() !== symbol) continue;
+            out.push(t);
+        }
+        res.json(out);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /api/entry-context/:symbol — 进场表单预览上下文（价位 / 账户 / 风控 / 熔断）
+app.get("/api/entry-context/:symbol", async (req, res) => {
+    const symbol = String(req.params.symbol || "").toUpperCase();
+    try {
+        let levels = {};
+        try { const r = await redis.get(`indicators:active:${symbol}`); if (r) levels = JSON.parse(r); } catch {}
+        let lastClose = 0;
+        try {
+            const barRaw = await redis.lindex(`bars:1m:${symbol}`, -1);
+            if (barRaw) lastClose = JSON.parse(barRaw).close || 0;
+        } catch {}
+        if (!lastClose) {
+            try {
+                const posRaw = await redis.get(`position:${symbol}`);
+                if (posRaw) lastClose = JSON.parse(posRaw).last_price || JSON.parse(posRaw).entry_price || 0;
+            } catch {}
+        }
+        let equity = 0;
+        try {
+            const fundsRaw = await redis.get("account:funds");
+            if (fundsRaw) {
+                const bal = (JSON.parse(fundsRaw).balances || []).find(b => b.currency === "USD");
+                equity = (bal && bal.total) || 0;
+            }
+        } catch {}
+        let cfg = {};
+        try { const c = await redis.get("config:auto"); if (c) cfg = JSON.parse(c); } catch {}
+        let halted = false;
+        try {
+            const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+            halted = !!(await redis.get(`risk:halt:${today}`));
+        } catch {}
+        res.json({
+            symbol, last_close: lastClose,
+            dema20: levels.dema20 || null,
+            supertrend: levels.supertrend || null,
+            equity,
+            risk_pct: cfg.risk_pct != null ? cfg.risk_pct : 0.002,
+            max_position_pct: cfg.max_position_pct != null ? cfg.max_position_pct : 0.10,
+            min_qty: cfg.min_qty || 1,
+            fixed_qty: cfg.fixed_qty || 0,
+            atr_mult: cfg.atr_mult || 1.5,
+            tp_rr: cfg.tp_rr || 2.0,
+            halted,
+            trading_env: cfg.trading_env || TRADING_ENV,
+            live_orders_allowed: cfg.live_orders_allowed != null ? cfg.live_orders_allowed : LIVE_TRADING_ALLOWED,
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/entry-cancel — 撤单（按 ticket_id 或 entry_coid 寻址）
+app.post("/api/entry-cancel", requireApiSecret, async (req, res) => {
+    const body = req.body || {};
+    if (!body.ticket_id && !body.entry_coid) {
+        return res.status(400).json({ error: "需提供 ticket_id 或 entry_coid" });
+    }
+    try {
+        await redis.lpush("entry:cmd", JSON.stringify({
+            action: "cancel",
+            ticket_id: body.ticket_id || "",
+            entry_coid: body.entry_coid || "",
+            symbol: String(body.symbol || "").toUpperCase(),
+            reason: body.reason || "ui_cancel",
+        }));
+        res.json({ ok: true, routed: "entry_cmd" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/entry-modify — 改价（RESTING 限价 / ARMED 条件触发价）
+app.post("/api/entry-modify", requireApiSecret, async (req, res) => {
+    const body = req.body || {};
+    if (body.price == null) return res.status(400).json({ error: "缺少 price" });
+    if (!body.ticket_id && !body.entry_coid) {
+        return res.status(400).json({ error: "需提供 ticket_id 或 entry_coid" });
+    }
+    try {
+        await redis.lpush("entry:cmd", JSON.stringify({
+            action: "modify",
+            ticket_id: body.ticket_id || "",
+            entry_coid: body.entry_coid || "",
+            symbol: String(body.symbol || "").toUpperCase(),
+            price: Number(body.price),
+        }));
+        res.json({ ok: true, routed: "entry_cmd" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+async function parseTicketHash(key) {
+    const raw = await redis.hgetall(key);
+    if (!raw || !Object.keys(raw).length) return null;
+    const obj = {};
+    for (const [k, v] of Object.entries(raw)) {
+        try { obj[k] = JSON.parse(v); } catch { obj[k] = v; }
+    }
+    return obj;
+}
 
 
 // ── 引擎代理路由（转发到 order_actor :8888）─────────────────────────────
@@ -1127,8 +1294,6 @@ async function linkAgentExecutionOnApproval(symbol, decision) {
         return null;
     }
     settings.trail_mode = 0;
-    settings.opening_breakout_live = false;
-    settings.opening_breakout_observe = false;
     await redis.set(`settings:${sym}`, JSON.stringify(settings));
     const mode = decision === "approved_live" ? "live" : "observe";
     const changed = prev.auto_strategy !== !!settings.auto_strategy
@@ -1171,6 +1336,15 @@ async function applyProposalDecision(id, decision, approver = "operator", commen
     }
     const now = Math.floor(Date.now() / 1000);
     const isApproved = decision.startsWith("approved");
+    if (isApproved) {
+        const exp = parseInt(proposal.expires_at || "0", 10);
+        if (exp && now > exp) {
+            logKey("Approval", "warn", `拒绝批准 id=${id}`, "建议已过期");
+            const err = new Error("建议已过期，无法批准");
+            err.statusCode = 410;
+            throw err;
+        }
+    }
     let agentExec = null;
     if (isApproved) {
         agentExec = await linkAgentExecutionOnApproval(proposal.symbol, decision);
@@ -1402,6 +1576,42 @@ app.post("/api/feishu/webhook", async (req, res) => {
 });
 
 // GET /api/settings/:symbol — 读取当前策略开关设置
+// POST /api/proposals/clear — 一键清除所有 pending 信号提案（pending → rejected）
+app.post("/api/proposals/clear", requireApiSecret, async (req, res) => {
+    const operator = String((req.body && req.body.operator) || "console").slice(0, 32);
+    const reason = String((req.body && req.body.reason) || "console_clear").slice(0, 64);
+    try {
+        const ids = await redis.zrevrange(PROPOSAL_INDEX.pending, 0, 499);
+        const now = Math.floor(Date.now() / 1000);
+        let cleared = 0;
+        for (const id of ids) {
+            const p = await parseProposalHash(`proposal:pending:${id}`);
+            const pipe = redis.pipeline();
+            if (p) {
+                const payload = { ...p, status: "rejected", decision: "rejected",
+                    approver: operator, comment: reason, decided_at: now, purge_reason: reason };
+                for (const [k, v] of Object.entries(payload)) {
+                    pipe.hset(`proposal:rejected:${id}`, k, JSON.stringify(v));
+                }
+                pipe.expire(`proposal:rejected:${id}`, PROPOSAL_REDIS_RETENTION);
+                pipe.zadd(PROPOSAL_INDEX.rejected, now, id);
+            }
+            pipe.del(`proposal:pending:${id}`);
+            pipe.zrem(PROPOSAL_INDEX.pending, id);
+            pipe.publish("proposal:update", JSON.stringify({
+                event: "rejected", proposal_id: id, symbol: p && p.symbol, reason, operator,
+            }));
+            await pipe.exec();
+            cleared++;
+        }
+        logKey("Approval", "info", `一键清除 pending 建议: ${cleared} 个`, { operator });
+        res.json({ ok: true, cleared });
+    } catch (e) {
+        logKey("Approval", "error", `一键清除失败: ${e.message}`);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get("/api/settings/:symbol", async (req, res) => {
     const symbol = req.params.symbol.toUpperCase();
     try {
@@ -1422,13 +1632,6 @@ app.post("/api/settings/:symbol", async (req, res) => {
     // 自动策略开启时强制关闭 ExitManager 跟踪止盈（后端兜底，防 Redis 直写）
     if (req.body.auto_strategy || req.body.auto_observe) {
         settings.trail_mode = 0;
-        settings.opening_breakout_live = false;
-        settings.opening_breakout_observe = false;
-    }
-    if (req.body.opening_breakout_live || req.body.opening_breakout_observe) {
-        settings.trail_mode = 0;
-        settings.auto_strategy = false;
-        settings.auto_observe = false;
     }
     await redis.set(`settings:${symbol}`, JSON.stringify(settings));
     console.log(`⚙️  设置更新 [${symbol}]:`, settings);
@@ -1464,23 +1667,6 @@ app.get("/api/premarket-ref/:symbol", async (req, res) => {
     }
 });
 
-// GET /api/opening-breakout/status/:symbol — 今日是否已触发
-app.get("/api/opening-breakout/status/:symbol", async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
-    try {
-        const refRaw = await redis.get(`premarket:ref:${symbol}`);
-        const ref = refRaw ? JSON.parse(refRaw) : null;
-        const sessionDate = ref?.session_date || null;
-        let fired = null;
-        if (sessionDate) {
-            const firedRaw = await redis.get(`opening_breakout:fired:${symbol}:${sessionDate}`);
-            fired = firedRaw ? JSON.parse(firedRaw) : null;
-        }
-        res.json({ ref, fired, session_date: sessionDate });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
 // ── 交易日志 / 绩效（落库自 journal.js，独立于 Redis 过期）──────────────
 // GET /api/journal/stats — 总体 + 按信号类型的胜率/期望/平均R/滑点
 app.get("/api/journal/stats", (_req, res) => {
@@ -1570,12 +1756,12 @@ redisSub.on("error", (err) => {
 });
 
 redisSub.on("ready", () => {
-    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:* / engine:* / auto:* / proposal:* / signal:* / premarket:* / opening_breakout:*`);
+    console.log(`[✅ Redis订阅] 已连接，订阅 bars:1m:* / bars:5m:* / kline:1m:* / kline:5m:* / position:* / order:* / account:* / engine:* / auto:* / proposal:* / signal:* / premarket:* / entry:*`);
     redisSub.psubscribe(
         "bars:1m:*", "bars:5m:*", "kline:1m:*", "kline:5m:*",
         "position:*", "order:*", "account:*", "engine:*",
         "auto:*", "risk:*", "proposal:*", "signal:*",
-        "premarket:*", "opening_breakout:*",
+        "premarket:*", "entry:*",
     ).catch(console.error);
 });
 
@@ -1632,6 +1818,13 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
             return;
         }
 
+        // entry:update → 控制台进场票据状态变更（armed/triggered/filled/canceled/expired/modified/observed）
+        if (channel === 'entry:update') {
+            const entryPayload = JSON.stringify({ channel: 'entry:update', data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(entryPayload));
+            return;
+        }
+
         // position:update → 落库（持仓快照缓存 + 平仓结算往返交易）
         if (channel === 'position:update') {
             try { journal.recordPositionUpdate(parsed); } catch (e) { console.error(`[journal] position: ${e.message}`); }
@@ -1646,10 +1839,10 @@ redisSub.on("pmessage", (_pattern, channel, message) => {
             return;
         }
 
-        // premarket:ref / opening_breakout:signal → 开盘突破 UI
-        if (channel.startsWith('premarket:ref:') || channel === 'opening_breakout:signal') {
-            const obPayload = JSON.stringify({ channel, data: parsed });
-            wss.clients.forEach(c => c.readyState === 1 && c.send(obPayload));
+        // premarket:ref → 盘前锚定线 UI
+        if (channel.startsWith('premarket:ref:')) {
+            const refPayload = JSON.stringify({ channel, data: parsed });
+            wss.clients.forEach(c => c.readyState === 1 && c.send(refPayload));
             return;
         }
 

@@ -14,9 +14,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from nautilus_trader.indicators import AverageTrueRange
-from nautilus_trader.indicators.averages import MovingAverageType
-
 from signals.indicators import bar_et_date
 from signals.touch_detector import TouchEvent
 
@@ -38,61 +35,22 @@ RTH_ENTRY_START = RTH_OPEN_MIN + RTH_OPEN_BLACKOUT_MIN   # 09:45
 RTH_ENTRY_END = RTH_CLOSE_MIN - RTH_PRE_EOD_BLACKOUT_MIN  # 15:30
 
 
-class STState:
-    """与 strategy._STState 一致：Wilder ATR + 上一根 band 转向。"""
-
-    def __init__(self, period: int, mult: float):
-        self.period = period
-        self.mult = mult
-        self._atr = AverageTrueRange(period, MovingAverageType.WILDER)
-        self._prev_close = 0.0
-        self._prev_upper_b = 0.0
-        self._prev_lower_b = 0.0
-        self._prev_dir = -1
-        self._initialized = False
-
-    @property
-    def initialized(self) -> bool:
-        return self._initialized
-
-    def update(self, o: float, h: float, lo: float, c: float) -> tuple[float, int]:
-        self._atr.update_raw(h, lo, c)
-        if not self._atr.initialized:
-            self._prev_close = c
-            return 0.0, 0
-        atr = self._atr.value
-        hl2 = (h + lo) / 2
-        basic_upper = hl2 + self.mult * atr
-        basic_lower = hl2 - self.mult * atr
-        flip_upper, flip_lower = self._prev_upper_b, self._prev_lower_b
-        if not self._initialized:
-            upper_b, lower_b = basic_upper, basic_lower
-            self._initialized = True
-        else:
-            pu, pl, pc = self._prev_upper_b, self._prev_lower_b, self._prev_close
-            upper_b = basic_upper if (basic_upper < pu or pc > pu) else pu
-            lower_b = basic_lower if (basic_lower > pl or pc < pl) else pl
-        if self._prev_dir == -1 and c > flip_upper:
-            st_dir = 1
-        elif self._prev_dir == 1 and c < flip_lower:
-            st_dir = -1
-        else:
-            st_dir = self._prev_dir
-        st_val = lower_b if st_dir == 1 else upper_b
-        self._prev_close, self._prev_upper_b, self._prev_lower_b, self._prev_dir = c, upper_b, lower_b, st_dir
-        return round(st_val, 4), st_dir
+# SuperTrend 状态机已合并至 indicators.supertrend.STState（设计原则 #2）。
 
 
 @dataclass
 class StSuperSymbolState:
-    st1: STState
-    st5: STState
+    """st_super 翻转检测的轻量状态：仅保留跨 bar 的 st5_dir / prev1_dir。
+
+    M1/M5 ST 值由指标策略算好后写入共享 registry / bar_dict，本类不再自维护 STState
+    （设计原则 #2：消除重复指标计算）。
+    """
     st5_dir: int = 0
     prev1_dir: Optional[int] = None
 
     @classmethod
     def create(cls) -> StSuperSymbolState:
-        return cls(st1=STState(ST_PERIOD, ST_MULT_1M), st5=STState(ST_PERIOD, ST_MULT_5M))
+        return cls()
 
 
 def bucket5m(bar_time: int) -> int:
@@ -109,11 +67,8 @@ def _tradable_minutes(bar_time: int) -> bool:
     return RTH_ENTRY_START <= em < RTH_ENTRY_END
 
 
-def _m1_st_from_bar(
-    m1_bar: dict[str, Any],
-    state: StSuperSymbolState,
-) -> tuple[float, int]:
-    """优先用 strategy 已写入 bar 的 ST（与图表一致）；无字段时再本地重算。"""
+def _m1_st_from_bar(m1_bar: dict[str, Any]) -> tuple[float, int]:
+    """从 bar_dict 读 M1 ST（指标策略已算好写入）。无值返回 (0.0, 0)。"""
     raw_dir = m1_bar.get("st_dir")
     raw_val = m1_bar.get("st_value")
     if raw_dir is not None and raw_val is not None:
@@ -124,18 +79,11 @@ def _m1_st_from_bar(
                 return st_val, st_dir
         except (TypeError, ValueError):
             pass
-    try:
-        o, h, lo, c = (
-            float(m1_bar["open"]), float(m1_bar["high"]),
-            float(m1_bar["low"]), float(m1_bar["close"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        return 0.0, 0
-    st_val, st_dir = state.st1.update(o, h, lo, c)
-    return st_val, st_dir
+    return 0.0, 0
 
 
-def _m5_dir_from_bar(m5_bar: dict[str, Any], state: StSuperSymbolState) -> int:
+def _m5_dir_from_bar(m5_bar: dict[str, Any]) -> int:
+    """从 bar_dict 读 M5 ST 方向。无值返回 0。"""
     raw_dir = m5_bar.get("st_dir")
     if raw_dir is not None:
         try:
@@ -144,15 +92,7 @@ def _m5_dir_from_bar(m5_bar: dict[str, Any], state: StSuperSymbolState) -> int:
                 return d
         except (TypeError, ValueError):
             pass
-    try:
-        o, h, lo, c = (
-            float(m5_bar["open"]), float(m5_bar["high"]),
-            float(m5_bar["low"]), float(m5_bar["close"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        return state.st5_dir
-    _, d = state.st5.update(o, h, lo, c)
-    return d if state.st5.initialized else 0
+    return 0
 
 
 def _m1_bucket_end_bars(m1_bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -186,7 +126,7 @@ def warmup_st_super_state(
     for b in m5:
         update_st5_from_m5_bar(b, state)
     for b in _m1_bucket_end_bars(m1):
-        st_val, st_dir = _m1_st_from_bar(b, state)
+        st_val, st_dir = _m1_st_from_bar(b)
         if st_val > 0 and st_dir in (1, -1):
             state.prev1_dir = st_dir
 
@@ -203,9 +143,9 @@ def replay_st_super_touches(
     m1 = sorted(m1_bars, key=lambda b: int(b.get("time") or 0))
     m1 = [b for b in m1 if rth_lo <= int(b["time"]) % 86400 < rth_hi]
     events: list[TouchEvent] = []
-    for b in _m1_bucket_end_bars(m1):
+    for b in m1:
         snap = dict(b)
-        st_val, st_dir = _m1_st_from_bar(b, state)
+        st_val, st_dir = _m1_st_from_bar(b)
         if st_val > 0 and st_dir in (1, -1):
             snap["st_value"] = st_val
             snap["st_dir"] = st_dir
@@ -234,7 +174,7 @@ def detect_st_super_flip(
     if not bar_time:
         return None
 
-    st_val, st_dir = _m1_st_from_bar(m1_bar, state)
+    st_val, st_dir = _m1_st_from_bar(m1_bar)
     if st_val <= 0 or st_dir not in (1, -1):
         return None
 
@@ -272,7 +212,7 @@ def detect_st_super_flip(
 
 
 def update_st5_from_m5_bar(m5_bar: dict[str, Any], state: StSuperSymbolState) -> None:
-    d = _m5_dir_from_bar(m5_bar, state)
+    d = _m5_dir_from_bar(m5_bar)
     if d in (1, -1):
         state.st5_dir = d
 
