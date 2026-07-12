@@ -331,30 +331,6 @@
         .sys-panel .sys-row b { color: #d1d4dc; font-weight: 600; }
         .sys-panel .sys-row b.warn { color: #f0b90b; }
 
-        .c-actions-mini {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-            margin-top: auto;
-            padding-top: 3px;
-        }
-
-        .c-actions-mini .c-btn {
-            width: 100%;
-            padding: 6px 0;
-        }
-
-        .c-actions-mini .c-toggle-wrap {
-            justify-content: center;
-            font-size: 11px;
-        }
-
-        .c-actions-mini select {
-            width: 100%;
-            font-size: 11px;
-            padding: 4px 6px;
-        }
-
         /* ── 单元格头部（legacy toolbar 部分保留给 crosshair） ── */
         .c-toolbar {
             display: none;
@@ -534,245 +510,12 @@
             background: rgba(239, 83, 80, .15);
         }
 
-        /* ── 止损药丸拖动控件 ── */
-        .sl-handle {
-            display: none;
-            position: absolute;
-            right: 58px;
-            transform: translateY(-50%);
-            align-items: center;
-            gap: 5px;
-            background: #ef5350;
-            border-radius: 16px;
-            padding: 4px 10px 4px 8px;
-            cursor: ns-resize;
-            z-index: 50;
-            user-select: none;
-            box-shadow: 0 2px 8px rgba(239, 83, 80, .5);
-            white-space: nowrap;
-            font-size: 11px;
-        }
-
-        .sl-handle.active {
-            display: flex;
-        }
-
-        @keyframes sl-pulse {
-            0% {
-                box-shadow: 0 0 0 0 rgba(239, 83, 80, .5), 0 2px 8px rgba(239, 83, 80, .5);
-            }
-
-            70% {
-                box-shadow: 0 0 0 6px rgba(239, 83, 80, 0), 0 2px 8px rgba(239, 83, 80, .5);
-            }
-
-            100% {
-                box-shadow: 0 0 0 0 rgba(239, 83, 80, 0), 0 2px 8px rgba(239, 83, 80, .5);
-            }
-        }
-
-        .sl-handle.active {
-            animation: sl-pulse 2s infinite;
-        }
-
-        .sl-handle:active {
-            animation: none;
-        }
-
-        /* 持仓期间止损修改模式：橙色常亮 */
-        .sl-handle.modify {
-            display: flex;
-            background: #ff9800;
-            box-shadow: 0 2px 8px rgba(255, 152, 0, .5);
-            animation: none;
-        }
-
-        .sl-handle.modify:hover {
-            box-shadow: 0 0 0 3px rgba(255, 152, 0, .35), 0 2px 8px rgba(255, 152, 0, .5);
-        }
-
-        .sl-handle .sl-icon {
-            flex-shrink: 0;
-            opacity: .9;
-        }
-
-        .sl-handle .sl-label {
-            color: rgba(255, 255, 255, .75);
-            font-weight: 500;
-        }
-
-        .sl-handle .sl-price {
-            font-family: 'Roboto Mono', monospace, sans-serif;
-            font-weight: 700;
-            color: #fff;
-            font-size: 12px;
-        }
-
-        /* ── 内嵌订单面板 ── */
-        .order-panel {
-            display: none;
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 220px;
-            background: rgba(19, 23, 34, .98);
-            border: 1px solid #434651;
-            border-radius: 12px;
-            padding: 16px 18px;
-            z-index: 9999;
-            color: #d1d4dc;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, .6);
-        }
-
-        /* 遮罩层：点击对话框外部时关闭 */
-        .order-panel-overlay {
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, .45);
-            z-index: 9998;
-        }
-
-        .order-panel-overlay.active {
-            display: block;
-        }
-
-        .order-panel.active {
-            display: block;
-        }
-
-
-        .op-hdr {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .op-hdr-title {
-            font-size: 12px;
-            font-weight: 700;
-            color: #fff;
-        }
-
-        .op-x {
-            background: none;
-            border: none;
-            color: #787b86;
-            cursor: pointer;
-            font-size: 14px;
-            line-height: 1;
-        }
-
-        .op-dir-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 10px;
-            font-size: 11px;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }
-
-        .op-dir-badge.buy {
-            background: rgba(38, 166, 154, .18);
-            color: #26a69a;
-            border: 1px solid #26a69a;
-        }
-
-        .op-dir-badge.sell {
-            background: rgba(239, 83, 80, .18);
-            color: #ef5350;
-            border: 1px solid #ef5350;
-        }
-
-        .op-field {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 5px;
-        }
-
-        .op-lbl {
-            font-size: 10px;
-            color: #787b86;
-        }
-
-        .op-calc {
-            font-size: 11px;
-            font-weight: 700;
-            font-family: 'Roboto Mono', monospace, sans-serif;
-        }
-
-        .op-field input {
-            width: 75px;
-            background: #1e222d;
-            border: 1px solid #2a2e39;
-            border-radius: 4px;
-            color: #d1d4dc;
-            font-size: 11px;
-            padding: 3px 6px;
-            text-align: right;
-        }
-
-        .op-field input:focus {
-            outline: none;
-            border-color: #434651;
-        }
-
-        .op-divider {
-            height: 1px;
-            background: #2a2e39;
-            margin: 5px 0;
-        }
-
-        .op-hint {
-            font-size: 9px;
-            color: #787b86;
-            margin-top: 4px;
-            text-align: center;
-        }
-
-        .op-footer {
-            display: flex;
-            gap: 6px;
-            margin-top: 8px;
-        }
-
-        .op-btn {
-            flex: 1;
-            padding: 5px 0;
-            border: none;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        .op-btn.cancel {
-            background: #2a2e39;
-            color: #d1d4dc;
-        }
-
-        .op-btn.confirm {
-            background: #26a69a;
-            color: #fff;
-        }
-
-        .op-btn.confirm.sell {
-            background: #ef5350;
-        }
-
-        .op-btn:hover {
-            opacity: .85;
-        }
     </style>
 </head>
 
 <body>
 
     <!-- 开仓对话框遮罩层（点击关闭） -->
-    <div class="order-panel-overlay" id="orderPanelOverlay"></div>
 
     <div id="status-bar-root"></div>
 
@@ -1131,7 +874,6 @@
             }
 
             initChart(symbol);
-            bindEvents(symbol);
             updateSysPanel(symbol);
             await loadSymbol(symbol);
             drawProposalPriceLines(symbol);
@@ -1373,7 +1115,7 @@
             const s = state[symbol];
             const ctx = getGridSignalContext(symbol);
             const stCls = d => d === 1 ? 'up' : (d === -1 ? 'down' : '');
-            const agentMode = document.getElementById(`auto-sel-${symbol}`)?.value || 'off';
+            const agentMode = state[symbol]?.autoMode || 'off';
             const agentMap = { off: '关', observe: '观察', live: '实盘' };
             const agentCls = agentMode === 'live' ? 'down' : (agentMode === 'observe' ? 'warn' : '');
             const snap = window.StatusBar?.getSnapshot?.();
@@ -1436,9 +1178,6 @@
               <div class="ps-row"><label>盈亏</label><span class="${pnlCls}">${pnl != null ? (pnl >= 0 ? '+' : '') + fmt(pnl) : '—'}${pnlPct != null ? ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)` : ''}</span></div>`;
         }
 
-        // 全局拖动状态（同一时刻只有一个面板在拖动）
-        let activeDrag = null;
-
         // 全局标记刷新（订单标记 + 超级信号标记，setMarkers 需完整数组升序）
         function refreshMarkers(sym) {
             const s = state[sym];
@@ -1478,6 +1217,7 @@
             </div>
           </div>
           <a class="c-detail-link" href="/?symbol=${symbol}" title="单图详情">单图 ▸</a>
+          <a class="c-detail-link" href="/console.html" title="进场控制台（下单/Agent执行/审批）">控制台 ▸</a>
         </div>
         <div class="alpha-approval-ribbon hidden" id="alpha-ribbon-${id}"></div>
         <div class="c-body">
@@ -1489,40 +1229,7 @@
               <div class="c-legend-item"><div class="c-legend-dot" style="background:#26a69a;width:10px;opacity:.7"></div><span style="color:#787b86">ST 1m (3.0)</span></div>
               <div class="c-legend-item"><span style="color:#787b86;font-size:10px">超级信号</span></div>
             </div>
-            <div class="sl-handle" id="slh-${id}" title="上下拖动调整止损价">
-              <svg class="sl-icon" width="10" height="13" viewBox="0 0 10 13" fill="none">
-                <path d="M5 0L9 4H1L5 0Z" fill="white"/>
-                <path d="M5 13L1 9H9L5 13Z" fill="white"/>
-                <rect x="4" y="4" width="2" height="5" rx="1" fill="white" opacity=".5"/>
-              </svg>
-              <span class="sl-label">止损</span>
-              <span class="sl-price">—</span>
-            </div>
-            <div class="order-panel" id="op-${id}">
-              <div class="op-hdr">
-                <span class="op-hdr-title" id="opt-${id}">开仓</span>
-                <button class="op-x" id="opx-${id}">✕</button>
-              </div>
-              <div class="op-dir-badge buy" id="opd-${id}">▲ 做多</div>
-              <div class="op-field">
-                <span class="op-lbl">最大亏损</span>
-                <input type="number" id="opm-${id}" value="100" min="1" step="1">
-              </div>
-              <div class="op-field">
-                <span class="op-lbl">止损价</span>
-                <span class="op-calc op-sl-val" style="color:#ef5350">—</span>
-              </div>
-              <div class="op-divider"></div>
-              <div class="op-field"><span class="op-lbl">建议股数</span><span class="op-calc" id="opq-${id}">—</span></div>
-              <div class="op-field"><span class="op-lbl">每股风险</span><span class="op-calc" id="opr-${id}" style="color:#ef5350">—</span></div>
-              <div class="op-field"><span class="op-lbl">止损幅度</span><span class="op-calc" id="ops-${id}" style="color:#ef5350">—</span></div>
-              <div class="op-field"><span class="op-lbl">开仓金额</span><span class="op-calc" id="opc-${id}">—</span></div>
-              <div class="op-hint" id="oph-${id}"></div>
-              <div class="op-footer">
-                <button class="op-btn cancel" id="opcancel-${id}">取消</button>
-                <button class="op-btn confirm" id="opconfirm-${id}">确认做多</button>
-              </div>
-            </div>
+            <!-- 交易 UI（sl-handle 拖动开仓 / order-panel 下单对话框）已移至 console.html -->
           </div>
           <div class="c-sidebar">
             <div class="c-panel">
@@ -1539,22 +1246,7 @@
               <div class="c-panel-title">状态</div>
               <div id="sys-${id}">—</div>
             </div>
-            <div class="c-actions-mini">
-              <div class="c-toggle-wrap">
-                <label class="c-toggle">
-                  <input type="checkbox" id="st-toggle-${id}">
-                  <span class="c-slider"></span>
-                </label>
-                <span id="st-label-${id}">ST止盈</span>
-              </div>
-              <select id="auto-sel-${id}" title="Agent执行">
-                <option value="off">自动关</option>
-                <option value="observe">观察</option>
-                <option value="live">实盘</option>
-              </select>
-              <button class="c-btn c-btn-open" id="btn-open-${id}">开仓</button>
-              <button class="c-btn c-btn-close" id="btn-close-${id}" disabled title="无持仓">平仓</button>
-            </div>
+            <!-- 交易控件（ST止盈/Agent执行/开仓/平仓）已移至 console.html「标的控制」 -->
           </div>
         </div>
         <!-- legacy ids for refreshPositionPanel -->
@@ -2133,8 +1825,6 @@
                 try { cs.removePriceLine(state[symbol].slPriceLine); } catch (_) { }
                 state[symbol].slPriceLine = null;
             }
-            // 同时退出 modifyMode
-            if (state[symbol]?.ctx) exitModifyMode(state[symbol].ctx);
         }
 
         function clearPositionUI(symbol) {
@@ -2246,7 +1936,7 @@
                 updateHeader(symbol, m1_bars);
                 centerChartView(symbol);
 
-                // ── 构建止损拖动 ctx ──（以 M1 为准）
+                // ── ctx（chart 上下文，供 WS tick 更新 latestClose）──
                 const s = state[symbol];
                 const lastBar = m1[m1.length - 1] || m5[m5.length - 1];
                 const lastST = [...m1STForChart].reverse().find(b => b.st_value != null && b.st_value !== 0);
@@ -2255,114 +1945,13 @@
                     sym: symbol, cs: s.candleSeries, chart: s.chart,
                     wrapEl: document.getElementById(`wrap-${id}`),
                     chartEl: document.getElementById(`chart-${id}`),
-                    handleEl: document.getElementById(`slh-${id}`),
-                    panelEl: document.getElementById(`op-${id}`),
                     latestClose: lastBar.close,
                     latestST: lastST ? lastST.st_value : null,
                     latestSTDir: lastST ? lastST.st_dir : null,
-                    slPrice: null, slPriceLine: null, orderDir: 'BUY', orderMode: false,
-                    // 订单面板子元素
-                    dirBadgeEl: document.getElementById(`opd-${id}`),
-                    panelTitleEl: document.getElementById(`opt-${id}`),
-                    qtyEl: document.getElementById(`opq-${id}`),
-                    riskEl: document.getElementById(`opr-${id}`),
-                    slPctEl: document.getElementById(`ops-${id}`),
-                    costEl: document.getElementById(`opc-${id}`),
-                    hintEl: document.getElementById(`oph-${id}`),
-                    maxLossEl: document.getElementById(`opm-${id}`),
-                    confirmBtn: document.getElementById(`opconfirm-${id}`),
                 };
                 s.ctx = ctx;
 
-                // 止损控件 mousedown → 开始拖动（orderMode 或 modifyMode 均可拖动）
-                ctx.handleEl.addEventListener('mousedown', e => {
-                    if (!ctx.orderMode && !ctx.modifyMode) return;
-                    activeDrag = ctx;
-                    document.body.style.cursor = 'ns-resize';
-                    e.preventDefault();
-                });
-
-                // 最大亏损输入 → 重算
-                document.getElementById(`opm-${id}`).addEventListener('input', () => updateOrderPanel(ctx));
-
-                // 取消 / ✕ 关闭
-                document.getElementById(`opcancel-${id}`).addEventListener('click', () => exitOrderMode(ctx));
-                document.getElementById(`opx-${id}`).addEventListener('click', () => exitOrderMode(ctx));
-
-                // 确认开仓 —— 实际调用引擎 API
-                document.getElementById(`opconfirm-${id}`).addEventListener('click', async () => {
-                    const sl = ctx.slPrice;
-                    const entry = ctx.latestClose || 0;
-                    const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
-                    const riskPerShare = Math.abs(entry - sl);
-
-                    const acct = ctx.accountInfo || {};
-                    const available = acct.available_cash || 0;
-                    const total = acct.total_equity || 0;
-                    const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
-                    const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
-                    const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
-                    const qty = Math.min(qtyByLoss, qtyByCash);
-
-                    if (!sl || qty <= 0) {
-                        showToast('⚠️ 止损价无效或每股风险过小', 'warn');
-                        return;
-                    }
-
-                    speak(`${symbol} 订单已下发，${ctx.orderDir === 'BUY' ? '做多' : '做空'} ${qty}股，止损 ${sl.toFixed(2)}`);
-
-                    try {
-                        const orderBody = { side: ctx.orderDir, qty, stop_loss: sl, order_type: 'BRACKET' };
-                        const resp = await (window.NautilusAuth
-                            ? window.NautilusAuth.authFetch(`/api/order/${symbol}`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(orderBody),
-                              })
-                            : fetch(`/api/order/${symbol}`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(orderBody),
-                              }));
-                        const result = await resp.json();
-                        if (result.error && resp.status === 403) {
-                            speak(`${symbol} 禁止手动开仓，请先处理 Alpha 建议`, true);
-                            showToast(`⚠️ ${result.error}`, 'warn');
-                        } else if (result.engine_offline || result.error) {
-                            speak(`订单失败，${result.error || '引擎未连接'}`, true);
-                            showToast(`⚠️ 引擎未连接或出错: ${result.error || '请启动引擎'}`, 'warn');
-                        } else {
-                            speak(`${symbol} 订单已受理`, true);
-                            showToast(`✅ ${symbol} ${ctx.orderDir === 'BUY' ? '做多' : '做空'} x${qty} 止损$${sl.toFixed(2)} 已下发`, 'ok');
-                        }
-                    } catch (e) {
-                        speak('网络错误，订单失败', true);
-                        showToast(`网络错误: ${e.message}`, 'warn');
-                    }
-                    exitOrderMode(ctx);
-                });
-
-
-
-                // 图表缩放/滚动后重置控件位置
-                s.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-                    if (ctx.orderMode || ctx.modifyMode) snapHandle(ctx);
-                });
-
-                // 点击止损价格线标签（在止损价🧲像素范围内）→ 显示药丸
-                s.chart.subscribeClick(param => {
-                    if (!param.point || ctx.orderMode || ctx.modifyMode) return;
-                    const slP = state[symbol]?.position?.stop_loss;
-                    if (!slP) return;
-                    const clickedPrice = ctx.cs.coordinateToPrice(param.point.y);
-                    if (clickedPrice === null) return;
-                    const tolerance = Math.abs(
-                        (ctx.cs.coordinateToPrice(0) - ctx.cs.coordinateToPrice(4)) || slP * 0.004
-                    );
-                    if (Math.abs(clickedPrice - slP) <= tolerance) {
-                        enterModifyMode(ctx, slP);
-                    }
-                });
+                // 交易交互（拖动开仓 / 改止损 / 下单）已移至 console.html
 
             } catch (e) {
                 const el = document.getElementById(`loading-${symbol}`);
@@ -2371,292 +1960,9 @@
         }
 
 
-        // ── 事件绑定 ─────────────────────────────────────────────
-        function bindEvents(symbol) {
-            const s = state[symbol];
+        // 事件绑定（开仓/平仓/ST止盈/Agent执行）已统一移至 console.html「标的控制」
 
-            // 开仓按钮（已禁用：仅 Agent 审批后可自动开仓）
-            const openBtn = document.getElementById(`btn-open-${symbol}`);
-            openBtn.disabled = true;
-            openBtn.style.opacity = '0.45';
-            openBtn.style.cursor = 'not-allowed';
-            openBtn.title = '系统禁止手动开仓，请走 Alpha 审批';
-            openBtn.addEventListener('click', () => {
-                showToast('系统禁止手动开仓，请走 Alpha 审批', 'warn');
-                speak('禁止手动开仓', true);
-                return;
-            });
-
-            // 平仓
-            document.getElementById(`btn-close-${symbol}`).addEventListener('click', async () => {
-                const curPos = state[symbol]?.position;
-                if (!curPos || Math.abs(curPos.quantity || 0) <= 0) {
-                    showToast(`${symbol} 无持仓`, 'tip');
-                    return;
-                }
-                if (!confirm(`确认平仓 ${symbol}？\n\n引擎将自动取消止损单并提交反向市价单。`)) return;
-                const btn = document.getElementById(`btn-close-${symbol}`);
-                btn.disabled = true;
-                btn.textContent = '平仓中…';
-                try {
-                    const authFetch = window.NautilusAuth?.authFetch || fetch;
-                    const resp = await authFetch(`/api/position/${symbol}`, { method: 'DELETE' });
-                    const result = await resp.json();
-                    if (!resp.ok) {
-                        speak(`${symbol} 平仓失败`, true);
-                        showToast(`⚠️ ${result.error || '平仓失败'}${result.hint ? ' · ' + result.hint : ''}`, 'warn');
-                    } else if (result.engine?.error) {
-                        speak(`${symbol} 平仓失败`, true);
-                        alert(`❌ 平仓失败: ${result.engine.error}`);
-                    } else {
-                        speak(`${symbol} 平仓指令已发出`, true);
-                        if (result.routed === 'auto_pm') {
-                            showToast(`✅ ${symbol} 已路由 AutoPM，等待成交确认`, 'ok');
-                        }
-                    }
-                } catch (e) {
-                    alert(`网络错误: ${e.message}`);
-                } finally {
-                    btn.textContent = '平仓';
-                    const hasPos = !!(state[symbol]?.position && Math.abs(state[symbol].position.quantity || 0) > 0);
-                    updateCloseButton(symbol, hasPos);
-                }
-            });
-
-
-            // ST 跟踪止盈
-            document.getElementById(`st-toggle-${symbol}`).addEventListener('change', async e => {
-                const on = e.target.checked;
-                await fetch(`/api/settings/${symbol}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ st_trail: on }),
-                });
-                const lbl = document.getElementById(`st-label-${symbol}`);
-                lbl.style.color = on ? '#26a69a' : '#787b86';
-            });
-
-            // 自动策略（关 / 观察 / 实盘）
-            const autoSel = document.getElementById(`auto-sel-${symbol}`);
-            const AUTO_COLORS = { off: '#2a2e39', observe: '#f0b90b', live: '#ef5350' };
-            function applyAutoStyle(mode) {
-                s.autoMode = mode;
-                autoSel.style.borderColor = AUTO_COLORS[mode] || '#2a2e39';
-                autoSel.style.color = mode === 'off' ? '#787b86' : (AUTO_COLORS[mode] || '#d1d4dc');
-            }
-            autoSel.addEventListener('change', async () => {
-                let mode = autoSel.value;
-                if (mode === 'live' &&
-                    !confirm(`确认让 ${symbol} 进入【实盘自动策略】？`)) {
-                    mode = 'observe';
-                    autoSel.value = 'observe';
-                }
-                const body = {
-                    auto_strategy: mode === 'live',
-                    auto_observe:  mode === 'observe',
-                };
-                if (mode !== 'off') body.trail_mode = 0;
-                applyAutoStyle(mode);
-                updateSysPanel(symbol);
-                await fetch(`/api/settings/${symbol}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
-                const label = mode === 'live' ? '实盘' : (mode === 'observe' ? '观察' : '关闭');
-                showToast(`${symbol} 自动策略：${label}`, mode === 'live' ? 'warn' : 'tip');
-            });
-            (async () => {
-                try {
-                    const res = await fetch(`/api/settings/${symbol}`);
-                    if (res.ok) {
-                        const st = await res.json();
-                        const m = st.auto_strategy ? 'live' : (st.auto_observe ? 'observe' : 'off');
-                        autoSel.value = m;
-                        applyAutoStyle(m);
-                        updateSysPanel(symbol);
-                    }
-                } catch (_) { /* 引擎离线 */ }
-            })();
-        }
-
-        // ── 全局拖动事件（绑在 document 层）──────────────────────
-        document.addEventListener('mousemove', e => {
-            if (!activeDrag) return;
-            const { wrapEl, chartEl, handleEl } = activeDrag;
-            const wRect = wrapEl.getBoundingClientRect();
-            const eRect = chartEl.getBoundingClientRect();
-            const containerY = e.clientY - wRect.top;
-            const chartY = e.clientY - eRect.top;
-            const price = activeDrag.cs.coordinateToPrice(chartY);
-            if (price === null) return;
-            handleEl.style.top = containerY + 'px';
-            activeDrag.slPrice = parseFloat(price.toFixed(2));
-            updateHandlePriceLabel(activeDrag);
-            if (activeDrag.modifyMode) {
-                // modifyMode：创建或更新临时橙色跟踪线
-                if (!activeDrag.modifyTempLine) {
-                    activeDrag.modifyTempLine = activeDrag.cs.createPriceLine({
-                        price: activeDrag.slPrice, color: '#ff9800', lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dashed,
-                        axisLabelVisible: true, title: '→ 新止损',
-                    });
-                } else {
-                    activeDrag.modifyTempLine.applyOptions({
-                        price: activeDrag.slPrice,
-                        title: `→ ${activeDrag.slPrice.toFixed(2)}`,
-                    });
-                }
-            } else {
-                updateOrderPanel(activeDrag);
-            }
-        });
-
-        document.addEventListener('mouseup', () => {
-            if (!activeDrag) return;
-            const ctx = activeDrag;
-            activeDrag = null;
-            document.body.style.cursor = '';
-
-            // modifyMode：移除临时线 + 捯手后消失药丸 + 调 API
-            if (ctx.modifyMode && ctx.slPrice) {
-                if (ctx.modifyTempLine) {
-                    try { ctx.cs.removePriceLine(ctx.modifyTempLine); } catch (_) { }
-                    ctx.modifyTempLine = null;
-                }
-                const newPrice = ctx.slPrice;
-                exitModifyMode(ctx);  // 药丸立即消失
-                const authFetch = window.NautilusAuth?.authFetch || fetch;
-                authFetch(`/api/modify-stop/${ctx.sym}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ price: newPrice }),
-                }).then(r => r.json()).then(result => {
-                    if (!result.ok) {
-                        speak(`${ctx.sym} 止损修改失败`, true);
-                        showToast(`⚠️ ${ctx.sym} 止损修改失败: ${result.error}`, 'warn');
-                    } else {
-                        // 成功：把原止损线移到新价格
-                        if (state[ctx.sym]?.slPriceLine) {
-                            state[ctx.sym].slPriceLine.applyOptions({
-                                price: newPrice,
-                                title: `止损 ${newPrice.toFixed(2)}`,
-                            });
-                        }
-                        if (state[ctx.sym]?.position) {
-                            state[ctx.sym].position.stop_loss = newPrice;
-                            document.getElementById(`p-sl-${ctx.sym}`).textContent = newPrice.toFixed(2);
-                        }
-                        showToast(`✅ ${ctx.sym} 止损已修改为 ${newPrice.toFixed(2)}`, 'ok');
-                    }
-                }).catch(e => showToast(`网络错误: ${e.message}`, 'warn'));
-            } else {
-                snapHandle(ctx);
-            }
-        });
-
-        // 止损控件精确对齐（priceToCoordinate + offset）
-        function snapHandle(ctx) {
-            const y = ctx.cs.priceToCoordinate(ctx.slPrice);
-            if (y === null) return;
-            const offset = ctx.chartEl.getBoundingClientRect().top - ctx.wrapEl.getBoundingClientRect().top;
-            ctx.handleEl.style.top = (y + offset) + 'px';
-        }
-
-        // 更新药丸价格标签
-        function updateHandlePriceLabel(ctx) {
-            ctx.handleEl.querySelector('.sl-price').textContent = ctx.slPrice.toFixed(2);
-            const el = ctx.panelEl.querySelector('.op-sl-val');
-            if (el) el.textContent = ctx.slPrice.toFixed(2);
-        }
-
-        // 核心：自动判方向 + 算股数（双上限） + 更新面板
-        function updateOrderPanel(ctx) {
-            const entry = ctx.latestClose || 0;
-            if (!ctx.slPrice || !entry) return;
-            const { slPrice } = ctx;
-
-            const isBuy = slPrice < entry;
-            ctx.orderDir = isBuy ? 'BUY' : 'SELL';
-            ctx.dirBadgeEl.className = `op-dir-badge ${isBuy ? 'buy' : 'sell'}`;
-            ctx.dirBadgeEl.textContent = isBuy ? '▲ 做多' : '▼ 做空';
-            ctx.panelTitleEl.textContent = isBuy ? '做多开仓' : '做空开仓';
-            ctx.confirmBtn.className = `op-btn confirm ${isBuy ? '' : 'sell'}`;
-            ctx.confirmBtn.textContent = isBuy ? '确认做多' : '确认做空';
-
-            const riskPerShare = Math.abs(entry - slPrice);
-            const slPct = entry > 0 ? (riskPerShare / entry * 100) : 0;
-            ctx.riskEl.textContent = riskPerShare > 0 ? `$${riskPerShare.toFixed(2)}` : '—';
-            ctx.slPctEl.textContent = slPct > 0 ? `${slPct.toFixed(2)}%` : '—';
-
-            // ── 股数：最大亏损 + 资金上限 取较小値 ──
-            const maxLoss = parseFloat(ctx.maxLossEl.value) || 100;
-            const acct = ctx.accountInfo || {};
-            const available = acct.available_cash || 0;
-            const total = acct.total_equity || 0;
-            const cashCap = available > 0 ? Math.min(available * 0.9, total) : Infinity;
-            const qtyByLoss = riskPerShare > 0 ? Math.floor(maxLoss / riskPerShare) : 0;
-            const qtyByCash = cashCap < Infinity && entry > 0 ? Math.floor(cashCap / entry) : Infinity;
-            const qty = Math.min(qtyByLoss, qtyByCash);
-            ctx.qtyEl.textContent = qty > 0 ? `${qty} 股` : '—';
-            ctx.qtyEl.style.color = qty > 0 ? '#d1d4dc' : '#787b86';
-            ctx.qtyEl.title = (qty > 0 && qtyByCash < qtyByLoss)
-                ? `按止损可开 ${qtyByLoss} 股，因资金上限抽到 ${qty} 股` : '';
-
-            const cost = qty * entry;
-            ctx.costEl.textContent = qty > 0 ? `$${cost.toFixed(0)}` : '—';
-            if (qty > 0 && total > 0) {
-                ctx.hintEl.textContent = `💡 占用 $${cost.toFixed(0)}（账户$${(total / 10000).toFixed(1)}万的 ${(cost / total * 100).toFixed(1)}%）`;
-            } else if (qty > 0) {
-                ctx.hintEl.textContent = `💡 占用 $${cost.toFixed(0)}（引擎未连接，资金校验已跳过）`;
-            } else {
-                ctx.hintEl.textContent = '请拖动止损控件';
-            }
-            if (ctx.slPriceLine) {
-                ctx.slPriceLine.applyOptions({ price: slPrice, title: `止损 ${slPrice.toFixed(2)}` });
-            }
-        }
-
-        // 进入开仓模式（异步获取真实账户余额）
-        async function enterOrderMode(ctx) {
-            showToast('系统禁止手动开仓，请走 Alpha 审批', 'warn');
-            speak('禁止手动开仓', true);
-        }
-
-        // 退出开仓模式
-        function exitOrderMode(ctx) {
-            ctx.orderMode = false;
-            if (ctx.slPriceLine) { ctx.cs.removePriceLine(ctx.slPriceLine); ctx.slPriceLine = null; }
-            ctx.handleEl.classList.remove('active');
-            ctx.panelEl.classList.remove('active');
-            // 隐藏遮罩层
-            const overlay = document.getElementById('orderPanelOverlay');
-            if (overlay) { overlay.classList.remove('active'); overlay.onclick = null; }
-            activeDrag = null;
-            document.body.style.cursor = '';
-            // 如果持仓且有止损价，自动切回 modifyMode
-            if (state[ctx.sym]?.position?.stop_loss) {
-                enterModifyMode(ctx, state[ctx.sym].position.stop_loss);
-            }
-        }
-
-        // 进入止损修改模式（持仓期间橙色药丸常显）
-        function enterModifyMode(ctx, slPx) {
-            if (ctx.orderMode) return;  // 开仓模式优先
-            ctx.modifyMode = true;
-            ctx.slPrice = parseFloat(slPx.toFixed ? slPx.toFixed(2) : slPx);
-            ctx.handleEl.classList.remove('active');
-            ctx.handleEl.classList.add('modify');
-            updateHandlePriceLabel(ctx);
-            snapHandle(ctx);
-        }
-
-        // 退出止损修改模式
-        function exitModifyMode(ctx) {
-            ctx.modifyMode = false;
-            ctx.handleEl.classList.remove('modify');
-        }
-
-
+        // 拖动开仓 / 改止损 / 订单面板辅助函数已移至 console.html
         // ── WebSocket 实时更新 ──────────────────────────────────
         function connectWS() {
             const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -2754,14 +2060,8 @@
                                 `✅ ${sym} 已批准 · Agent${live ? '执行' : '观察'}已开`,
                                 live ? 'warn' : 'tip',
                             );
-                            const sel = document.getElementById(`auto-sel-${sym}`);
-                            if (sel) {
-                                const mode = live ? 'live' : 'observe';
-                                sel.value = mode;
-                                sel.style.borderColor = live ? '#ef5350' : '#f0b90b';
-                                sel.style.color = live ? '#ef5350' : '#f0b90b';
-                                if (state[sym]) state[sym].autoMode = mode;
-                            }
+                            // auto-sel 控件已移至 console；这里仅记录 Agent 模式供 sys panel 展示
+                            if (state[sym]) state[sym].autoMode = live ? 'live' : 'observe';
                             focusCell(sym);
                         } else if (ev.event === 'rejected') {
                             if (window.AlphaWorkflow) AlphaWorkflow.onApprovalResolved(sym);
@@ -3111,7 +2411,6 @@
         DEFAULT_SYMBOLS.forEach((sym, idx) => {
             document.getElementById('grid').appendChild(createCell(sym, idx));
             initChart(sym);
-            bindEvents(sym);
             updateSysPanel(sym);
         });
         // 初始化已知 pending，避免首次轮询误报

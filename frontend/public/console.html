@@ -123,6 +123,9 @@
   .checkbox-row input { width: auto; }
   .checkbox-row label { margin: 0; color: var(--muted); }
   .method-desc { color: var(--muted); font-size: 11px; margin: 6px 0; line-height: 1.5; }
+  .ctrl-card .row > div { min-width: 0; }
+  #autoStrategySel.observe { color: var(--amber); border-color: var(--amber); }
+  #autoStrategySel.live { color: var(--red); border-color: var(--red); }
 </style>
 </head>
 <body>
@@ -146,8 +149,31 @@
 </div>
 
 <div class="main">
-  <!-- 左：创建进场单 -->
+  <!-- 左：标的控制 + 创建进场单 -->
   <div>
+    <div class="card ctrl-card">
+      <h2>🎛️ 标的控制 <span class="count" id="symCtrlSym"></span></h2>
+      <div class="row">
+        <div>
+          <label>Agent 执行模式</label>
+          <select id="autoStrategySel" title="人工审批后的建议由引擎执行（观察=只记录 / 实盘=真实下单）。切实盘前二次确认。">
+            <option value="off">关闭</option>
+            <option value="observe">观察（不下单）</option>
+            <option value="live">实盘下单</option>
+          </select>
+        </div>
+        <div>
+          <label>跟踪止盈 trail</label>
+          <select id="trailModeSel" title="ExitManager 跟踪止盈（剩余半仓棘轮模式）。Agent 执行≠关闭时会被强制清零。">
+            <option value="0">关闭</option>
+            <option value="1">M1 ST 跟踪</option>
+            <option value="2">M5 ST 跟踪</option>
+            <option value="3">EMA 跟踪</option>
+          </select>
+        </div>
+      </div>
+      <div class="method-desc" id="symCtrlDesc"></div>
+    </div>
     <div class="card">
       <h2>📝 创建进场单</h2>
       <div class="row">
@@ -214,10 +240,7 @@
         <input id="bypassWindow" type="checkbox" />
         <label for="bypassWindow">允许在 RTH 黑窗外进场（熔断仍不可绕过）</label>
       </div>
-      <div class="checkbox-row">
-        <input id="stTrail" type="checkbox" />
-        <label for="stTrail">启用 ST 跟踪止盈（复用 ExitManager：剩余半仓用 M5 SuperTrend 棘轮跟踪）</label>
-      </div>
+      <!-- ST 跟踪止盈已上移至「标的控制」卡片（完整 0/1/2/3 trail_mode）-->
 
       <div class="preview" id="preview"><div class="empty">填写参数后将预览 entry / stop / tp / 仓位</div></div>
       <button class="submit" id="submitBtn">提交进场</button>
@@ -273,23 +296,67 @@ async function loadSymbols() {
   if (state.symbol) $("symbol").value = state.symbol;
 }
 
+const TRAIL_LABEL = { 0: "关闭", 1: "M1 ST 跟踪", 2: "M5 ST 跟踪", 3: "EMA 跟踪" };
+const AUTO_LABEL = { off: "关闭", observe: "观察（不下单）", live: "实盘下单" };
+
 async function loadSettings() {
+  $("symCtrlSym").textContent = state.symbol || "";
   try {
     const r = await fetch(`/api/settings/${state.symbol}`);
     const s = await r.json();
-    $("stTrail").checked = (Number(s.trail_mode) === 2);
+    // Agent 执行模式回填：auto_strategy 优先于 auto_observe
+    const mode = s.auto_strategy ? "live" : (s.auto_observe ? "observe" : "off");
+    $("autoStrategySel").value = mode;
+    applyAutoStyle(mode);
+    const tm = String(Number(s.trail_mode) || 0);   // 完整 0/1/2/3
+    $("trailModeSel").value = tm;
+    updateSymCtrlDesc(mode, tm);
   } catch {}
 }
 
-async function toggleStTrail(e) {
-  const mode = e.target.checked ? 2 : 0;
+function applyAutoStyle(mode) {
+  const sel = $("autoStrategySel");
+  sel.classList.remove("observe", "live");
+  if (mode === "observe" || mode === "live") sel.classList.add(mode);
+}
+
+function updateSymCtrlDesc(mode, tm) {
+  const auto = `Agent: ${AUTO_LABEL[mode] || mode}` + (mode === "live" ? " ⚠️将真实下单" : "");
+  const trail = `跟踪: ${TRAIL_LABEL[tm] || tm}` + (mode !== "off" ? "（被 Agent 执行强制关闭）" : "");
+  $("symCtrlDesc").textContent = `${auto} · ${trail}`;
+}
+
+async function setAutoStrategy(mode) {
+  // 切实盘前二次确认（真金白银）
+  if (mode === "live" &&
+      !confirm(`确认让 ${state.symbol} 进入【实盘下单】？\n策略将在真实账户自动开仓 / 止损 / 止盈！`)) {
+    mode = "observe"; $("autoStrategySel").value = "observe";
+  }
+  const body = { auto_strategy: mode === "live", auto_observe: mode === "observe" };
+  let tm = $("trailModeSel").value;
+  if (mode !== "off") {            // Agent 执行时强制 trail=0，避免与 AutoStrategy 互相改单
+    body.trail_mode = 0; tm = "0"; $("trailModeSel").value = "0";
+  }
+  applyAutoStyle(mode);
+  updateSymCtrlDesc(mode, tm);
   try {
     await fetch(`/api/settings/${state.symbol}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trail_mode: mode }),
+      body: JSON.stringify(body),
     });
-    toast(`ST 跟踪止盈 ${e.target.checked ? "已开启（M5-ST，由 ExitManager 棘轮）" : "已关闭"}`, "ok");
-  } catch (err) { toast("ST 跟踪设置失败", "err"); }
+    toast(`${state.symbol} Agent执行：${AUTO_LABEL[mode] || mode}`, mode === "live" ? "warn" : "ok");
+  } catch { toast("Agent 执行模式设置失败", "err"); }
+}
+
+async function setTrailMode(mode) {
+  try {
+    await fetch(`/api/settings/${state.symbol}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trail_mode: parseInt(mode, 10) }),
+    });
+    updateSymCtrlDesc($("autoStrategySel").value, String(mode));
+    toast(`${state.symbol} 跟踪止盈：${TRAIL_LABEL[mode] || mode}`, "ok");
+  } catch { toast("跟踪止盈设置失败", "err"); }
 }
 
 function bindForm() {
@@ -297,6 +364,7 @@ function bindForm() {
     state.symbol = e.target.value.trim().toUpperCase();
     localStorage.setItem("consoleSymbol", state.symbol);
     loadContext();
+    loadSettings();
   });
   $("sideSeg").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
@@ -317,7 +385,8 @@ function bindForm() {
     .forEach(id => $(id).addEventListener("input", renderPreview));
   $("submitBtn").addEventListener("click", submitEntry);
   $("killBtn").addEventListener("click", killSwitch);
-  $("stTrail").addEventListener("change", toggleStTrail);
+  $("autoStrategySel").addEventListener("change", (e) => setAutoStrategy(e.target.value));
+  $("trailModeSel").addEventListener("change", (e) => setTrailMode(e.target.value));
   $("clearPropBtn").addEventListener("click", clearProposals);
   $("pendingWrap").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
