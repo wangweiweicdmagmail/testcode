@@ -25,18 +25,25 @@ redis-cli hgetall position:NVDA
 ## 核心文件架构
 
 ```
-main.py           # 入口：配置 TradingNode，注入 OrderGatewayActor，启动引擎
-strategy.py       # 策略：1m/5m K线聚合、SuperTrend(10,2)/EMA21、日K围栏、写Redis
-order_actor.py    # HTTP下单网关(端口8888) + 订单状态Redis回调 + 账户余额轮询
+main.py           # 入口：配置 TradingNode，装配 M1/M5 指标策略 + OrderGatewayActor，启动引擎
+indicators/       # 共享 IndicatorRegistry + 状态机（ST/EMA/DEMA/MomentumATR/SessionVWAP）
+strategies/       # m1_indicator / m5_indicator 两周期策略：K线聚合 + 指标 → Redis + registry
+signal_detector.py # M1 ST 翻转 + M5 同向 → st_super 信号 → 提案池（读 registry）
+signals/          # st_super 信号；entry_methods（5 种进场方法 → TradeIntent）
+entry/            # ticket_store：ARMED/RESTING 进场票据持久化（照搬 proposal_store 范式）
+auto_runner.py    # Alpha + 控制台进场 → RiskGate → AutoPM 编排；消费 auto:enter / auto:close
+execution/auto_pm.py # 仓位单元、OCA 止损/止盈、resting GTC 限价、对账、IBKR 报单
+order_actor.py    # HTTP 网关(8888)：平仓/trail、/enter-now 立即触发；开仓 /order 已禁 403
 exit_manager.py   # 独立止盈/止损管理器，监听 bar.collected 事件
-events.py         # 自定义 MessageBus 事件类（ExternalOrderCommand 等）
+events.py         # 自定义 MessageBus 事件类（EntryExecuteNowEvent 等）
 order_sender.py   # 外部下单测试脚本
 
 frontend/
   server.js       # Node.js WebSocket + Redis订阅 + HTTP代理（端口3000）
   public/
-    index.html        # 单图Dashboard：K线 + 右侧指标面板 + 语音提醒
-    multi.html        # 四图总览：2×2网格，时间轴/十字线联动，止损拖动开仓
+    console.html      # 控制台（交易主入口）：进场 / Agent执行 / 审批 / Kill Switch
+    index.html        # 单图：纯图表查看（K线 + 指标 + 只读持仓/账户 + 语音）
+    multi.html        # 四图：纯图表查看（2×2 时间轴/十字线联动）
     indicators.html   # 四列指标排行：M1 ST / M5 ST / EMA偏离 / 日内新高
 ```
 
@@ -44,10 +51,11 @@ frontend/
 
 | 链路 | 路径 |
 |------|------|
-| 实时K线 | IBKR → strategy.py → Redis PUBLISH → server.js → WebSocket → 浏览器 |
+| 实时K线 | IBKR → strategies/m1·m5_indicator → Redis PUBLISH → server.js → WebSocket → 浏览器 |
+| 指标 | strategies → IndicatorRegistry(内存) + indicators:active:{sym}(Redis)；信号/控制台读 |
 | 指标轮询 | 浏览器 → HTTP GET /api/\* → server.js → Redis GET（每30s） |
-| 订单状态 | 浏览器下单 → order_actor.py(8888) → IBKR → Redis PUBLISH → WebSocket → 语音/Toast |
-| 账户余额 | IBKR reqAccountSummary → AccountState 事件 → strategy.py → Redis → WebSocket |
+| 进场/订单 | console → POST /api/enter → auto:enter → AutoRunner → AutoPM → IBKR → Redis PUBLISH → WebSocket |
+| 账户余额 | IBKR reqAccountSummary → AccountState 事件 → 策略 → Redis → WebSocket |
 
 Redis 是唯一共享状态，三层可独立重启。
 
@@ -60,12 +68,13 @@ Redis 是唯一共享状态，三层可独立重启。
 
 ## 前端代码注意事项
 
-- 三个 HTML 文件各自独立，无共享 JS 模块
-- 图表库：Lightweight Charts v4，通过 CDN 引入
-- 语音提醒默认开启，右上角有切换按钮
+- 多个 HTML 页面各自独立；console.html 为交易主入口，index/multi 为纯图表查看页
+- 图表库：Lightweight Charts v4，通过 CDN 引入；shared/*.js 提供 status-bar/toast/api-auth 等共享组件
+- 语音提醒默认开启，状态栏铃铛切换
 - 订单标记使用 `orderMarkers` 全量数组管理，自动升序刷新（LightweightCharts API 要求）
-- 止损拖动开仓/改止损价通过 drag 事件实现（mousedown → mousemove → mouseup）
-- 价格线（入场价实线 + 止损价虚线）需在订单成交后实时绘制，页面刷新后从 `/api/active-orders` 恢复
+- 所有交易动作（开仓/平仓/改止损/审批）只在 console.html；index/multi 仅只读展示持仓价格线
+- 价格线（入场价实线 + 止损价虚线）由 WS order:update + /api/active-orders 巡检驱动，页面刷新后恢复
+- 进场统一经 `auto:enter:{sym}` → AutoRunner → AutoPM；旧 /api/order 已 403
 
 ## 常见问题处理
 

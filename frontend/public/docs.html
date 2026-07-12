@@ -124,7 +124,7 @@
             <!-- Browser -->
             <rect x="280" y="16" width="320" height="56" rx="8" fill="url(#gFe)" stroke="#2962ff" stroke-width="1.5"/>
             <text x="440" y="40" text-anchor="middle" fill="#90caf9" font-size="14" font-weight="600">浏览器 Dashboard</text>
-            <text x="440" y="58" text-anchor="middle" fill="#787b86" font-size="11">单图 / 四宫格 / 审批 / 审计</text>
+            <text x="440" y="58" text-anchor="middle" fill="#787b86" font-size="11">控制台 / 单图 / 四宫格 / 审批 / 审计</text>
             <!-- Node -->
             <rect x="280" y="88" width="320" height="48" rx="6" fill="#252932" stroke="#434651"/>
             <text x="440" y="112" text-anchor="middle" fill="#d1d4dc" font-size="13" font-weight="600">frontend/server.js :3000</text>
@@ -136,7 +136,7 @@
             <!-- Engine -->
             <rect x="200" y="224" width="480" height="56" rx="8" fill="url(#gEn)" stroke="#26a69a" stroke-width="1.5"/>
             <text x="440" y="248" text-anchor="middle" fill="#80cbc4" font-size="14" font-weight="600">python main.py + order_actor :8888</text>
-            <text x="440" y="266" text-anchor="middle" fill="#787b86" font-size="10">strategy · SignalDetector · AutoRunner · AutoPM · ExitManager</text>
+            <text x="440" y="266" text-anchor="middle" fill="#787b86" font-size="10">indicators/strategies · SignalDetector · EntryMethod · AutoRunner · AutoPM</text>
             <!-- IBKR -->
             <rect x="300" y="296" width="280" height="36" rx="6" fill="#252932" stroke="#b388ff"/>
             <text x="440" y="318" text-anchor="middle" fill="#ce93d8" font-size="12" font-weight="600">TWS / IB Gateway · IBKR API</text>
@@ -267,7 +267,7 @@
           <div class="diagram-caption">指标排行等静态数据走 HTTP 轮询；订单与提案走 WebSocket 推送。</div>
         </div>
 
-        <h3>四宫格审批交互</h3>
+        <h3>审批 + 进场交互（控制台）</h3>
         <div class="diagram-wrap">
           <svg viewBox="0 0 880 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="四宫格审批 UI 流程">
             <defs><marker id="arr5" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#787b86"/></marker></defs>
@@ -296,7 +296,7 @@
             <rect x="40" y="208" width="820" height="4" rx="2" fill="#2962ff" opacity="0.5"/>
             <text x="450" y="218" text-anchor="middle" fill="#787b86" font-size="8">顶栏：待审批队列 · 引擎状态 · 日 PnL · 全平</text>
           </svg>
-          <div class="diagram-caption">顶栏「待审批」可定位到对应宫格；引擎离线时批准按钮禁用。</div>
+          <div class="diagram-caption">审批与进场统一在 <a href="/console.html">控制台</a>；index/multi 已降级为纯图表查看页。引擎离线时批准/进场按钮禁用。</div>
         </div>
       </div>
     </div>
@@ -309,25 +309,36 @@
         <h3>引擎内模块（<code>python main.py</code>）</h3>
         <table>
           <tr><th>模块</th><td>职责</td></tr>
-          <tr><th><code>strategy.py</code></th><td>IBKR K 线、SuperTrend/EMA/VWAP → Redis</td></tr>
-          <tr><th><code>signal_detector.py</code></th><td>M1 触线 → st_super 信号 → 提案池</td></tr>
+          <tr><th><code>indicators/</code> + <code>strategies/</code></th><td>共享 <code>IndicatorRegistry</code>；<code>m1_indicator</code>/<code>m5_indicator</code> 两周期策略：IBKR K 线、SuperTrend/EMA/DEMA/VWAP → Redis + registry</td></tr>
+          <tr><th><code>signal_detector.py</code></th><td>M1 ST 翻转 + M5 同向 → st_super 信号 → 提案池（读 registry）</td></tr>
+          <tr><th><code>signals/entry_methods.py</code> + <code>entry/ticket_store.py</code></th><td>控制台进场方法（市价/手动限价/EMA/ST限价/条件）→ TradeIntent；条件/挂单票据持久化</td></tr>
           <tr><th><code>reclaim_watcher.py</code></th><td>条件单：approved_wait → ready_to_execute</td></tr>
-          <tr><th><code>auto_runner.py</code></th><td>Alpha → RiskGate → AutoPM 编排；消费 <code>auto:close</code></td></tr>
-          <tr><th><code>execution/auto_pm.py</code></th><td>仓位单元、OCA 止损/止盈、对账、IBKR 报单</td></tr>
-          <tr><th><code>order_actor.py</code></th><td>HTTP :8888 网关（平仓/trail；开仓已禁）</td></tr>
+          <tr><th><code>auto_runner.py</code></th><td>Alpha + 控制台进场 → RiskGate → AutoPM 编排；消费 <code>auto:enter</code> / <code>auto:close</code></td></tr>
+          <tr><th><code>execution/auto_pm.py</code></th><td>仓位单元、OCA 止损/止盈、resting GTC 限价、对账、IBKR 报单</td></tr>
+          <tr><th><code>order_actor.py</code></th><td>HTTP :8888 网关（平仓/trail；<code>/enter-now</code> 立即触发；开仓 <code>/order</code> 已禁 403）</td></tr>
           <tr><th><code>exit_manager.py</code></th><td>手动 trail 止盈、非 auto 标的 EOD 15:45</td></tr>
         </table>
 
-        <h3>实盘开仓唯一路径</h3>
+        <h3>开仓两条路径（统一收进 AutoPM）</h3>
+        <p><strong>① 信号路径</strong>（st_super 自动建建议）：</p>
         <div class="flow">
-          <span>触线 / MCP 扫信号</span><span class="arrow">→</span>
+          <span>M1 ST 翻转 + M5 同向</span><span class="arrow">→</span>
           <span>pending 提案</span><span class="arrow">→</span>
           <span>审批 approved_live</span><span class="arrow">→</span>
           <span>AutoRunner</span><span class="arrow">→</span>
           <span>RiskGate 定量</span><span class="arrow">→</span>
           <span>AutoPM → IBKR</span>
         </div>
-        <p>手动 Bracket / HTTP <code>/order</code> 已禁止（403）。FA 分配由 <code>IB_FA_GROUP</code> / <code>IB_FA_METHOD</code> 在引擎注入，上层不传 account。</p>
+        <p><strong>② 控制台路径</strong>（<a href="/console.html">/console.html</a> 手动发起，5 种方法）：</p>
+        <div class="flow">
+          <span>console 表单</span><span class="arrow">→</span>
+          <span>POST /api/enter</span><span class="arrow">→</span>
+          <span>auto:enter:{sym}</span><span class="arrow">→</span>
+          <span>EntryMethod.build_intent</span><span class="arrow">→</span>
+          <span>RiskGate</span><span class="arrow">→</span>
+          <span>AutoPM（resting GTC / marketable）→ IBKR</span>
+        </div>
+        <p>手动 Bracket / HTTP <code>/order</code> 已禁止（403）。条件进场用 <code>entry/ticket_store</code> 持久化 ARMED 票，每根 M1 判定触发。FA 分配由 <code>IB_FA_GROUP</code> / <code>IB_FA_METHOD</code> 在引擎注入，上层不传 account。</p>
 
         <h3>平仓两条路径</h3>
         <table>
@@ -341,7 +352,7 @@
       <div class="panel-hd">数据链路</div>
       <div class="panel-bd">
         <table>
-          <tr><th>实时 K 线</th><td>IBKR → strategy → Redis PUBLISH → server.js WebSocket → 浏览器</td></tr>
+          <tr><th>实时 K 线</th><td>IBKR → <code>strategies/m1·m5_indicator</code> → Redis PUBLISH → server.js WebSocket → 浏览器</td></tr>
           <tr><th>指标排行</th><td>浏览器每 30s → <code>GET /api/indicators</code> → Redis</td></tr>
           <tr><th>订单 / 仓位</th><td>AutoPM / order_actor → Redis <code>order:update</code> / <code>position:update</code> → WebSocket → 语音 / Toast</td></tr>
           <tr><th>账户</th><td>IBKR reqAccountSummary → Redis <code>account:funds</code>（FA Group 子账户约 3 分钟刷新）</td></tr>
@@ -388,8 +399,9 @@ bash scripts/start-stack.sh</pre>
 
         <h3>3. 常用 URL</h3>
         <table>
-          <tr><th>四宫格 + 审批</th><td><a href="/multi.html">/multi.html</a></td></tr>
+          <tr><th>控制台（主）</th><td><a href="/console.html">/console.html</a> · 下单 / Agent执行 / 审批 / Kill Switch</td></tr>
           <tr><th>单图</th><td><a href="/">/</a> 或 <code>/?symbol=QQQ</code></td></tr>
+          <tr><th>四宫格</th><td><a href="/multi.html">/multi.html</a></td></tr>
           <tr><th>配置（只读）</th><td><a href="/settings.html">/settings.html</a></td></tr>
           <tr><th>收盘审计</th><td><a href="/audit.html">/audit.html</a></td></tr>
         </table>
@@ -402,8 +414,9 @@ bash scripts/start-stack.sh</pre>
       <div class="panel-hd">前端页面说明</div>
       <div class="panel-bd">
         <table>
-          <tr><th>单图</th><td>K 线 + 指标面板 + 提案卡片；手动开仓已禁用</td></tr>
-          <tr><th>四宫格</th><td>多标的联动；待审批 / 待执行队列；批准实盘</td></tr>
+          <tr><th>控制台 <span class="tag tag-live">主</span></th><td><a href="/console.html">/console.html</a> · 进场（市价/手动限价/EMA/ST限价/条件）、Agent执行模式、跟踪止盈、挂单/持仓/提案管理、Kill Switch</td></tr>
+          <tr><th>单图</th><td>纯图表查看：K 线 + 指标面板 + 只读持仓/账户 + 语音</td></tr>
+          <tr><th>四宫格</th><td>纯图表查看：2×2 多标的联动 + 十字线/时间轴同步</td></tr>
           <tr><th>指标</th><td>M1/M5 ST、EMA 偏离、日内新高排行</td></tr>
           <tr><th>历史</th><td>提案全生命周期列表</td></tr>
           <tr><th>决策</th><td>Agent 决策日志视图</td></tr>

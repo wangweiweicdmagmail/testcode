@@ -178,10 +178,11 @@ python main.py --mode backtest --date 2026-02-25  # 回测指定日期
 node frontend/server.js
 
 # 打开浏览器
-# 单图：    http://localhost:3000/?symbol=QQQ
-# 指标排行：http://localhost:3000/indicators.html
-# 四图总览：http://localhost:3000/multi.html
-# 系统文档：http://localhost:3000/docs.html
+# 控制台（主）：http://localhost:3000/console.html
+# 单图：       http://localhost:3000/?symbol=QQQ
+# 指标排行：   http://localhost:3000/indicators.html
+# 四图总览：   http://localhost:3000/multi.html
+# 系统文档：   http://localhost:3000/docs.html
 ```
 
 > **模式对比**
@@ -195,9 +196,20 @@ node frontend/server.js
 
 ## 前端 UI 功能
 
-### 单图模式（index.html）
+### 控制台（console.html）— 交易主入口
 
-左右分栏布局：
+所有交易动作统一在此；index/multi 已降级为**纯图表查看页**（无下单/平仓/改止损 UI）。
+
+- **标的控制**：Agent 执行模式（off / observe / live，live 二次确认）+ 跟踪止盈 trail（0 关 / 1 M1-ST / 2 M5-ST / 3 EMA）。复用 `GET/POST /api/settings/:symbol`。
+- **创建进场单**：5 种方法 —— 市价 / 手动限价（GTC）/ EMA20 限价 / 超级趋势限价 / 条件（穿价触发，ARMED 票每根 M1 判定）。实时预览 entry/stop/tp/仓位（以损定量）。
+- **挂单 / 持仓 / 提案** 三表：WebSocket 实时刷新（`entry:update` / `position:update` / `proposal:update`），支持撤单、改价、改止损、平仓、审批。
+- **Kill Switch**：撤所有进场单 + 撤所有挂单 + 市价平所有仓 + 触发当日熔断。
+
+> 进场链路：`POST /api/enter` → `auto:enter:{sym}` → `AutoRunner._drain_enter_request` → `EntryMethod.build_intent` → `RiskGate.check_enter` → `AutoPM`（resting GTC 限价 / marketable）→ IBKR。
+
+### 单图模式（index.html）— 纯图表查看
+
+左右分栏布局（开仓/平仓/改止损已移至控制台）：
 - **左侧 70%**：K 线图（SuperTrend 分段彩色线、EMA21、开盘区间 OR High/Low）
 - **右侧 30%**：四个可折叠指标面板（点击标题栏展开/收起）
 
@@ -261,36 +273,19 @@ node frontend/server.js
 | 2-3次 | `QQQ 连续2次新高` |
 | 4次以上 | `QQQ 强势！连续5次新高` |
 
-### 止损拖动开仓（单图 & 四图）
+### 交易动作（开仓 / 平仓 / 改止损）
 
-点击 **「开仓」** 按钮后：
+均统一在 [控制台](#控制台consolehtml--交易主入口) 完成：
 
-1. 止损药丸控件出现（红色圆角标签，带脉冲动画）
-2. 上下拖动调整止损价
-3. 订单面板同步显示：最大亏损、建议股数、每股风险、开仓金额、资金占比
-4. 点击 **确认做多/做空** → `POST /api/order/:symbol` → 引擎提交 BRACKET 单
+| 动作 | 端点 | 说明 |
+|------|------|------|
+| 开仓 | `POST /api/enter/:symbol` | 5 种方法（市价/手动限价/EMA/ST限价/条件），经 AutoPM |
+| 平仓 | `DELETE /api/position/:symbol` | AutoPM 路由（auto 标的）或 order_actor |
+| 改止损 | `POST /api/modify-stop/:symbol` | 修改 IBKR 止损单触发价 |
+| 撤挂单 | `POST /api/entry-cancel` | 按 ticket_id 或 entry_coid |
+| 改挂单价 | `POST /api/entry-modify` | RESTING 限价 / ARMED 触发价 |
 
-### 平仓操作（四图总览）
-
-点击 **「平仓」** 按钮后弹出确认框，确认后调用 `DELETE /api/position/:symbol` → `POST /close`（引擎端）：
-
-1. 引擎取消关联止损单
-2. 提交反向市价单平仓
-3. 前端通过 WebSocket `position:update` 接收平仓通知，自动清除价格线和仓位面板
-
-> [!NOTE]
-> 引擎离线时回退为仅清除 Redis 记录，并警告用户手动在 TWS 中平仓。
-
-### 持仓止损价修改（单图 & 四图）
-
-开仓后，可实时拖动修改已提交给 IBKR 的止损单触发价：
-
-1. **点击止损价格线** 附近区域 → 橙色药丸出现在止损价位置
-2. 上下拖动药丸 → 橙色临时跟踪线跟随移动，原止损价格线保持不动
-3. **松手** → 临时线消失、药丸消失，`POST /api/modify-stop/:symbol` 修改 IBKR 止损单
-4. 修改成功 → 原止损价格线移动到新价格，Toast 提示修改结果
-
-> 止损成交或手动平仓后，价格线自动从图表上消失。
+> index/multi 仅以**只读价格线**展示持仓入场价（实线）与止损价（虚线），页面刷新后从 `/api/active-orders` 恢复。手动 `POST /api/order`（旧 BRACKET）已禁用（403）。
 
 ## 发送测试订单
 
