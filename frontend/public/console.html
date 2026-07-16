@@ -262,6 +262,12 @@
       <div id="posWrap"><div class="empty">无持仓</div></div>
     </div>
     <div class="card">
+      <h2>🗂️ 订单分组 <span class="count" id="ordGrpCount"></span>
+        <span style="margin-left:auto;font-size:11px;color:var(--muted)" id="ordGrpTs"></span>
+      </h2>
+      <div id="ordGrpWrap"><div class="empty">无活跃订单</div></div>
+    </div>
+    <div class="card">
       <h2>📨 信号提案（审批） <span class="count" id="propCount"></span>
         <button class="btn danger" id="clearPropBtn" style="margin-left:auto;">清空全部</button>
       </h2>
@@ -537,7 +543,7 @@ async function submitEntry() {
 }
 
 // ── 数据刷新 ────────────────────────────────────────────────────
-async function refreshAll() { await loadContext(); loadSettings(); refreshPending(); refreshPositions(); refreshProposals(); refreshHeader(); }
+async function refreshAll() { await loadContext(); loadSettings(); refreshPending(); refreshPositions(); refreshOrdersGrouped(); refreshProposals(); refreshHeader(); }
 
 async function loadContext() {
   try {
@@ -660,6 +666,61 @@ function renderPosRow(p) {
       <button class="btn" onclick="modifyStop('${p.symbol}', ${p.stop_loss||0})">改止损</button>
       <button class="btn danger" onclick="closePos('${p.symbol}')">平仓</button>
     </td></tr>`;
+}
+
+// 订单分组：reqAllOpenOrders → 按 position_key 跨子账户聚合引擎单 + TWS 手动单单列。
+// 引擎单 coid={poskey}-{leg}-{n}，leg ∈ E入场/S止损/T止盈/C平仓；一眼看清每仓位的腿分布
+// 与 TWS 手动单（clientId=0，orderRef 空）。来源 /api/orders-grouped（FA 直查，绕 cache 盲区）。
+const LEG_LABEL = { E: "入场", S: "止损", T: "止盈", C: "平仓" };
+async function refreshOrdersGrouped() {
+  const wrap = $("ordGrpWrap");
+  if (!wrap) return;
+  let data;
+  try { data = await fetch("/api/orders-grouped").then(r => r.json()); } catch { data = null; }
+  if (!data || data.error) {
+    wrap.innerHTML = `<div class="empty">${(data && data.error) ? "查询失败" : "引擎未连接"}</div>`;
+    $("ordGrpCount").textContent = "";
+    $("ordGrpTs").textContent = "";
+    return;
+  }
+  const eng = Array.isArray(data.engine) ? data.engine : [];
+  const manual = Array.isArray(data.manual) ? data.manual : [];
+  const other = Array.isArray(data.other_api) ? data.other_api : [];
+  const total = eng.length + manual.length + other.length;
+  $("ordGrpCount").textContent = total ? `(${total})` : "";
+  $("ordGrpTs").textContent = data.fetched_at ? `更新 ${formatTime(data.fetched_at)}` : "";
+  if (!total) { wrap.innerHTML = '<div class="empty">无活跃订单</div>'; return; }
+
+  const engRows = eng.map(g => {
+    const legs = g.legs.map(l => {
+      const lab = LEG_LABEL[l.leg] || l.leg;
+      const px = (l.price != null) ? (+l.price).toFixed(2) : "—";
+      return `<span class="badge" style="background:rgba(38,166,154,.15);color:#26a69a" title="${l.coid}">${lab} ${l.account||"?"} ${l.qty||0}@${px}</span>`;
+    }).join(" ");
+    const dir = g.side === "BUY" ? "多" : "空";
+    return `<tr>
+      <td class="sym" title="${g.position_key}">${g.symbol||"—"}<div style="font-size:10px;color:var(--muted)">${g.proposal_id||g.position_key}</div></td>
+      <td class="pos ${g.side==="BUY"?"long":"short"}">${dir} ${g.net_qty||0}</td>
+      <td style="font-size:11px">${sortedAccounts(g.accounts)}</td>
+      <td>${legs}</td>
+    </tr>`;
+  }).join("");
+  const manualRows = manual.map(o => `<tr>
+    <td class="sym">${(o.symbol||"—").toUpperCase()}<div style="font-size:10px;color:var(--red)">TWS 手动</div></td>
+    <td class="pos ${o.action==="BUY"?"long":"short"}">${o.action==="BUY"?"买":"卖"} ${o.qty||0}</td>
+    <td style="font-size:11px">${o.account||"?"}</td>
+    <td><span class="badge" style="background:rgba(239,83,80,.15);color:#ef5350">${o.order_type} ${o.lmt_price!=null?(+o.lmt_price).toFixed(2):""}</span> <span style="font-size:10px;color:var(--muted)">perm ${o.perm_id||"?"}</span></td>
+  </tr>`).join("");
+  const otherRows = other.length
+    ? `<tr><td colspan="4" style="color:var(--amber)">其他 API client 单 ${other.length} 条（clientId≠3 非 engine）</td></tr>` : "";
+
+  wrap.innerHTML = `<table>
+    <thead><tr><th>标的/仓位键</th><th>方向/净量</th><th>子账户</th><th>腿明细</th></tr></thead>
+    <tbody>${engRows}${manualRows}${otherRows}</tbody></table>`;
+}
+function sortedAccounts(accts) {
+  if (!Array.isArray(accts) || !accts.length) return "—";
+  return accts.slice().sort().join(", ");
 }
 
 function formatTime(ts) {
