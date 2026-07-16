@@ -1,6 +1,8 @@
 import json
 import http.client
 import redis as _redis
+from dataclasses import dataclass
+from typing import Callable
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
@@ -15,10 +17,38 @@ REDIS_PORT = 6379
 TRAIL_OFF   = 0   # 全部关闭
 TRAIL_M1_ST = 1   # M1 SuperTrend 跟踪（10, 3.5）
 TRAIL_M5_ST = 2   # M5 SuperTrend 跟踪（10, 3.0）
-TRAIL_EMA   = 3   # M5 EMA21 跟踪
+TRAIL_EMA   = 3   # M5 EMA20 跟踪
 
 # 尾盘自动平仓时间（ET，15:45 = 945分钟）
 EOD_CLOSE_ET_MINUTE = 15 * 60 + 45   # 945
+
+
+# ── 可插拔跟踪方法注册表 ─────────────────────────────────────────────
+# 每个方法声明：展示名 + 触发 bar 类型（m1/m5）+ 计算函数 (em, sym, bar) → (value, st_dir)
+# 新增方法（如 N-2 高低点）只需在此注册一条 + 控制台加一个 <option>。
+@dataclass(frozen=True)
+class TrailMethod:
+    name: str
+    bar_kind: str          # "m1" | "m5" —— 决定由哪个 bar handler 派发
+    compute: Callable      # (em, sym, bar_dict) -> (value: float | None, st_dir: int)
+
+
+def _st_from_bar(em, sym: str, bar: dict):
+    """ST 跟踪：候选值与方向都取自当根 bar 内嵌的 st_value / st_dir。"""
+    val = bar.get("st_value") or None
+    return (float(val) if val else None, int(bar.get("st_dir", 0)))
+
+
+def _ema20_from_m5(em, sym: str, bar: dict):
+    """EMA20 跟踪：M1 bar 触发，候选值取最新 M5 bar 的 ema20；不过滤方向（st_dir=0）。"""
+    return (em._get_m5_ema20(sym), 0)
+
+
+TRAIL_METHODS: dict[int, TrailMethod] = {
+    TRAIL_M1_ST: TrailMethod("M1-ST",    "m1", _st_from_bar),
+    TRAIL_M5_ST: TrailMethod("M5-ST",    "m5", _st_from_bar),
+    TRAIL_EMA:   TrailMethod("EMA20-M5", "m1", _ema20_from_m5),
+}
 
 
 class ExitManagerConfig(StrategyConfig, frozen=True):
@@ -33,7 +63,7 @@ class ExitManager(Strategy):
       0 = 关闭
       1 = M1 ST 跟踪（每根 M1 bar 触发，参数 10, 3.5）
       2 = M5 ST 跟踪（每根 M5 bar 触发，参数 10, 3.0）
-      3 = EMA M5 跟踪（每根 M1 bar 触发，使用最新 M5 EMA21）
+      3 = EMA M5 跟踪（每根 M1 bar 触发，使用最新 M5 EMA20）
 
     设计原则：
       - 每次 bar 收盘直接从 Redis 读 trail_mode，不依赖内存状态
@@ -108,25 +138,17 @@ class ExitManager(Strategy):
         if et_minute_of_day >= EOD_CLOSE_ET_MINUTE:
             self._check_eod_close(bar_time)
 
-        mode = self._get_trail_mode(sym)
-        if mode == TRAIL_OFF or self._is_auto_managed(sym):
+        method = TRAIL_METHODS.get(self._get_trail_mode(sym))
+        if method is None or method.bar_kind != "m1" or self._is_auto_managed(sym):
             return
 
         iid_str = bar.get("instrument_id", "")
         if not iid_str:
             return
 
-        if mode == TRAIL_M1_ST:
-            st_val = bar.get("st_value", 0.0)
-            st_dir = bar.get("st_dir", 0)
-            if st_val:
-                self._apply_trail(sym, iid_str, st_val, st_dir, "M1-ST")
-
-        elif mode == TRAIL_EMA:
-            ema21 = self._get_m5_ema21(sym)
-            if ema21:
-                # EMA 无方向过滤（st_dir=0 表示跳过方向判断）
-                self._apply_trail(sym, iid_str, ema21, 0, "EMA-M5")
+        val, st_dir = method.compute(self, sym, bar)
+        if val:
+            self._apply_trail(sym, iid_str, val, st_dir, method.name)
 
     # ── 尾盘平仓：每天 15:45 ET 后首次 M1 bar 触发，平掉所有持仓 ──────────
     def _check_eod_close(self, bar_time: int) -> None:
@@ -187,18 +209,18 @@ class ExitManager(Strategy):
     # ── M5 bar 收盘：处理 mode=2（M5 ST）────────────────────────────────
     def _on_m5_bar(self, event: BarCollectedM5Event) -> None:
         sym = event.symbol
-        if self._is_auto_managed(sym):
-            return
-        mode = self._get_trail_mode(sym)
-        if mode != TRAIL_M5_ST:
+        method = TRAIL_METHODS.get(self._get_trail_mode(sym))
+        if method is None or method.bar_kind != "m5" or self._is_auto_managed(sym):
             return
 
         bar = event.bar
         iid_str = bar.get("instrument_id", "")
-        st_val = bar.get("st_value", 0.0)
-        st_dir = bar.get("st_dir", 0)
-        if st_val and iid_str:
-            self._apply_trail(sym, iid_str, st_val, st_dir, "M5-ST")
+        if not iid_str:
+            return
+
+        val, st_dir = method.compute(self, sym, bar)
+        if val:
+            self._apply_trail(sym, iid_str, val, st_dir, method.name)
 
     # ── 核心棘轮逻辑（三套共用）──────────────────────────────────────────
     def _apply_trail(self, sym: str, iid_str: str,
@@ -249,18 +271,18 @@ class ExitManager(Strategy):
             )
             self._modify_stop_order(pos, instrument_id, new_sl, sym)
 
-    # ── 读最新 M5 EMA21 ──────────────────────────────────────────────────
-    def _get_m5_ema21(self, sym: str) -> float | None:
+    # ── 读最新 M5 EMA20 ──────────────────────────────────────────────────
+    def _get_m5_ema20(self, sym: str) -> float | None:
         if not self._redis:
             return None
         try:
             raw = self._redis.lindex(f"bars:5m:{sym}", -1)
             if not raw:
                 return None
-            ema21 = json.loads(raw).get("ema21")
-            return float(ema21) if ema21 is not None else None
+            ema20 = json.loads(raw).get("ema20")
+            return float(ema20) if ema20 is not None else None
         except Exception as e:
-            self.log.warning(f"[ExitManager] {sym}: 读取 M5 EMA21 失败: {e}")
+            self.log.warning(f"[ExitManager] {sym}: 读取 M5 EMA20 失败: {e}")
             return None
 
     # ── 读取当前止损价（三重 fallback）────────────────────────────────────

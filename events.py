@@ -16,32 +16,6 @@ class BarCollectedEvent(Event):
         self.bar = bar_dict  # 包含 OHLC, ST_value, st_dir 等
 
 
-class STTrailSettingsEvent(Event):
-    """
-    ST跟踪止损开关变更事件，用于同步 UI 的开关状态到引擎内部策略中。
-    """
-    def __init__(self, symbol: str, active: bool):
-        self._ts_event = time.time_ns()
-        self._ts_init = time.time_ns()
-        self._id = UUID4()
-
-        self.symbol = symbol
-        self.active = active
-
-
-class EMATrailSettingsEvent(Event):
-    """
-    EMA21 M5 跟踪止损开关变更事件。
-    """
-    def __init__(self, symbol: str, active: bool):
-        self._ts_event = time.time_ns()
-        self._ts_init = time.time_ns()
-        self._id = UUID4()
-
-        self.symbol = symbol
-        self.active = active
-
-
 class BarCollectedM5Event(Event):
     """
     M5 K 线收盘时由 strategy.py 发布，供 ExitManager 执行 M5 ST 跟踪止盈。
