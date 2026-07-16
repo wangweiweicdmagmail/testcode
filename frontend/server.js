@@ -837,6 +837,7 @@ app.get("/api/entry-context/:symbol", async (req, res) => {
             symbol, last_close: lastClose,
             dema20: levels.dema20 || null,
             supertrend: levels.supertrend || null,
+            atr: (levels.atr != null && levels.atr !== false) ? levels.atr : null,
             equity,
             risk_pct: cfg.risk_pct != null ? cfg.risk_pct : 0.002,
             max_position_pct: cfg.max_position_pct != null ? cfg.max_position_pct : 0.10,
@@ -1034,6 +1035,13 @@ app.get('/api/account', async (req, res) => {
 // GET /api/positions — 真实 IBKR 仓位
 app.get('/api/positions', async (req, res) => {
     const data = await proxyToEngine('GET', '/positions', null, []);
+    res.json(data);
+});
+
+// GET /api/positions-fa — FA 全账户持仓（reqPositions 直查 IBKR，覆盖子账户，补 cache 盲区）
+// 控制台持仓显示用此端点：cache.positions_open() 在 FA 分配后会丢子账户仓位
+app.get('/api/positions-fa', async (req, res) => {
+    const data = await proxyToEngine('GET', '/positions-fa', null, []);
     res.json(data);
 });
 
@@ -1636,22 +1644,7 @@ app.post("/api/settings/:symbol", async (req, res) => {
     await redis.set(`settings:${symbol}`, JSON.stringify(settings));
     console.log(`⚙️  设置更新 [${symbol}]:`, settings);
 
-    // ★ 同步给 Python 引擎内存
-    if (req.body.st_trail !== undefined) {
-        await proxyToEngine('POST', '/settings', {
-            symbol: symbol,
-            active: req.body.st_trail,
-            st_trail: true,          // 标识类型，让引擎区分
-        }).catch(e => console.error("同步 ST Trail 设置到引擎失败:", e.message));
-    }
-    if (req.body.ema_trail !== undefined) {
-        await proxyToEngine('POST', '/settings', {
-            symbol: symbol,
-            active: req.body.ema_trail,
-            ema_trail: true,         // 标识类型，让引擎区分
-        }).catch(e => console.error("同步 EMA Trail 设置到引擎失败:", e.message));
-    }
-
+    // trail_mode 直接写 Redis 即可：ExitManager 每根 bar 从 Redis 读取，无需同步引擎内存
     res.json({ ok: true, settings });
 });
 

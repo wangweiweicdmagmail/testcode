@@ -168,7 +168,7 @@
             <option value="0">关闭</option>
             <option value="1">M1 ST 跟踪</option>
             <option value="2">M5 ST 跟踪</option>
-            <option value="3">EMA 跟踪</option>
+            <option value="3">EMA20 跟踪</option>
           </select>
         </div>
       </div>
@@ -228,8 +228,12 @@
 
       <div class="row">
         <div>
-          <label>止损价（以损定量）</label>
-          <input id="stopPrice" type="number" step="0.01" placeholder="如 198.00" />
+          <label>止损 ATR 倍数（M5·14）</label>
+          <input id="atrMult" type="number" step="0.1" min="0.1" value="1.0" title="止损距进场价 = N × M5 ATR14。默认 1.0。" />
+        </div>
+        <div>
+          <label>止损价（自动 ±ATR，可手改）</label>
+          <input id="stopPrice" type="number" step="0.01" placeholder="留空=按 ATR 自动" />
         </div>
         <div>
           <label>止盈 RR（半仓）</label>
@@ -271,7 +275,7 @@
 <script>
 const SYMBOLS = ["QQQ","NVDA","AAPL","TSLA","GOOG","AVGO","SPY","PLTR","AMZN","AMD","META","MSFT","TSM","MU","NFLX"];
 const $ = (id) => document.getElementById(id);
-const state = { symbol: "", side: "LONG", method: "market", ctx: null, live: false };
+const state = { symbol: "", side: "LONG", method: "market", ctx: null, live: false, stopManual: false };
 
 // ── 初始化 ──────────────────────────────────────────────────────
 (function init() {
@@ -296,7 +300,7 @@ async function loadSymbols() {
   if (state.symbol) $("symbol").value = state.symbol;
 }
 
-const TRAIL_LABEL = { 0: "关闭", 1: "M1 ST 跟踪", 2: "M5 ST 跟踪", 3: "EMA 跟踪" };
+const TRAIL_LABEL = { 0: "关闭", 1: "M1 ST 跟踪", 2: "M5 ST 跟踪", 3: "EMA20 跟踪" };
 const AUTO_LABEL = { off: "关闭", observe: "观察（不下单）", live: "实盘下单" };
 
 async function loadSettings() {
@@ -371,6 +375,8 @@ function bindForm() {
     state.side = b.dataset.side;
     $("sideSeg").querySelectorAll("button").forEach(x => x.classList.remove("active", "long", "short"));
     b.classList.add("active", state.side === "LONG" ? "long" : "short");
+    state.stopManual = false;   // 翻向 → 止损方向需重算，退回 ATR 自动
+    syncStopFromAtr();
     renderPreview();
   });
   $("methodGrid").addEventListener("click", (e) => {
@@ -379,9 +385,22 @@ function bindForm() {
     $("methodGrid").querySelectorAll("button").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
     toggleMethodParams();
+    state.stopManual = false;   // 换进场方法 → 进场价基准变，退回 ATR 自动
+    syncStopFromAtr();
     renderPreview();
   });
-  ["limitPrice","stField","trigType","trigDir","trigLevel","expireMin","stopPrice","tpRr","bypassWindow"]
+  $("atrMult").addEventListener("input", () => {
+    state.stopManual = false;   // 改倍数 = 要 ATR 止损
+    syncStopFromAtr();
+    renderPreview();
+  });
+  $("stopPrice").addEventListener("input", (e) => {
+    // 手填止损 = 手动覆盖；清空则退回 ATR 自动
+    state.stopManual = e.target.value.trim() !== "";
+    if (!state.stopManual) syncStopFromAtr();
+    renderPreview();
+  });
+  ["limitPrice","stField","trigType","trigDir","trigLevel","expireMin","tpRr","bypassWindow"]
     .forEach(id => $(id).addEventListener("input", renderPreview));
   $("submitBtn").addEventListener("click", submitEntry);
   $("killBtn").addEventListener("click", killSwitch);
@@ -411,6 +430,20 @@ function toggleMethodParams() {
 }
 
 // ── 预览 ────────────────────────────────────────────────────────
+// 止损默认 = 进场价 ∓ (N × M5 ATR14)：LONG 在进场价下方，SHORT 在上方。
+// 用户手填止损后视为手动覆盖；改倍数 / 翻向 / 换方法 / 刷新行情会退回 ATR 自动。
+function syncStopFromAtr() {
+  if (state.stopManual) return;
+  const ctx = state.ctx;
+  const mult = parseFloat($("atrMult").value);
+  if (!ctx || !(ctx.atr > 0) || !(mult > 0)) return;
+  const p = computeEntry();
+  const entry = p && p.entry;
+  if (!entry || entry <= 0) return;
+  const sign = state.side === "LONG" ? 1 : -1;   // LONG: entry-mult*ATR；SHORT: entry+mult*ATR
+  $("stopPrice").value = +(entry - sign * mult * ctx.atr).toFixed(2);
+}
+
 function computeEntry() {
   const ctx = state.ctx; if (!ctx) return null;
   const side = state.side; const m = state.method;
@@ -424,7 +457,7 @@ function computeEntry() {
   if (!entry || entry <= 0) return { entry: 0, side, refLabel, reason: m === "market" ? "等待最新价（无 M1 行情）" : (m === "ema" ? "等待 DEMA20 指标" : (m === "st_limit" ? "等待 ST 指标" : "填写价位")) };
   const sign = side === "LONG" ? 1 : -1;
   const stopIn = parseFloat($("stopPrice").value);
-  if (!stopIn || stopIn <= 0) return { entry, side, refLabel, reason: "填写止损价（以损定量）" };
+  if (!stopIn || stopIn <= 0) return { entry, side, refLabel, reason: "等待 M5 ATR 或手填止损价" };
   if ((sign === 1 && stopIn >= entry) || (sign === -1 && stopIn <= entry))
     return { entry, side, refLabel, reason: `止损价须在入场价之${side === "LONG" ? "下" : "上"}` };
   const risk = Math.abs(entry - stopIn);   // 每股风险
@@ -452,8 +485,14 @@ function renderPreview() {
     return;
   }
   const cls = p.side === "LONG" ? "long" : "short";
+  const atr = state.ctx && state.ctx.atr > 0 ? +state.ctx.atr : 0;
+  const mult = parseFloat($("atrMult").value) || 0;
+  const atrTxt = atr > 0
+    ? `${atr.toFixed(2)} · ${mult}× ${state.stopManual ? "(手填覆盖)" : "→ 止损自动"}`
+    : "预热中（需手填止损价）";
   el.innerHTML = `
     <div class="line"><span class="k">进场价 (${p.refLabel})</span><span class="v num">${p.entry.toFixed(2)}</span></div>
+    <div class="line"><span class="k">ATR(M5,14)</span><span class="v num">${atrTxt}</span></div>
     <div class="line"><span class="k">止损</span><span class="v num">${p.stop.toFixed(2)} <span class="k">(每股风险 $${p.risk.toFixed(2)})</span></span></div>
     <div class="line"><span class="k">止盈（半仓 RR ${p.rr}）</span><span class="v num">${p.tp.toFixed(2)} <span class="k">→ 半仓止盈后剩余用 ST 跟踪</span></span></div>
     <div class="line"><span class="k">方向</span><span class="v ${cls}">${p.side}</span></div>
@@ -507,6 +546,7 @@ async function loadContext() {
     $("envPill").textContent = `env: ${state.ctx.trading_env || "?"}` + (state.ctx.live_orders_allowed ? " · LIVE" : " · 观察模式");
     $("envPill").className = "pill " + (state.ctx.live_orders_allowed ? "ok" : "warn");
     $("haltedBanner").style.display = state.ctx.halted ? "" : "none";
+    syncStopFromAtr();
     renderPreview();
   } catch (e) { /* 引擎/Redis 未就绪 */ }
 }
@@ -566,27 +606,33 @@ function renderPendingRow(t) {
 }
 function attr(s) { return JSON.stringify(s); }
 
+// 持仓来源 = /api/positions-fa（FA 全账户 reqPositions 直查，覆盖子账户，绕过 cache 盲区）；
+// 止损价取自引擎活跃止损单 /api/active-orders。
+// 不用 /api/positions（cache.positions_open() 在 FA 分配后会丢子账户仓位），不退回 Redis 快照。
 async function refreshPositions() {
   try {
-    const [brokerR, redisR] = await Promise.all([
-      fetch("/api/positions").then(r => r.json()).catch(() => null),
-      fetch("/api/positions-redis").then(r => r.json()).catch(() => null),
+    const [posR, ordR] = await Promise.all([
+      fetch("/api/positions-fa").then(r => r.json()).catch(() => null),
+      fetch("/api/active-orders").then(r => r.json()).catch(() => null),
     ]);
-    const broker = Array.isArray(brokerR) ? brokerR : [];
-    const redisArr = (redisR && redisR.positions) || (Array.isArray(redisR) ? redisR : []);
+    const broker = Array.isArray(posR) ? posR : [];
+    // 引擎活跃止损单 {SYM: {entry, stop_loss:{price,...}}} → 每标的止损价
     const stopBySym = {};
-    redisArr.forEach(p => { if (p && p.symbol) stopBySym[p.symbol.toUpperCase()] = p; });
-    // broker 是存在性来源（真实 IBKR 全部持仓）；broker 不可用时退回 Redis 快照
-    const source = broker.length ? broker : redisArr;
-    const open = source.filter(p => p && Math.abs(+p.quantity) > 0).map(p => {
+    if (ordR && typeof ordR === "object") {
+      Object.entries(ordR).forEach(([sym, v]) => {
+        const px = v && v.stop_loss && (v.stop_loss.price ?? v.stop_loss.trigger_price);
+        if (px != null) stopBySym[sym.toUpperCase()] = +px;
+      });
+    }
+    const open = broker.filter(p => p && Math.abs(+p.quantity) > 0).map(p => {
       const sym = (p.symbol || "").toUpperCase();
-      const r = stopBySym[sym] || {};
       return {
         symbol: sym,
         quantity: +p.quantity,
-        entry_price: p.avg_px_open != null ? +p.avg_px_open : (+p.entry_price || 0),
-        stop_loss: r.stop_loss != null ? r.stop_loss : (p.stop_loss != null ? p.stop_loss : null),
-        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : (r.unrealized_pnl != null ? r.unrealized_pnl : null),
+        entry_price: p.avg_px_open != null ? +p.avg_px_open : 0,
+        stop_loss: stopBySym[sym] != null ? stopBySym[sym] : null,
+        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : null,
+        accounts: Array.isArray(p.accounts) ? p.accounts : [],
       };
     });
     $("posCount").textContent = open.length ? `(${open.length})` : "";
@@ -599,13 +645,17 @@ async function refreshPositions() {
 function renderPosRow(p) {
   const long = +p.quantity > 0;
   const upnl = (p.unrealized_pnl != null) ? (+p.unrealized_pnl) : null;
+  // 每账户明细（FA 子账户拆分）：悬停标的单元格查看
+  const acctTip = (p.accounts && p.accounts.length)
+    ? "子账户明细:\n" + p.accounts.map(a => `${a.account}: ${Math.abs(+a.quantity)} @ ${(+a.avg_px_open).toFixed(2)}`).join("\n")
+    : "";
   return `<tr>
-    <td class="sym">${p.symbol}</td>
+    <td class="sym"${acctTip ? ` title="${acctTip}"` : ""}>${p.symbol}</td>
     <td class="pos ${long?"long":"short"}">${long?"LONG":"SHORT"}</td>
     <td class="num">${Math.abs(+p.quantity)}</td>
     <td class="num">${(+p.entry_price).toFixed(2)}</td>
     <td class="num">${p.stop_loss ? (+p.stop_loss).toFixed(2) : "—"}</td>
-    <td class="num" style="color:${upnl==null?"var(--muted)":(upnl>=0?"var(--green)":"var(--red)")}">${upnl==null?"—":upnl>=0?"+":""}${upnl.toFixed(2)}</td>
+    <td class="num" style="color:${upnl==null?"var(--muted)":(upnl>=0?"var(--green)":"var(--red)")}">${upnl==null?"—":(upnl>=0?"+":"")+upnl.toFixed(2)}</td>
     <td class="actions">
       <button class="btn" onclick="modifyStop('${p.symbol}', ${p.stop_loss||0})">改止损</button>
       <button class="btn danger" onclick="closePos('${p.symbol}')">平仓</button>
