@@ -1045,6 +1045,14 @@ app.get('/api/positions-fa', async (req, res) => {
     res.json(data);
 });
 
+// GET /api/orders-grouped — 全账户活跃订单分组（reqAllOpenOrders 直查 IBKR）
+// 按 position_key 跨子账户聚合引擎单 + TWS 手动单(clientId=0)单列 + 其他 API client 单
+// 控制台「订单分组」展示用：一眼看清每仓位的腿分布 + 区分量化/手动单
+app.get('/api/orders-grouped', async (req, res) => {
+    const data = await proxyToEngine('GET', '/orders-grouped', null, []);
+    res.json(data);
+});
+
 // GET /api/positions-redis — 轻量持仓快照（直接读 Redis position:*，不拉 K 线）
 // 供 Status Bar 在引擎离线时快速统计四格持仓，避免对 /api/data/:sym 全量轮询
 app.get('/api/positions-redis', async (req, res) => {

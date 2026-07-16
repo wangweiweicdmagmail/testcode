@@ -15,6 +15,8 @@ InteractiveBrokersClient 连接**——通过运行时 monkey-patch:
 """
 from __future__ import annotations
 
+import json
+import time
 import xml.etree.ElementTree as ET
 
 from ibapi.common import FaDataTypeEnum
@@ -31,12 +33,14 @@ _PATCHED_WRAPPER = False
 
 # ── 1. 给 InteractiveBrokersClient 挂一次性 FA 查询方法 ────────────────
 def _patch_client_for_fa() -> None:
-    """幂等：给 InteractiveBrokersClient 挂 query_fa_group_summary / request_fa_groups_xml。"""
+    """幂等：给 InteractiveBrokersClient 挂一次性查询方法。"""
     global _PATCHED_CLIENT
     if _PATCHED_CLIENT:
         return
     _PATCHED_CLIENT = True
-    print("[FA-PATCH] ✓ _patch_client_for_fa: 挂 InteractiveBrokersClient.query_fa_group_summary / request_fa_groups_xml（仅 FA 余额/校验查询，不改下单路径）", flush=True)
+    print("[FA-PATCH] ✓ _patch_client_for_fa: 挂 InteractiveBrokersClient.query_fa_group_summary / "
+          "request_fa_groups_xml / query_all_positions / query_all_open_orders（FA 余额/校验 + "
+          "全账户持仓 + 全账户活跃单分组；只读查询，不改下单路径）", flush=True)
 
     async def query_fa_group_summary(
         self: InteractiveBrokersClient, fa_group: str, timeout: int = 20,
@@ -135,9 +139,37 @@ def _patch_client_for_fa() -> None:
             self._requests.remove(req_id=req_id)
         return list(results or [])
 
+    async def query_all_open_orders(self: InteractiveBrokersClient, timeout: int = 20) -> list:
+        """一次性 reqAllOpenOrders()，返回全部活跃单原样列表（IBOrder），不过滤。
+
+        覆盖：TWS GUI 手动单(clientId=0)、所有 API client、全 FA 子账户。
+        每条 IBOrder 含 orderRef(=coid，已剥 :orderId)/clientId/permId/account/faGroup/
+        action/orderType/totalQuantity/lmtPrice/auxPrice/orderId/order_state.status。
+
+        与适配器 get_open_orders(account_id) 区别：后者按 account 过滤且吃掉子账户单；
+        本方法返回原始全集，供跨子账户按 position_key 聚合 + 区分量化/手动单。
+        复用同一 "OpenOrders" named request（process_open_order 按 name 路由，硬编码不可改名）。
+        """
+        await self.wait_until_ready(timeout=30)
+        name = "OpenOrders"
+        if not (request := self._requests.get(name=name)):
+            handle = (self._eclient.reqAllOpenOrders
+                      if self._fetch_all_open_orders else self._eclient.reqOpenOrders)
+            request = self._requests.add(
+                req_id=self._next_req_id(),
+                name=name,
+                handle=handle,
+            )
+            if not request:
+                return []
+            request.handle()
+        all_orders = await self._await_request(request, timeout, default_value=[])
+        return list(all_orders or [])
+
     InteractiveBrokersClient.query_fa_group_summary = query_fa_group_summary  # type: ignore[attr-defined]
     InteractiveBrokersClient.request_fa_groups_xml = request_fa_groups_xml  # type: ignore[attr-defined]
     InteractiveBrokersClient.query_all_positions = query_all_positions  # type: ignore[attr-defined]
+    InteractiveBrokersClient.query_all_open_orders = query_all_open_orders  # type: ignore[attr-defined]
 
 
 # ── 2. patch wrapper 回调：保留原逻辑 + 按 reqId 路由 FA 响应 ──────────
@@ -329,3 +361,174 @@ async def query_all_positions_aggregated(ib_client: InteractiveBrokersClient) ->
             ],
         })
     return out
+
+
+def _order_meta(redis_client, coid: str) -> dict | None:
+    """读 order:meta:{coid}（auto_pm 提交时写入 position_key/leg/sym/proposal_id）。"""
+    if not redis_client or not coid:
+        return None
+    try:
+        raw = redis_client.get(f"order:meta:{coid}")
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _enrich_order_meta(redis_client, coid: str, perm_id, client_id, account) -> None:
+    """把 IBKR 回传的 permId/clientId/account 补进 order:meta:{coid}（merge），
+    并建反向 order:permid:{permId}→coid。permId 为账户级永久 ID，跨重启稳定。"""
+    if not redis_client or not coid:
+        return
+    try:
+        key = f"order:meta:{coid}"
+        raw = redis_client.get(key)
+        meta = json.loads(raw) if raw else {}
+        meta["perm_id"] = int(perm_id) if perm_id else meta.get("perm_id")
+        meta["client_id"] = int(client_id) if client_id is not None else meta.get("client_id")
+        if account:
+            meta.setdefault("accounts", set())
+            if isinstance(meta["accounts"], list):
+                if account not in meta["accounts"]:
+                    meta["accounts"].append(account)
+            else:
+                meta["accounts"] = [account]
+        meta["updated_at"] = int(time.time())
+        redis_client.set(key, json.dumps(meta))
+        if perm_id:
+            redis_client.set(f"order:permid:{int(perm_id)}", coid)
+    except Exception:
+        pass
+
+
+def _ib_order_to_dict(o) -> dict:
+    """IBOrder → 可序列化字典（取定势分组/查询所需字段，容错缺失）。"""
+    contract = getattr(o, "contract", None)
+    state = getattr(o, "order_state", None)
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return {
+        "coid": getattr(o, "orderRef", "") or "",
+        "perm_id": getattr(o, "permId", 0) or 0,
+        "client_id": getattr(o, "clientId", 0) or 0,
+        "account": getattr(o, "account", "") or "",
+        "fa_group": getattr(o, "faGroup", "") or "",
+        "symbol": getattr(contract, "symbol", "") or "",
+        "action": getattr(o, "action", "") or "",
+        "qty": _f(getattr(o, "totalQuantity", None)),
+        "order_type": getattr(o, "orderType", "") or "",
+        "lmt_price": _f(getattr(o, "lmtPrice", None)),
+        "aux_price": _f(getattr(o, "auxPrice", None)),
+        "status": getattr(state, "status", "") or "" if state else "",
+        "order_id": getattr(o, "orderId", 0) or 0,
+    }
+
+
+def _position_key_from_coid(coid: str) -> str:
+    """从 coid={poskey}-{leg}-{counter} 解析 poskey（poskey 仅大写字母数字，无连字符）。"""
+    if not coid or "-" not in coid:
+        return ""
+    parts = coid.split("-")
+    # 期望 3 段（poskey/leg/counter）；leg ∈ {E,S,T,C}；否则视为非引擎格式
+    if len(parts) >= 3 and parts[-2] in ("E", "S", "T", "C"):
+        return parts[0]
+    return ""
+
+
+async def query_all_open_orders_grouped(ib_client, redis_client=None) -> dict:
+    """reqAllOpenOrders → 按 position_key 跨子账户聚合，区分量化/手动/其他 API 单。
+
+    返回 {
+      "engine": [ {position_key, proposal_id, symbol, side, net_qty, legs:[...], accounts:[...] } ],
+      "manual": [ {...单条 TWS 手动单 clientId==0...} ],
+      "other_api": [ {...非本引擎 client_id 的 API 单...} ],
+      "fetched_at": int(time),
+    }
+    legs 每条含 leg/coid/account/qty/order_type/price/status/perm_id。
+    引擎单按 position_key 聚合（entry+stop+tp+close 跨子账户归一仓位）。
+
+    副作用：把 permId/clientId/account 补进 order:meta:{coid} + 反向 order:permid
+    （permId 为账户级永久 ID，跨重启稳定句柄；查询时补录，不动下单热路径）。
+
+    异常向上抛（由 order_actor 捕获返回空结构）。
+    """
+    orders = await ib_client.query_all_open_orders()
+    engine_groups: dict[str, dict] = {}
+    manual: list[dict] = []
+    other_api: list[dict] = []
+
+    for o in orders or []:
+        d = _ib_order_to_dict(o)
+        coid = d["coid"]
+        client_id = d["client_id"]
+        # 引擎单：补录 permId（跨重启稳定句柄）
+        if coid and client_id != 0:
+            _enrich_order_meta(redis_client, coid, d["perm_id"], client_id, d["account"])
+
+        if client_id == 0:
+            # TWS GUI 手动单（orderRef 通常空 / 无 position_key）
+            manual.append(d)
+            continue
+
+        # 解析 position_key：优先 order:meta（含 proposal_id），退化到 coid 前缀解析
+        meta = _order_meta(redis_client, coid) or {}
+        poskey = meta.get("position_key") or _position_key_from_coid(coid)
+        if not poskey:
+            # 非零 clientId 但非本引擎格式 → 其他 API client 的单
+            other_api.append(d)
+            continue
+
+        leg_letter = (coid.split("-")[-2] if "-" in coid and coid.split("-")[-2] in
+                      ("E", "S", "T", "C") else "")
+        leg = {
+            "leg": leg_letter,
+            "coid": coid,
+            "account": d["account"],
+            "qty": d["qty"],
+            "order_type": d["order_type"],
+            "price": d["lmt_price"] if d["order_type"] in ("LMT", "STP LMT") else d["aux_price"],
+            "status": d["status"],
+            "perm_id": d["perm_id"],
+        }
+        grp = engine_groups.setdefault(poskey, {
+            "position_key": poskey,
+            "proposal_id": meta.get("proposal_id", ""),
+            "symbol": d["symbol"] or meta.get("symbol", ""),
+            "side": "BUY" if d["action"] == "BUY" else "SELL",
+            "legs": [],
+            "accounts": set(),
+        })
+        grp["legs"].append(leg)
+        if d["account"]:
+            grp["accounts"].add(d["account"])
+        # side 以 entry(BUY 建多)为准；若首条是 stop/tp(SELL)，后续 entry 会覆盖
+        if leg_letter == "E":
+            grp["side"] = "BUY" if d["action"] == "BUY" else "SELL"
+
+    # 净量按 action 符号累加（BUY +qty / SELL -qty），账户集合转 list
+    engine_out = []
+    for poskey, grp in engine_groups.items():
+        net = 0.0
+        for lg in grp["legs"]:
+            q = lg["qty"] or 0.0
+            # entry 腿方向决定仓位的净持仓；stop/tp/close 是平仓向，不计入净持仓
+            if lg["leg"] == "E":
+                net += q if grp["side"] == "BUY" else -q
+        engine_out.append({
+            "position_key": grp["position_key"],
+            "proposal_id": grp["proposal_id"],
+            "symbol": grp["symbol"],
+            "side": grp["side"],
+            "net_qty": round(net, 4),
+            "accounts": sorted(grp["accounts"]),
+            "legs": sorted(grp["legs"], key=lambda x: {"E": 0, "S": 1, "T": 2, "C": 3}.get(x["leg"], 9)),
+        })
+
+    return {
+        "engine": engine_out,
+        "manual": manual,
+        "other_api": other_api,
+        "fetched_at": int(time.time()),
+    }

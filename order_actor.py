@@ -53,7 +53,11 @@ from events import (
 from portfolio.sessions import et_session_date, et_minute_now
 from portfolio.trading_env import live_orders_allowed
 from portfolio.ib_orders import build_marketable_order
-from portfolio.fa_account import validate_fa_group_via_engine, query_all_positions_aggregated
+from portfolio.fa_account import (
+    validate_fa_group_via_engine,
+    query_all_positions_aggregated,
+    query_all_open_orders_grouped,
+)
 
 # 订单终态集合（全局复用，来自 events.py）
 TERMINAL = TERMINAL_STATUS
@@ -625,6 +629,27 @@ class OrderGatewayActor(Strategy):
                 p["last_price"] = None
                 p["unrealized_pnl"] = None
         return positions
+
+    def get_orders_grouped(self) -> dict:
+        """全账户活跃订单分组视图：reqAllOpenOrders → 按 position_key 跨子账户聚合。
+
+        区分三类：engine（本引擎单，clientId≠0 且 coid 带 position_key 前缀，按仓位聚合）、
+        manual（TWS GUI 手动单 clientId==0）、other_api（其他 API client 单）。
+        每条引擎单的 permId/clientId/account 顺带补进 Redis order:meta（跨重启稳定句柄）。
+
+        用于控制台「订单分组」展示——一眼看清每个仓位在哪些子账户有哪些腿、
+        以及哪些是 TWS 手动单。返回空结构表示引擎未连接/查询失败。
+        """
+        if self._loop is None or not self._ib_client:
+            return {"engine": [], "manual": [], "other_api": [], "fetched_at": 0}
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                query_all_open_orders_grouped(self._ib_client, self._redis), self._loop,
+            )
+            return future.result(timeout=12.0)
+        except Exception as e:
+            self.log.warning(f"[Gateway] get_orders_grouped 超时或失败: {e}")
+            return {"engine": [], "manual": [], "other_api": [], "fetched_at": 0, "error": str(e)}
 
     def _last_close_redis(self, sym: str) -> float | None:
         """从 Redis bars:{1m,5m}:{sym} 末根取最新收盘价（引擎 M1/M5 策略写入）。"""
@@ -1576,6 +1601,8 @@ class OrderGatewayActor(Strategy):
                     self._send(200, actor.get_positions())
                 elif self.path == "/positions-fa":
                     self._send(200, actor.get_positions_fa())
+                elif self.path == "/orders-grouped":
+                    self._send(200, actor.get_orders_grouped())
                 elif self.path == "/active-orders":
                     self._send(200, actor.get_active_orders())
                 elif self.path == "/risk":
