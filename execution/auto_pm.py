@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from decimal import Decimal
 from typing import Callable, Optional
@@ -48,6 +49,8 @@ class AutoPositionManager:
         self._last_close: dict[str, float] = {}
         self._last_bar_time: dict[str, int] = {}
         self._pending_close_reason: dict[str, str] = {}
+        # 定势订单分组：全局递增计数器，保证 client_order_id 唯一（position_key-leg-counter）
+        self._coid_counter: int = 0
 
     @property
     def units(self) -> dict[str, list[Unit]]:
@@ -76,6 +79,47 @@ class AutoPositionManager:
             return
         try:
             self._redis.setex(f"journal:coid:{coid}", 86400, proposal_id)
+        except Exception:
+            pass
+
+    # ── 定势订单分组键（client_order_id 前缀 = IBKR orderRef，跨子账户聚合用）──
+    def _position_key_for(self, proposal_id: str, sym: str, seq: int) -> str:
+        """生成仓位级稳定分组键（大写字母数字）。优先 proposal_id（业务唯一），
+        否则 SYM+seq+日期（跨日唯一）。sanitize 去掉连字符等，保证 coid 解析时
+        能用 split('-') 干净切出 position_key/leg/counter 三段。"""
+        raw = proposal_id or f"{sym}{seq}{time.strftime('%Y%m%d')}"
+        key = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+        return key or f"POS{seq}"
+
+    def _gen_coid(self, position_key: str, leg: str) -> ClientOrderId:
+        """生成带分组前缀的 client_order_id：{position_key}-{leg}-{counter}。
+
+        leg ∈ E(入场)/S(止损)/T(止盈)/C(平仓)。counter 全局递增保证唯一
+        （同仓位多次重挂/改单也不撞）。orderRef(=coid) 前缀 position_key 即
+        「可指定的业务 ID」，TWS 可见、reqAllOpenOrders 直出、IBKR 报告可追溯。
+        """
+        self._coid_counter += 1
+        return ClientOrderId(f"{position_key}-{leg}-{self._coid_counter}")
+
+    def _record_order_meta(
+        self, coid: str, position_key: str, leg: str, sym: str,
+        proposal_id: Optional[str] = None,
+    ) -> None:
+        """写 order:meta:{coid} = {position_key, leg, sym, proposal_id}。
+
+        查询层（query_all_open_orders_grouped）按 coid 反查 position_key 做分组，
+        并在查询时补 permId/clientId/account（IBKR 回传后才有）。permId 补齐后此
+        key 即跨重启稳定句柄（账户级永久）。"""
+        if not self._redis or not coid:
+            return
+        try:
+            self._redis.set(f"order:meta:{coid}", json.dumps({
+                "position_key": position_key,
+                "leg": leg,
+                "symbol": sym,
+                "proposal_id": proposal_id or "",
+                "ts": int(time.time()),
+            }))
         except Exception:
             pass
 
@@ -181,6 +225,9 @@ class AutoPositionManager:
         except (TypeError, ValueError):
             resting_price = 0.0
         is_resting = resting_price > 0
+        # 定势分组键：同一仓位的 entry/stop/tp 腿共享，编码进 coid(=orderRef) 前缀
+        poskey = self._position_key_for(pid, sym, intent.seq)
+        entry_coid = self._gen_coid(poskey, "E")
         if is_resting:
             entry = build_resting_limit(
                 self._host.order_factory,
@@ -191,6 +238,7 @@ class AutoPositionManager:
                 limit_price=resting_price,
                 tags=self._fa_tags(),
                 log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
+                client_order_id=entry_coid,
             )
             self._host.log.info(
                 f"[PM] {sym}: 入场 resting_limit GTC @ {resting_price} (ref={ref_px})"
@@ -205,6 +253,7 @@ class AutoPositionManager:
                 ref_price=ref_px,
                 tags=self._fa_tags(),
                 log_fn=lambda m: self._host.log.info(f"[PM] {sym}: {m}"),
+                client_order_id=entry_coid,
             )
             if decision.use_limit:
                 self._host.log.info(
@@ -214,7 +263,7 @@ class AutoPositionManager:
             sym=sym, seq=intent.seq, side=intent.side,
             state=UnitState.PENDING_ENTRY, qty=qty,
             atr_ref=intent.atr_ref, entry_coid=entry.client_order_id.value,
-            proposal_id=pid,
+            proposal_id=pid, position_key=poskey,
         )
         if intent.meta.get("opening_breakout") and intent.stop_px:
             unit.planned_stop_px = float(intent.stop_px)
@@ -233,6 +282,7 @@ class AutoPositionManager:
         self._coid_index[unit.entry_coid] = (sym, "entry")
         self._host.submit_order(entry)
         self._journal_map_coid(unit.entry_coid, pid)
+        self._record_order_meta(unit.entry_coid, poskey, "E", sym, pid)
         coid = unit.entry_coid
         # submit 后异步核对 IBKR 是否真接受（10226 等 error 不事件化，需主动查 order 状态）
         self._check_order_accepted_async(sym, coid)
@@ -333,6 +383,7 @@ class AutoPositionManager:
             return
 
         side = OrderSide.SELL if net > 0 else OrderSide.BUY
+        close_poskey = self._position_key_for(f"CLOSE{sym}", sym, 0)
         close, decision = build_marketable_order(
             self._host.order_factory,
             instrument=instrument,
@@ -342,10 +393,12 @@ class AutoPositionManager:
             ref_price=ref_px,
             tags=self._fa_tags(),
             log_fn=lambda m: self._host.log.info(f"[PM] {sym}: 平仓 {m}"),
+            client_order_id=self._gen_coid(close_poskey, "C"),
         )
         close_coid = close.client_order_id.value
         self._coid_index[close_coid] = (sym, "close")
         self._pending_close_reason[sym] = reason
+        self._record_order_meta(close_coid, close_poskey, "C", sym, None)
         for unit in self._units.get(sym, []):
             if unit.state != UnitState.CLOSED:
                 unit.state = UnitState.PENDING_CLOSE
@@ -548,16 +601,19 @@ class AutoPositionManager:
 
         opp = OrderSide.SELL if unit.side == OrderSide.BUY else OrderSide.BUY
         oca_group = f"PM-{sym}-{unit.entry_coid[-8:]}"
+        poskey = unit.position_key or self._position_key_for(unit.proposal_id, sym, unit.seq)
         stop = self._host.order_factory.stop_market(
             instrument_id=iid, order_side=opp,
             quantity=instrument.make_qty(Decimal(str(unit.qty))),
             trigger_price=instrument.make_price(Decimal(str(unit.hard_stop_px))),
             time_in_force=TimeInForce.GTC, tags=self._fa_tags(oca_group=oca_group),
+            client_order_id=self._gen_coid(poskey, "S"),
         )
         unit.stop_coid = stop.client_order_id.value
         self._coid_index[unit.stop_coid] = (sym, "stop")
         self._host.submit_order(stop)
         self._journal_map_coid(unit.stop_coid, unit.proposal_id)
+        self._record_order_meta(unit.stop_coid, poskey, "S", sym, unit.proposal_id)
 
         tp_qty = unit.qty // 2
         if tp_qty < 1:
@@ -568,11 +624,13 @@ class AutoPositionManager:
                 quantity=instrument.make_qty(Decimal(str(tp_qty))),
                 price=instrument.make_price(Decimal(str(unit.tp_px))),
                 time_in_force=TimeInForce.GTC, tags=self._fa_tags(oca_group=oca_group),
+                client_order_id=self._gen_coid(poskey, "T"),
             )
             unit.tp_coid = tp.client_order_id.value
             self._coid_index[unit.tp_coid] = (sym, "tp")
             self._host.submit_order(tp)
             self._journal_map_coid(unit.tp_coid, unit.proposal_id)
+            self._record_order_meta(unit.tp_coid, poskey, "T", sym, unit.proposal_id)
 
         self._sync_position_redis(sym)
         self._persist(sym)

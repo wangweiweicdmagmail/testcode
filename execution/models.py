@@ -34,3 +34,6 @@ class Unit:
     planned_tp_rr: float = 0.0
     manual_remainder: bool = False
     proposal_id: str = ""
+    # 定势订单分组键：同一仓位的 entry/stop/tp/close 腿共享，编码进 client_order_id 前缀
+    # （= IBKR orderRef），供 reqAllOpenOrders 跨子账户按仓位聚合 + 区分量化/手动单。
+    position_key: str = ""
