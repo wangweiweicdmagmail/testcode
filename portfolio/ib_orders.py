@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Callable, Optional
 
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.identifiers import ClientOrderId
 
 from portfolio.order_policy import OrderDecision, data_state_from_env, decide_close_order
 
@@ -19,8 +20,13 @@ def build_marketable_order(
     ref_price: float,
     tags: Optional[list[str]],
     log_fn: Optional[Callable[[str], None]] = None,
+    client_order_id: Optional[ClientOrderId] = None,
 ) -> tuple[object, OrderDecision]:
-    """按行情类型创建 MARKET 或 marketable LIMIT 单（入场/平仓通用）。"""
+    """按行情类型创建 MARKET 或 marketable LIMIT 单（入场/平仓通用）。
+
+    client_order_id 显式传入时用它（编码仓位分组键前缀，= IBKR orderRef）；
+    为 None 则由 factory 自动生成（旧行为）。
+    """
     decision = decide_close_order(
         data_state=data_state_from_env(),
         side=side.name if hasattr(side, "name") else str(side),
@@ -37,6 +43,7 @@ def build_marketable_order(
             price=instrument.make_price(Decimal(str(decision.limit_price))),
             time_in_force=TimeInForce.DAY,
             tags=tags,
+            client_order_id=client_order_id,
         )
     else:
         order = order_factory.market(
@@ -45,6 +52,7 @@ def build_marketable_order(
             quantity=q,
             time_in_force=TimeInForce.DAY,
             tags=tags,
+            client_order_id=client_order_id,
         )
     return order, decision
 
@@ -59,6 +67,7 @@ def build_resting_limit(
     limit_price: float,
     tags: Optional[list[str]],
     log_fn: Optional[Callable[[str], None]] = None,
+    client_order_id: Optional[ClientOrderId] = None,
 ) -> object:
     """按指定价挂 GTC LIMIT（手动/EMA/SuperTrend 限价进场用，resting until filled）。
 
@@ -76,4 +85,5 @@ def build_resting_limit(
         price=p,
         time_in_force=TimeInForce.GTC,
         tags=tags,
+        client_order_id=client_order_id,
     )

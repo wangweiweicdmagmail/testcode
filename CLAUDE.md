@@ -13,6 +13,9 @@ python main.py --mode backtest --date 2026-02-25
 # 前端 WebSocket 服务器（在项目根目录执行）
 node frontend/server.js                 # 端口 3000
 
+# 一键启动 + 音频监控（自启 Redis + 引擎 + 前端，8 步探测每步 macOS say 播报；双击 launch.command 同效）
+bash scripts/launch.sh                  # 默认起全部；--no-engine 改为手动起 main.py（保留实时日志）
+
 # 测试下单
 python order_sender.py                  # 市价单
 python order_sender.py --bracket        # 括号单

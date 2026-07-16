@@ -114,6 +114,7 @@ from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import RoutingConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.config import CacheConfig, DatabaseConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
@@ -271,6 +272,21 @@ instrument_provider_config = InteractiveBrokersInstrumentProviderConfig(
 # ============================================================
 config_node = TradingNodeConfig(
     trader_id="HELLO-WORLD-001",
+    # Redis cache database：引擎下单/持仓自动持久化，重启 load_all() 恢复，
+    # 使 IBKR 推回的 FA 组订单被 _on_open_order 正确认领 → modify/cancel 句柄跨重启可用。
+    # 只恢复引擎自己下的单（ExecClient client_id=3），TWS GUI 手动单不推回，天然忽略。
+    cache=CacheConfig(
+        database=DatabaseConfig(
+            type="redis",
+            host="127.0.0.1",
+            port=6379,
+        ),
+        # 以下均为默认值，显式写出以防回归 + 文档化（跨重启恢复的关键参数）
+        flush_on_start=False,    # 重启不 flushdb，保留上次订单/持仓
+        use_instance_id=False,   # 不加每次随机变化的 instance_id，保证跨重启 key 可匹配
+        use_trader_prefix=True,  # key 带 trader 前缀（HELLO-WORLD-001:），与业务 key（position:/order:stop: 等）隔离
+        encoding="msgpack",
+    ),
     logging=LoggingConfig(log_level="INFO", log_colors=True, log_directory="logs"),
     data_clients={
         IB: InteractiveBrokersDataClientConfig(
@@ -342,6 +358,8 @@ m5_strategy = M5IndicatorStrategy(
         ema9_period=9,
         atr_period=14,
         dema_period=20,
+        dc_period=int(os.environ.get("DC_PERIOD", "20")),
+        trend_ema_period=int(os.environ.get("TREND_EMA_PERIOD", "20")),
         history_days=2,
         backtest_mode=IS_BACKTEST,
         backtest_date=BACKTEST_DATE,
