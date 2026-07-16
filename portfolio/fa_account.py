@@ -105,8 +105,39 @@ def _patch_client_for_fa() -> None:
             return str(results[0]) if results[0] else ""
         return ""
 
+    async def query_all_positions(self: InteractiveBrokersClient, timeout: int = 20) -> list:
+        """一次性 reqPositions()，返回 [(account, symbol, qty, avg_cost), ...] 全账户持仓快照。
+
+        账户无关：覆盖 FA Group 所有子账户，绕过 Nautilus Position 缓存对子账户的盲区
+        （FA 分配后主账号 net=0，cache.positions_open() 会丢，但 wrapper.position 收得到全部）。
+        每条 (account, contract.symbol, position, avgCost) 由 patch 后的 wrapper.position 喂给本 request.result。
+        """
+        await self.wait_until_ready(timeout=30)
+        req_id = _FA_REQID_BASE + 600
+        name = "AllPositions"
+        self._requests.remove(name=name)   # 清理同名残留
+        request = self._requests.add(
+            req_id=req_id,
+            name=name,
+            handle=lambda: self._eclient.reqPositions(),
+            cancel=lambda: self._eclient.cancelPositions(),
+        )
+        if request is None:
+            return []
+        try:
+            request.handle()
+            results = await self._await_request(request, timeout, default_value=[])
+        finally:
+            try:
+                self._eclient.cancelPositions()
+            except Exception:
+                pass
+            self._requests.remove(req_id=req_id)
+        return list(results or [])
+
     InteractiveBrokersClient.query_fa_group_summary = query_fa_group_summary  # type: ignore[attr-defined]
     InteractiveBrokersClient.request_fa_groups_xml = request_fa_groups_xml  # type: ignore[attr-defined]
+    InteractiveBrokersClient.query_all_positions = query_all_positions  # type: ignore[attr-defined]
 
 
 # ── 2. patch wrapper 回调：保留原逻辑 + 按 reqId 路由 FA 响应 ──────────
@@ -123,7 +154,7 @@ def _patch_wrapper_for_fa() -> None:
     if _PATCHED_WRAPPER:
         return
     _PATCHED_WRAPPER = True
-    print("[FA-PATCH] ✓ _patch_wrapper_for_fa: patch wrapper.accountSummary/accountSummaryEnd/receiveFA（仅 FA 余额/校验回调；不碰 openOrder/orderStatus/error 下单回调）", flush=True)
+    print("[FA-PATCH] ✓ _patch_wrapper_for_fa: patch wrapper.accountSummary/accountSummaryEnd/receiveFA/position/positionEnd（FA 余额/校验 + 全账户持仓 tap；不碰 openOrder/orderStatus/error 下单回调）", flush=True)
 
     WrapperCls = _wrapper_mod.InteractiveBrokersEWrapper
     _orig_account_summary = WrapperCls.accountSummary
@@ -165,6 +196,40 @@ def _patch_wrapper_for_fa() -> None:
 
         client.submit_to_msg_handler_queue(_collect)
 
+    # ── position / positionEnd：tap 全账户持仓喂给 AllPositions 一次性查询 ──
+    _orig_position = WrapperCls.position
+    _orig_position_end = WrapperCls.positionEnd
+
+    def position(self, account, contract, position, avgCost):  # noqa: N802
+        _orig_position(self, account, contract, position, avgCost)
+        client = self._client
+
+        async def _collect():
+            req = client._requests.get(name="AllPositions")
+            if req:
+                sym = getattr(contract, "symbol", "") or ""
+                try:
+                    qty = float(position)
+                    cost = float(avgCost)
+                except (TypeError, ValueError):
+                    return
+                req.result.append((account, sym, qty, cost))
+
+        client.submit_to_msg_handler_queue(_collect)
+
+    def positionEnd(self):  # noqa: N802
+        _orig_position_end(self)
+        client = self._client
+
+        async def _end():
+            req = client._requests.get(name="AllPositions")
+            if req:
+                client._end_request(req.req_id)
+
+        client.submit_to_msg_handler_queue(_end)
+
+    WrapperCls.position = position  # type: ignore[assignment]
+    WrapperCls.positionEnd = positionEnd  # type: ignore[assignment]
     WrapperCls.accountSummary = accountSummary  # type: ignore[assignment]
     WrapperCls.accountSummaryEnd = accountSummaryEnd  # type: ignore[assignment]
     WrapperCls.receiveFA = receiveFA  # type: ignore[assignment]
@@ -215,3 +280,52 @@ async def validate_fa_group_via_engine(
     preview = ", ".join(sorted(names)[:8])
     suffix = "..." if len(names) > 8 else ""
     return False, f"FA Group '{fa_group}' 不存在；可用: {preview}{suffix}"
+
+
+async def query_all_positions_aggregated(ib_client: InteractiveBrokersClient) -> list[dict]:
+    """reqPositions → 按 symbol 跨 FA 子账户聚合，返回对齐 /api/positions 的列表。
+
+    返回 [{symbol, side, quantity, avg_px_open, accounts}]，quantity 为 0 的剔除。
+    avg_px_open 按 |qty| 加权平均；quantity 带符号（正=多，负=空）。
+    异常向上抛（由 order_actor 捕获返回 []）。
+    """
+    rows = await ib_client.query_all_positions()
+    by_sym: dict[str, dict] = {}
+    for row in rows or []:
+        try:
+            account, sym, qty, avg_cost = row
+        except (TypeError, ValueError):
+            continue
+        if not sym:
+            continue
+        try:
+            qty = float(qty)
+            avg_cost = float(avg_cost)
+        except (TypeError, ValueError):
+            continue
+        sym = str(sym).upper()
+        slot = by_sym.setdefault(sym, {"qty": 0.0, "cost_w": 0.0, "by_acct": {}})
+        abs_q = abs(qty)
+        slot["qty"] += qty
+        slot["cost_w"] += avg_cost * abs_q
+        if account:
+            # reqPositions 每 (账户,合约) 一行，avg_cost 即该账户的每股均成本
+            slot["by_acct"][str(account)] = {"quantity": qty, "avg_px_open": avg_cost}
+    out: list[dict] = []
+    for sym, s in by_sym.items():
+        qty = s["qty"]
+        if qty == 0:
+            continue
+        abs_q = abs(qty)
+        avg_px = round(s["cost_w"] / abs_q, 4) if abs_q else 0.0
+        out.append({
+            "symbol": sym,
+            "side": "LONG" if qty > 0 else "SHORT",
+            "quantity": qty,
+            "avg_px_open": avg_px,
+            "accounts": [
+                {"account": a, "quantity": d["quantity"], "avg_px_open": d["avg_px_open"]}
+                for a, d in sorted(s["by_acct"].items())
+            ],
+        })
+    return out
