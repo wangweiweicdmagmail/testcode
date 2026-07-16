@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 import redis as _redis
 
 from nautilus_trader.config import StrategyConfig
-from nautilus_trader.indicators import AverageTrueRange
+from nautilus_trader.indicators import AverageTrueRange, DonchianChannel
 from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.data import Bar, BarSpecification, BarType
 from nautilus_trader.model.enums import AggregationSource, BarAggregation, PriceType
@@ -67,6 +67,8 @@ class M5IndicatorStrategyConfig(StrategyConfig, frozen=True):
     ema9_period: int = 9
     atr_period: int = 14     # M5 ATR 周期（ema_diff_int 归一化）
     dema_period: int = 20
+    dc_period: int = 20           # 唐安琪通道周期（定势状态机用，值传前端）
+    trend_ema_period: int = 20    # 定势状态机 EMA20（价值中枢，值传前端）
     history_days: int = 2
     backtest_mode: bool = False
     backtest_date: str = ""
@@ -98,6 +100,9 @@ class M5IndicatorStrategy(Strategy):
         self._ema_diff_win: dict[str, list] = {}     # 滚动最多 12 根 (EMA9-EMA21)
         self._mom_m5: dict[str, MomentumATRState] = {}
         self._dema20_m5: dict[str, DEMAState] = {}
+        # 定势状态机指标（DC 通道 + EMA20，值随 m5_bar 传前端，状态机逻辑在前端 JS 重放）
+        self._dc_m5: dict[str, DonchianChannel] = {}
+        self._ema20_m5: dict[str, EMAState] = {}
         # 日内连续新高：{ sym: {"date","day_high","count"} }
         self._nh_state: dict[str, dict] = {}
 
@@ -125,6 +130,8 @@ class M5IndicatorStrategy(Strategy):
         self._ema_diff_win[sym] = []
         self._mom_m5[sym] = MomentumATRState()
         self._dema20_m5[sym] = DEMAState(self.config.dema_period)
+        self._dc_m5[sym] = DonchianChannel(self.config.dc_period)
+        self._ema20_m5[sym] = EMAState(self.config.trend_ema_period)
 
     def _push_ema_diff_int(self, sym: str, ema9: float | None, ema21: float | None) -> float | None:
         """向滑动窗口追加 (EMA9-EMA21) 并用 M5 ATR14 归一化（方案 B：实际根数均值，上限 12 根）。"""
@@ -161,14 +168,16 @@ class M5IndicatorStrategy(Strategy):
 
     def _write_indicators_active(
         self, sym: str, m5_bar_time: int, st_val: float, st_dir: int, dema20: Optional[float],
+        atr: Optional[float] = None,
     ) -> None:
-        """M5 收盘：写入冻结水平线 indicators:active:{sym}。"""
+        """M5 收盘：写入冻结水平线 indicators:active:{sym}（含 M5 ATR14，供控制台止损默认）。"""
         if not self._redis:
             return
         payload = {
             "m5_bar_time": m5_bar_time,
             "supertrend": {"value": st_val, "dir": st_dir},
             "dema20": dema20,
+            "atr": atr,
             "updated_at": int(__import__("time").time()),
         }
         try:
@@ -234,6 +243,15 @@ class M5IndicatorStrategy(Strategy):
         ema9_m5 = self._ema9_m5[sym].update(c)
         dema20_m5 = self._dema20_m5[sym].update(c)
         self._atr_m5[sym].update_raw(h, lo, c)
+        # 定势状态机指标：DC 通道 + EMA20（值传前端，状态机逻辑在前端 JS 重放）
+        self._dc_m5[sym].update_raw(h, lo)
+        ema20_m5 = self._ema20_m5[sym].update(c)
+        dc = self._dc_m5[sym]
+        dc_init = dc.initialized
+        dc_upper = round(dc.upper, 4) if dc_init else None
+        dc_lower = round(dc.lower, 4) if dc_init else None
+        dc_mid = round(dc.middle, 4) if dc_init else None
+        atr_val = self._atr_m5[sym].value if self._atr_m5[sym].initialized else None
         ema_diff_int = self._push_ema_diff_int(sym, ema9_m5, ema21_m5)
         # M1 ATR 从 registry 读（跨周期，预热期可能 None → mom_atr 返回 None）
         m1_atr_val = self._registry.get(sym, "m1", "atr") if self._registry else None
@@ -249,6 +267,12 @@ class M5IndicatorStrategy(Strategy):
             "nh_score": nh_score,
             "mom_atr": mom_atr,
             "ema_diff_int": ema_diff_int,
+            # 定势状态机字段（DC 通道 + EMA20 + ATR，状态机逻辑在前端 JS 重放）
+            "dc_upper": dc_upper,
+            "dc_lower": dc_lower,
+            "dc_mid": dc_mid,
+            "ema20": ema20_m5,
+            "atr": atr_val,
         }
         if is_premarket_chart_et(m5_raw["time"]):
             m5_bar["premarket"] = True
@@ -480,7 +504,7 @@ class M5IndicatorStrategy(Strategy):
 
         # 历史 M5 也刷新 indicators:active（让 flush 后为最新值）
         if is_rth(et) and m5_bar["st_dir"] in (1, -1) and m5_bar["st_value"]:
-            self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"])
+            self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"], m5_bar["atr"])
 
         self._hist_m5[sym].append(m5_bar)
         if is_premarket_et(et):
@@ -570,7 +594,7 @@ class M5IndicatorStrategy(Strategy):
 
             m5_bar = self._compute_m5_bar(sym, m5_raw)
             if is_rth(et) and m5_bar["st_dir"] in (1, -1) and m5_bar["st_value"]:
-                self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"])
+                self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"], m5_bar["atr"])
 
             m5_pub = self._attach_m1_snap_from_registry(sym, m5_bar)
             dedup_rpush_bar(self._redis, key_m5, m5_bar)
@@ -631,7 +655,7 @@ class M5IndicatorStrategy(Strategy):
 
         # indicators:active（M5 ST 冻结水平线）
         if is_rth_bar and m5_bar["st_dir"] in (1, -1) and m5_bar["st_value"]:
-            self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"])
+            self._write_indicators_active(sym, et, m5_bar["st_value"], m5_bar["st_dir"], m5_bar["dema20"], m5_bar["atr"])
 
         tag = "盘前" if is_pm_chart else "RTH"
         self.log.info(

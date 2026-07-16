@@ -1368,10 +1368,6 @@
       <!-- Toast 由 shared/toast.js 注入 #toast-container -->
       <div id="legend">
         <div class="legend-item">
-          <div class="legend-dot" style="background:#26a69a"></div>
-          <span style="color:#787b86">ST M1</span>
-        </div>
-        <div class="legend-item">
           <div class="legend-dot legend-dot-thick" style="background:#26a69a"></div>
           <span style="color:#787b86">ST M5</span>
         </div>
@@ -1380,8 +1376,8 @@
           <span style="color:#b388ff">DEMA20 M5</span>
         </div>
         <div class="legend-item">
-          <div class="legend-dot" style="background:#f59e0b;width:14px;"></div>
-          <span style="color:#f59e0b">VWAP M1</span>
+          <div class="legend-dot" style="background:#a78bfa;width:14px;"></div>
+          <span style="color:#a78bfa">DC 通道</span>
         </div>
       </div>
 
@@ -1389,135 +1385,54 @@
 
     <div id="right-panel">
 
-      <!-- 动量窗口（置顶）-->
-      <div class="ind-card">
-        <div class="ind-card-head">
-          <span class="dot" style="background:#f43f5e"></span>
-          动量窗口
-          <span class="ind-card-sub">(C₀−C₋²)÷ATR₁₄ 15m</span>
-          <span class="ind-chevron">▾</span>
-        </div>
-        <table class="ind-table">
-          <thead>
-            <tr>
-              <th>标的</th>
-              <th class="r">动量</th>
-              <th>强度</th>
-            </tr>
-          </thead>
-          <tbody id="ind-mom">
-            <tr>
-              <td colspan="3" class="ind-empty">加载中…</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- M1 ST 积分 -->
-      <div class="ind-card">
-        <div class="ind-card-head">
-          <span class="dot" style="background:#26a69a"></span>
-          M1 SuperTrend 积分
-          <span class="ind-card-sub">多+1/棒 空-1/棒</span>
-          <span class="ind-chevron">▾</span>
-        </div>
-        <table class="ind-table">
-          <thead>
-            <tr>
-              <th>标的</th>
-              <th class="r">积分</th>
-              <th>方向</th>
-            </tr>
-          </thead>
-          <tbody id="ind-m1">
-            <tr>
-              <td colspan="3" class="ind-empty">加载中…</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- M5 ST 积分 -->
-      <div class="ind-card">
-        <div class="ind-card-head">
-          <span class="dot" style="background:#60a5fa"></span>
-          M5 SuperTrend 积分
-          <span class="ind-card-sub">多+1/棒 空-1/棒</span>
-          <span class="ind-chevron">▾</span>
-        </div>
-        <table class="ind-table">
-          <thead>
-            <tr>
-              <th>标的</th>
-              <th class="r">积分</th>
-              <th>方向</th>
-            </tr>
-          </thead>
-          <tbody id="ind-m5">
-            <tr>
-              <td colspan="3" class="ind-empty">加载中…</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- EMA 偏离 -->
-      <div class="ind-card">
-        <div class="ind-card-head">
-          <span class="dot" style="background:#f59e0b"></span>
-          EMA 偏离积分
-          <span class="ind-card-sub">(M5收−EMA21)÷ATR₁₀</span>
-          <span class="ind-chevron">▾</span>
-        </div>
-        <table class="ind-table">
-          <thead>
-            <tr>
-              <th>标的</th>
-              <th class="r">偏离</th>
-              <th>位置</th>
-            </tr>
-          </thead>
-          <tbody id="ind-ema">
-            <tr>
-              <td colspan="3" class="ind-empty">加载中…</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- 日内连续新高 -->
-      <div class="ind-card">
+      <!-- 定势状态机（DC+ST+EMA20 四态，前端 if-else 重放，可追溯/可修正）-->
+      <div class="ind-card" id="trend-card">
         <div class="ind-card-head">
           <span class="dot" style="background:#a78bfa"></span>
-          日内连续新高
-          <span class="ind-card-sub">M5收盘创新高+1 跌破清零</span>
+          定势状态机
+          <span class="ind-card-sub" id="trend-sub">DC+ST+EMA20 四态</span>
           <span class="ind-chevron">▾</span>
         </div>
-        <table class="ind-table">
-          <thead>
-            <tr>
-              <th>标的</th>
-              <th class="r">连续次数</th>
-              <th>评价</th>
-            </tr>
-          </thead>
-          <tbody id="ind-nh">
-            <tr>
-              <td colspan="3" class="ind-empty">加载中…</td>
-            </tr>
-          </tbody>
-        </table>
+        <div class="trend-body">
+          <div id="trend-svg-wrap"></div>
+          <div class="trend-summary" id="trend-summary">—</div>
+          <div class="trend-history-wrap">
+            <div class="trend-history-title">
+              <span>转换历史 <span id="trend-hist-count">(0)</span></span>
+              <button id="trend-reset-btn" class="trend-btn">恢复自动</button>
+            </div>
+            <div id="trend-history" class="trend-history"></div>
+          </div>
+        </div>
       </div>
 
     </div><!-- /right-panel -->
   </div><!-- /main-area -->
   <div class="modal-backdrop" id="open-modal" style="display:none!important"></div>
 
+  <style>
+    .trend-body { padding: 8px 12px 12px; }
+    #trend-svg-wrap { margin-bottom: 6px; }
+    .trend-summary { padding: 4px 0 8px; border-bottom: 1px solid #2a2e3960; margin-bottom: 8px; }
+    .trend-history-wrap { font-size: 11px; }
+    .trend-history-title { color: #787b86; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+    .trend-btn { background: #2a2e39; color: #d1d4dc; border: 1px solid #363a45; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer; }
+    .trend-btn:hover { background: #363a45; }
+    .trend-history { max-height: 180px; overflow-y: auto; }
+    .trend-hist-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; }
+    .trend-hist-row:hover { background: #ffffff08; }
+    .trend-hist-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .trend-hist-txt { flex: 1; color: #d1d4dc; }
+    .trend-hist-time { color: #787b86; font-size: 10px; }
+    .trend-hist-empty { color: #787b86; padding: 4px 0; }
+  </style>
   <script src="/shared/api-auth.js"></script>
   <script src="/shared/alpha-copy.js"></script>
   <script src="/shared/approval-modal.js"></script>
   <script src="/shared/toast.js"></script>
   <script src="/shared/status-bar.js"></script>
+  <script src="/shared/trend-state-machine.js"></script>
+  <script src="/shared/trend-utils.js"></script>
   <script>
     // ─── 配置：从 URL ?symbol=XXX 读取标的，默认 QQQ ────────────────────
     const urlParams = new URLSearchParams(window.location.search);
@@ -1876,6 +1791,9 @@
     let currentPosition = null;   // 缓存当前仓位，供行情更新时刷新浮盈
     let orderMarkers = [];  // 订单生命周期标记全量存储（setMarkers 需完整数组，不支持增量追加）
     let signalMarkers = []; // 回踩触线标记（VWAP / M5 ST / DEMA20）
+    let trendMarkers = [];  // 定势状态机四态转换标记
+    let trendSM = null;     // TrendStateMachine 实例（前端重放）
+    let dcLines = { upper: null, lower: null, mid: null };  // 唐安琪通道 PriceLine
     const TOUCH_MARKER_LABEL = {
       pullback_vwap: 'VWAP',
       pullback_supertrend: 'ST',
@@ -1919,8 +1837,204 @@
 
     function refreshMarkers() {
       // 按时间升序排序后刷新（LWC 要求 markers 必须升序）
-      const merged = [...signalMarkers, ...sessionMarkers, ...orderMarkers].sort((a, b) => a.time - b.time);
+      const merged = [...signalMarkers, ...sessionMarkers, ...trendMarkers, ...orderMarkers].sort((a, b) => a.time - b.time);
       candleSeries.setMarkers(merged);
+    }
+
+    // ── 定势状态机（前端 if-else 重放，DC+ST+EMA20 四态，可追溯/可修正）──────
+    const TREND_PHASES = ['first_trend', 'first_pullback', 'second_trend', 'double_bottom'];
+    const TREND_NODE = {
+      unknown:        { x: 40,  y: 70, label: '起' },
+      first_trend:    { x: 120, y: 70, label: 'S1趋势' },
+      first_pullback: { x: 200, y: 70, label: 'S2回归' },
+      second_trend:   { x: 280, y: 70, label: 'S3二波' },
+      double_bottom:  { x: 200, y: 150, label: 'S4双底' },
+    };
+    const TREND_EDGES = [
+      ['unknown', 'first_trend'], ['first_trend', 'first_pullback'],
+      ['first_pullback', 'second_trend'], ['second_trend', 'unknown'],
+      ['unknown', 'double_bottom'], ['double_bottom', 'first_trend'],
+    ];
+
+    function trendToMarker(r) {
+      if (!r || !r.phase || r.phase === 'unknown') return null;
+      const info = window.TrendUtils.phaseInfo(r.phase, r.direction);
+      return {
+        time: r.barTime,
+        position: r.direction === 1 ? 'belowBar' : 'aboveBar',
+        color: info.color, shape: info.shape,
+        text: info.text || info.label, size: 2,
+      };
+    }
+
+    function clearDcLines() {
+      for (const k of ['upper', 'lower', 'mid']) {
+        if (dcLines[k]) { try { candleSeries.removePriceLine(dcLines[k]); } catch (_) {} dcLines[k] = null; }
+      }
+    }
+
+    function updateDcLines(bar) {
+      if (!bar || bar.dc_upper == null || bar.dc_lower == null) return;
+      clearDcLines();
+      dcLines.upper = candleSeries.createPriceLine({
+        price: bar.dc_upper, color: 'rgba(167,139,250,.6)', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `DC↑ ${bar.dc_upper.toFixed(2)}`,
+      });
+      dcLines.lower = candleSeries.createPriceLine({
+        price: bar.dc_lower, color: 'rgba(129,140,248,.6)', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `DC↓ ${bar.dc_lower.toFixed(2)}`,
+      });
+      if (bar.dc_mid != null) {
+        dcLines.mid = candleSeries.createPriceLine({
+          price: bar.dc_mid, color: 'rgba(120,123,134,.3)', lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: '',
+        });
+      }
+    }
+
+    function renderTrendSVG(r) {
+      const phase = r ? r.phase : 'unknown';
+      const dir = r ? r.direction : 0;
+      const nodes = ['unknown', ...TREND_PHASES];
+      let svg = `<svg viewBox="0 0 340 200" style="width:100%;height:200px">`;
+      for (const [a, b] of TREND_EDGES) {
+        const na = TREND_NODE[a], nb = TREND_NODE[b];
+        const dash = (b === 'unknown') ? '4,3' : '';
+        svg += `<line x1="${na.x}" y1="${na.y}" x2="${nb.x}" y2="${nb.y}" stroke="#2a2e39" stroke-width="1.2" stroke-dasharray="${dash}"/>`;
+      }
+      for (const key of nodes) {
+        const n = TREND_NODE[key];
+        const info = window.TrendUtils.phaseInfo(key, dir);
+        const active = key === phase;
+        const r0 = active ? 26 : 20;
+        const stroke = info.color;
+        const sw = active ? 3 : 1.5;
+        const fillOpa = active ? 0.85 : 0.25;
+        const txtOpa = active ? 1 : 0.55;
+        svg += `<circle cx="${n.x}" cy="${n.y}" r="${r0}" fill="${stroke}" fill-opacity="${fillOpa}" stroke="${stroke}" stroke-width="${sw}" style="cursor:pointer" onclick="window.trendSetState('${key}', ${dir || 1})"/>`;
+        const lblColor = active ? '#131722' : info.color;
+        svg += `<text x="${n.x}" y="${n.y + 4}" text-anchor="middle" font-size="${active ? 11 : 10}" font-weight="${active ? 700 : 500}" fill="${lblColor}" opacity="${txtOpa}" style="pointer-events:none">${n.label}</text>`;
+      }
+      svg += `</svg>`;
+      return svg;
+    }
+
+    function renderTrendSummary(r) {
+      const el = document.getElementById('trend-summary');
+      if (!r) { el.innerHTML = '—'; return; }
+      const info = window.TrendUtils.phaseInfo(r.phase, r.direction);
+      const dirTxt = r.direction === 1 ? '▲多' : r.direction === -1 ? '▼空' : '—';
+      const dc = r.dcUpper ? `DC ${r.dcLower?.toFixed(2)}~${r.dcUpper?.toFixed(2)}` : 'DC 预热中';
+      const w1 = r.wave1High != null ? `W1高 ${r.wave1High.toFixed(2)}` : (r.wave1Low != null ? `W1低 ${r.wave1Low.toFixed(2)}` : '');
+      const bot = r.bottomCount > 0 ? `触底${r.bottomCount}` : '';
+      const ov = r.overridden ? ' <span style="color:#f59e0b">[手动]</span>' : '';
+      el.innerHTML =
+        `<div style="font-size:16px;font-weight:700;color:${info.color}">${info.label} <span style="font-size:13px">${dirTxt}</span>${ov}</div>` +
+        `<div style="font-size:11px;color:#787b86;margin-top:4px">${dc} ${w1} ${bot}</div>`;
+    }
+
+    function fmtTrendTime(t) {
+      if (!t) return '手动';
+      const s = ((t % 86400) + 86400) % 86400;
+      return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
+    }
+
+    function renderTrendHistory() {
+      const hist = trendSM ? trendSM.getHistory() : [];
+      document.getElementById('trend-hist-count').textContent = `(${hist.length})`;
+      const wrap = document.getElementById('trend-history');
+      if (!hist.length) { wrap.innerHTML = '<div class="trend-hist-empty">无转换记录</div>'; return; }
+      wrap.innerHTML = hist.slice().reverse().map(h => {
+        const info = window.TrendUtils.phaseInfo(h.to, h.direction);
+        const fromLbl = TREND_NODE[h.from]?.label || h.from;
+        const toLbl = TREND_NODE[h.to]?.label || h.to;
+        const manual = h.manual ? '<span style="color:#f59e0b">✋</span>' : '';
+        return `<div class="trend-hist-row" onclick="window.trendJump(${h.time})">` +
+          `<span class="trend-hist-dot" style="background:${info.color}"></span>` +
+          `<span class="trend-hist-txt">${manual}${fromLbl}→<b style="color:${info.color}">${toLbl}</b></span>` +
+          `<span class="trend-hist-time">${fmtTrendTime(h.time)}</span></div>`;
+      }).join('');
+    }
+
+    function renderTrendAll() {
+      const r = trendSM ? trendSM.getState() : null;
+      document.getElementById('trend-svg-wrap').innerHTML = renderTrendSVG(r);
+      renderTrendSummary(r);
+      renderTrendHistory();
+    }
+
+    function applyTrendOverride() {
+      try {
+        const raw = localStorage.getItem(`trend:override:${SYMBOL}`);
+        if (!raw || !trendSM) return;
+        const ov = JSON.parse(raw);
+        if (ov && ov.phase) trendSM.setState(ov.phase, ov.direction || 1);
+      } catch (_) {}
+    }
+
+    function saveTrendOverride(phase, dir) {
+      try { localStorage.setItem(`trend:override:${SYMBOL}`, JSON.stringify({ phase, direction: dir, ts: Date.now() })); } catch (_) {}
+    }
+
+    function clearTrendOverride() {
+      try { localStorage.removeItem(`trend:override:${SYMBOL}`); } catch (_) {}
+      if (trendSM) {
+        trendSM.clearOverride();
+        trendSM.replay(currentM5Bars);
+        trendMarkers = [];
+        for (const h of trendSM.getHistory()) {
+          const m = trendToMarker({ phase: h.to, direction: h.direction, barTime: h.time });
+          if (m) trendMarkers.push(m);
+        }
+        renderTrendAll();
+        refreshMarkers();
+      }
+    }
+
+    window.trendSetState = function (phase, dir) {
+      if (!trendSM) return;
+      trendSM.setState(phase, dir);
+      saveTrendOverride(phase, dir);
+      renderTrendAll();
+      if (typeof showToast === 'function') showToast(`已手动设为 ${TREND_NODE[phase]?.label || phase}`, 'info');
+    };
+
+    window.trendJump = function (t) {
+      if (!t) return;
+      try { chart.timeScale().setVisibleRange({ from: t - 600, to: t + 600 }); } catch (_) {}
+    };
+
+    function initTrendState(m5Bars) {
+      if (!window.TrendStateMachine) return;
+      trendSM = new window.TrendStateMachine();
+      trendMarkers = [];
+      trendSM.replay(m5Bars || []);
+      for (const h of trendSM.getHistory()) {
+        const m = trendToMarker({ phase: h.to, direction: h.direction, barTime: h.time });
+        if (m) trendMarkers.push(m);
+      }
+      applyTrendOverride();
+      renderTrendAll();
+      refreshMarkers();
+      const last = (m5Bars && m5Bars.length) ? m5Bars[m5Bars.length - 1] : null;
+      if (last) updateDcLines(last);
+      const btn = document.getElementById('trend-reset-btn');
+      if (btn) btn.onclick = clearTrendOverride;
+    }
+
+    function onTrendBar(payload) {
+      if (!trendSM) return;
+      const r = trendSM.update(payload);
+      if (r.changed && r.phase !== 'unknown') {
+        const m = trendToMarker(r);
+        if (m && !trendMarkers.some(x => x.time === m.time && x.text === m.text)) trendMarkers.push(m);
+        renderTrendAll();
+        refreshMarkers();
+        const info = window.TrendUtils.phaseInfo(r.phase, r.direction);
+        speak(`${SYMBOL} 定势 ${info.label}`, true);
+      }
+      updateDcLines(payload);
+      if (r.overridden) renderTrendAll();
     }
 
     function addPositionLines(position) {
@@ -2205,29 +2319,20 @@
         document.getElementById("symbol-label").textContent = symbol;
         document.getElementById("loading").style.display = "none";
 
-        // K线
-        const ohlcData = m1_bars.map(b => ({
+        // K线（M5 周期）
+        currentM5Bars = m5_bars || [];
+        const ohlcData = currentM5Bars.map(b => ({
           time: b.time, open: b.open, high: b.high, low: b.low, close: b.close
         }));
         candleSeries.setData(ohlcData);
 
-        // M1 ST（细线）
-        createSegmentedST(m1_bars, {
-          lineWidth: ST_LINE_M1,
-          seriesList: stSeriesList,
-          labelTitle: IND_LABELS.ST_M1,
-        });
-
-        // M5 ST + DEMA20（粗 ST / 紫色 DEMA，铺到 M1 时间轴）
-        currentM5Bars = m5_bars || [];
-        const m5OnM1 = expandM5OntoM1(m1_bars, currentM5Bars);
+        // M5 ST（粗线，分段多空色）+ DEMA20（紫色）
         createSegmentedST(
-          m5OnM1.map(p => ({ time: p.time, st_value: p.st_value, st_dir: p.st_dir })),
+          currentM5Bars.map(p => ({ time: p.time, st_value: p.st_value, st_dir: p.st_dir })),
           { lineWidth: ST_LINE_M5, seriesList: stM5SeriesList, labelTitle: IND_LABELS.ST_M5 },
         );
-        mountM5Dema(m5OnM1);
-        mountVwapM1(m1_bars);
-        markRthOpenIfNeeded(m1_bars);
+        mountM5Dema(currentM5Bars);
+        markRthOpenIfNeeded(currentM5Bars);
         refreshMarkers();
         const lastM5Bar = currentM5Bars[currentM5Bars.length - 1];
         if (lastM5Bar) {
@@ -2237,6 +2342,7 @@
             dema20: lastM5Bar.dema20,
           };
         }
+        initTrendState(currentM5Bars);
 
         // 开盘区间（前15分钟 OR High / OR Low）— 暂时隐藏
         // addOpeningRange(m1_bars);
@@ -2756,10 +2862,6 @@
           // K 线 tick 实时推送（更新当前未完成 K 线）
           if (channel.startsWith("bars:1m:tick:")) {
             lastTickTime = payload.time;
-            candleSeries.update({
-              time: payload.time, open: payload.open,
-              high: payload.high, low: payload.low, close: payload.close,
-            });
             latestClose = payload.close;
             // 实时刷新浮盈（每个 tick 更新，不等到 kline:1m 收盘）
             if (currentPosition) {
@@ -2774,20 +2876,10 @@
 
           // K 线收盘（kline:1m:）——竞态防护：tick 已推进下一分钟则跳过 candleSeries.update
           if (channel.startsWith("kline:1m:")) {
-            if (payload.time >= lastTickTime) {
-              candleSeries.update({
-                time: payload.time, open: payload.open,
-                high: payload.high, low: payload.low, close: payload.close,
-              });
-            }
             latestClose = payload.close;
             const priceEl = document.getElementById("price-label");
             if (priceEl) priceEl.textContent = payload.close.toFixed(2);
-            if (payload.vwap != null && vwapM1Series) {
-              vwapM1Series.update({ time: payload.time, value: payload.vwap });
-            }
-            updateM5IndicatorsAt(payload.time);
-            // 行情变动时同步刷新仓位浮盈
+            // M5 主图模式下 M1 仅用于最新价/浮盈刷新（不更新 K 线）
             if (currentPosition && payload.symbol === SYMBOL) {
               currentPosition.unrealized_pnl =
                 (latestClose - (currentPosition.avg_px_open ?? currentPosition.entry_price)) *
@@ -2795,12 +2887,16 @@
                 (currentPosition.side === 'SHORT' ? -1 : 1);
               refreshPositionPanel(currentPosition);
             }
-            // 每根 K 线收盘后刷新右侧指标面板
-            loadIndicators();
           }
 
           // ── M5 K 线收盘 — 更新冻结 ST / DEMA20（策略水平线）+ M1 ST（M5 节奏）──
           if (channel.startsWith("kline:5m:")) {
+            // M5 主图：实时更新 K 线
+            candleSeries.update({
+              time: payload.time, open: payload.open,
+              high: payload.high, low: payload.low, close: payload.close,
+            });
+            latestClose = payload.close;
             if (payload.st_value != null || payload.dema20 != null) {
               m5Frozen = {
                 st_value: payload.st_value ?? m5Frozen?.st_value,
@@ -2809,27 +2905,7 @@
               };
               updateM5IndicatorsAt(payload.time);
             }
-            if (payload.m1_st_value != null && payload.m1_st_dir != null && payload.m1_st_value > 0) {
-              const prevSTDir = latestSTDir;
-              const m1t = payload.m1_bar_time ?? payload.time;
-              m1Frozen = { st_value: payload.m1_st_value, st_dir: payload.m1_st_dir };
-              latestST = payload.m1_st_value;
-              latestSTDir = payload.m1_st_dir;
-              if (prevSTDir !== null && payload.m1_st_dir !== prevSTDir) {
-                speak(`${SYMBOL} 一分钟超级趋势转${payload.m1_st_dir === 1 ? '向上' : '向下'}`, true);
-              }
-              if (payload.m1_st_dir !== stLastDir || stLastSeries === null) {
-                const color = payload.m1_st_dir === 1 ? ST_COLOR_BULL : ST_COLOR_BEAR;
-                stLastSeries = chart.addLineSeries({
-                  color, lineWidth: ST_LINE_M1,
-                  crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
-                });
-                stSeriesList.push(stLastSeries);
-                stLastDir = payload.m1_st_dir;
-                refreshSegmentLabels(stSeriesList, IND_LABELS.ST_M1);
-              }
-              stLastSeries.update({ time: m1t - (m1t % 300), value: payload.m1_st_value });
-            }
+            onTrendBar(payload);
             return;
           }
 
@@ -2938,6 +3014,7 @@
       </tr>`;
     }
     async function loadIndicators() {
+      if (!document.getElementById('ind-mom')) return;  // 右侧指标卡片已移除，无需拉取
       try {
         const res = await fetch('/api/indicators');
         if (!res.ok) return;
