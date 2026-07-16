@@ -718,7 +718,14 @@ class AutoPositionManager:
         open_u = [u for u in self._units.get(sym, []) if u.state != UnitState.CLOSED]
         if net == 0:
             if open_u:
-                self.reset_symbol(sym)
+                # 护栏：止损单仍活跃 → 疑似 FA 子账户盲区，启动恢复不撤止损防裸仓（同 reconcile）
+                if self._has_live_protective_stop(sym):
+                    self._host.log.warning(
+                        f"[PM-Recover] {sym}: net=0 但保护止损单仍活跃 "
+                        f"→ 疑似 FA 子账户盲区，不撤止损防裸仓；请人工核查 TWS"
+                    )
+                else:
+                    self.reset_symbol(sym)
             else:
                 self._clear_units_redis(sym)
             return False
@@ -736,6 +743,20 @@ class AutoPositionManager:
             return getattr(o.status, "name", "") if o else ""
         except Exception:
             return ""
+
+    def _has_live_protective_stop(self, sym: str) -> bool:
+        """本地单元的保护止损单是否仍有活跃（非终态）单。
+
+        reconcile 护栏用：若 portfolio 判 net=0 但止损单仍活跃，极可能是 FA 子账户
+        盲区——broker 真有仓位只是引擎持仓缓存看不见。此时撤掉止损 = 真实持仓变裸仓，
+        故只告警不撤，等人工核查或子账户可见性修复。"""
+        for u in self._units.get(sym, []):
+            if u.state == UnitState.CLOSED or not u.stop_coid:
+                continue
+            st = self._order_status(u.stop_coid)
+            if st and st not in TERMINAL_STATUS:
+                return True
+        return False
 
     def _validate_recovered(self, sym: str) -> None:
         for unit in list(self._units.get(sym, [])):
@@ -825,6 +846,14 @@ class AutoPositionManager:
                 self._host.log.info(f"[Reconcile] {sym}: 平仓单已成交，本地 PENDING_CLOSE → 清状态")
                 self._finalize_symbol_close(sym)
                 return "close_confirmed"
+            # 护栏：保护止损单仍活跃 → 疑似 FA 子账户盲区（broker 可能仍有仓引擎看不见），
+            # 撤了会变裸仓 → 只告警不撤，等人工核查。
+            if self._has_live_protective_stop(sym):
+                self._host.log.warning(
+                    f"[Reconcile] {sym}: broker net=0 但保护止损单仍活跃 "
+                    f"→ 疑似 FA 子账户盲区，不撤止损防裸仓；请人工核查 TWS 真实持仓"
+                )
+                return "protective_stop_guard"
             self._host.log.warning(
                 f"[Reconcile] {sym}: broker 已平但本地有 {len(open_u)} 单元 → 撤残单并重置"
             )
